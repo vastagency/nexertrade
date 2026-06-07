@@ -61,7 +61,7 @@ def get_bybit_balance():
     """
     try:
         balance  = bybit.fetch_balance()
-        usdt_bal = float(balance.get('USDT', {}).get('free', 0))
+        usdt_bal = float(balance.get('USDT', {}).get('total') or balance.get('USDT', {}).get('free') or 0)
         btc_bal  = float(balance.get('BTC', {}).get('free', 0))
         return {
             'USDT':  usdt_bal,
