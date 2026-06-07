@@ -94,6 +94,10 @@ def init_db():
             if not PlatformSetting.query.filter_by(key=key).first():
                 db.session.add(PlatformSetting(key=key, value=value))
 
+        # Force update min_deposit to 9 in live DB
+        existing = PlatformSetting.query.filter_by(key='min_deposit').first()
+        if existing:
+            existing.value = '9'
         db.session.commit()
 
 # ============================================
@@ -355,7 +359,7 @@ def api_deposit():
     data   = request.get_json()
     amount = float(data.get('amount', 0))
 
-    min_dep = float(get_setting('min_deposit', '10'))
+    min_dep = float(get_setting('min_deposit', '9'))
     max_dep = float(get_setting('max_deposit', '200'))
 
     if amount < min_dep or amount > max_dep:
@@ -569,7 +573,7 @@ def api_bot_execute():
         else:
             num_trades = 1
 
-        min_dep = float(get_setting('min_deposit', '10'))
+        min_dep = float(get_setting('min_deposit', '9'))
         max_dep = float(get_setting('max_deposit', '200'))
         if amount < min_dep or amount > max_dep:
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
