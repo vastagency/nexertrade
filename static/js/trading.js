@@ -56,7 +56,7 @@ if (tradeAmountInput) {
   tradeAmountInput.addEventListener('input', () => {
     if (isTrading) return;
     const val = parseInt(tradeAmountInput.value);
-    selectedAmount = isNaN(val) ? 50 : Math.min(200, Math.max(10, val));
+    selectedAmount = isNaN(val) ? 50 : Math.min(200, Math.max(9, val));
     document.querySelectorAll('.quick-btn').forEach(b => {
       b.classList.toggle('active', parseInt(b.dataset.amount) === selectedAmount);
     });

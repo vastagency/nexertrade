@@ -79,7 +79,7 @@ def init_db():
             db.session.add(admin)
 
         defaults = {
-            'min_deposit':           '10',
+            'min_deposit':           '9',
             'max_deposit':           '200',
             'max_users':             '10',
             'platform_fee':          '0',
