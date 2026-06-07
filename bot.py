@@ -32,11 +32,9 @@ bybit = ccxt.bybit({
     'enableRateLimit': True,
     'options': {
         'defaultType': TRADE_TYPE,
-        'recvWindow': 20000,
-        'fetchCurrencies': False,
+        'recvWindow': 20000
     }
 })
-bybit.load_markets = lambda reload=False, params={}: {}
 
 if USE_TESTNET:
     bybit.set_sandbox_mode(True)
