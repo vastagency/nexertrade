@@ -27,14 +27,16 @@ TRADE_TYPE       = os.getenv('BYBIT_TRADE_TYPE', 'spot')
 
 # Primary exchange — Bybit for real trading
 bybit = ccxt.bybit({
-    'apiKey':          BYBIT_API_KEY,
-    'secret':          BYBIT_API_SECRET,
+    'apiKey': BYBIT_API_KEY,
+    'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
     'options': {
         'defaultType': TRADE_TYPE,
-        'recvWindow':  20000
+        'recvWindow': 20000,
+        'fetchCurrencies': False,
     }
 })
+bybit.load_markets = lambda reload=False, params={}: {}
 
 if USE_TESTNET:
     bybit.set_sandbox_mode(True)
