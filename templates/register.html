@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Create Account</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/auth.css">
+</head>
+<body>
+
+  <canvas id="authCanvas"></canvas>
+  <div class="auth-overlay"></div>
+
+  <div class="auth-wrapper">
+
+    <a href="/" class="auth-logo">
+      <div class="logo-icon">
+        <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
+          <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+    </a>
+
+    <div class="auth-card">
+      <div class="auth-card-header">
+        <h1 class="auth-title">Create your account</h1>
+        <p class="auth-subtitle">Invite-only. You'll need a valid invite code.</p>
+      </div>
+
+      <div class="auth-form" id="registerForm">
+
+        <div class="form-group" id="group-name">
+          <label class="form-label">FULL NAME</label>
+          <div class="input-wrapper">
+            <input type="text" id="fullName" class="form-input" placeholder="Alex Smith" autocomplete="name"/>
+          </div>
+          <span class="form-error" id="error-name"></span>
+        </div>
+
+        <div class="form-group" id="group-email">
+          <label class="form-label">EMAIL</label>
+          <div class="input-wrapper">
+            <input type="email" id="email" class="form-input" placeholder="you@example.com" autocomplete="email"/>
+          </div>
+          <span class="form-error" id="error-email"></span>
+        </div>
+
+        <div class="form-group" id="group-password">
+          <label class="form-label">PASSWORD</label>
+          <div class="input-wrapper">
+            <input type="password" id="password" class="form-input" placeholder="At least 8 characters" autocomplete="new-password"/>
+            <button type="button" class="input-toggle" id="togglePassword">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <div class="password-strength" id="passwordStrength">
+            <div class="strength-bars">
+              <div class="strength-bar" id="bar1"></div>
+              <div class="strength-bar" id="bar2"></div>
+              <div class="strength-bar" id="bar3"></div>
+              <div class="strength-bar" id="bar4"></div>
+            </div>
+            <span class="strength-label" id="strengthLabel"></span>
+          </div>
+          <span class="form-error" id="error-password"></span>
+        </div>
+
+        <div class="form-group" id="group-confirm">
+          <label class="form-label">CONFIRM PASSWORD</label>
+          <div class="input-wrapper">
+            <input type="password" id="confirmPassword" class="form-input" placeholder="" autocomplete="new-password"/>
+            <button type="button" class="input-toggle" id="toggleConfirm">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <span class="form-error" id="error-confirm"></span>
+        </div>
+
+        <div class="form-group" id="group-invite">
+          <label class="form-label">INVITE CODE</label>
+          <div class="input-wrapper">
+            <input
+              type="text"
+              id="inviteCode"
+              class="form-input invite-input"
+              placeholder="NEX-XXXX-XXXX"
+              autocomplete="off"
+              maxlength="13"
+            />
+          </div>
+          <span class="form-error" id="error-invite"></span>
+        </div>
+
+        <button class="btn-submit" id="submitBtn" type="button">
+          <span id="submitText">Create account</span>
+          <div class="btn-spinner" id="btnSpinner"></div>
+        </button>
+
+        <div class="flash-message" id="flashMessage"></div>
+
+        <p class="auth-switch">
+          Already have an account? <a href="/login" class="auth-switch-link">Login</a>
+        </p>
+
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/static/js/auth.js"></script>
+</body>
+</html>

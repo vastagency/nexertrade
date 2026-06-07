@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Trade History</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <link rel="stylesheet" href="/static/css/history.css">
+</head>
+<body>
+
+  <nav class="dash-nav">
+    <div class="dash-nav-inner">
+      <div class="dash-nav-left">
+        <a href="/" class="dash-logo">
+          <div class="logo-icon">
+            <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
+              <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+        </a>
+        <ul class="dash-nav-links">
+          <li><a href="/dashboard" class="nav-link">Dashboard</a></li>
+          <li><a href="/trading"   class="nav-link">Trading</a></li>
+          <li><a href="/deposit"   class="nav-link">Deposit</a></li>
+          <li><a href="/withdraw"  class="nav-link">Withdraw</a></li>
+          <li><a href="/history"   class="nav-link active">History</a></li>
+        </ul>
+      </div>
+      <div class="dash-nav-right">
+        <button class="nav-icon-btn" id="notifBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          <span class="notif-dot"></span>
+        </button>
+        <div class="nav-user">
+          <div class="nav-user-avatar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+          <span class="nav-user-name">{{ user.name.split()[0] }}</span>
+        </div>
+        <a href="/logout" class="nav-icon-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="dash-main">
+
+    <div class="history-header-row">
+      <div>
+        <h1 class="page-title">Trade History</h1>
+        <p class="page-subtitle">Every session, every trade, fully logged.</p>
+      </div>
+      <button class="btn-export" id="exportBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        Export CSV
+      </button>
+    </div>
+
+    <div class="filter-card">
+      <div class="filter-group">
+        <label class="filter-label">DATE FROM</label>
+        <input type="date" id="filterDateFrom" class="filter-input"/>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">DATE TO</label>
+        <input type="date" id="filterDateTo" class="filter-input"/>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">RESULT</label>
+        <select id="filterResult" class="filter-select">
+          <option value="all">All</option>
+          <option value="profit">Profit</option>
+          <option value="loss">Loss</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label class="filter-label">TIMEFRAME</label>
+        <select id="filterTimeframe" class="filter-select">
+          <option value="all">All</option>
+          <option value="1">1m</option>
+          <option value="2">2m</option>
+          <option value="5">5m</option>
+          <option value="10">10m</option>
+        </select>
+      </div>
+      <button class="btn-clear-filters" id="clearFiltersBtn">Clear</button>
+    </div>
+
+    <div class="history-table-card">
+      <div class="history-table-wrapper">
+        <table class="history-table" id="historyTable">
+          <thead>
+            <tr>
+              <th>DATE</th>
+              <th>TIMEFRAME</th>
+              <th>AMOUNT</th>
+              <th>TRADES</th>
+              <th>W/L</th>
+              <th>PNL</th>
+              <th>WIN RATE</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            {% if sessions %}
+              {% for s in sessions %}
+              <tr
+                data-date="{{ s.started_at.strftime('%Y-%m-%d') }}"
+                data-pnl="{{ s.net_pnl }}"
+                data-timeframe="{{ s.timeframe }}"
+              >
+                <td class="mono">{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td><span class="tf-badge">{{ s.timeframe }}m</span></td>
+                <td class="mono">${{ "%.2f"|format(s.amount) }}</td>
+                <td class="mono">{{ s.total_trades }}</td>
+                <td>
+                  <span class="wl-cell">
+                    <span class="wl-wins">{{ s.wins }}</span>
+                    <span class="wl-sep">/</span>
+                    <span class="wl-losses">{{ s.losses }}</span>
+                  </span>
+                </td>
+                <td class="{{ 'pnl-positive' if s.net_pnl >= 0 else 'pnl-negative' }}">
+                  {{ '+' if s.net_pnl >= 0 else '' }}${{ "%.2f"|format(s.net_pnl) }}
+                </td>
+                <td class="mono">{{ s.win_rate | int }}%</td>
+              </tr>
+              {% endfor %}
+            {% else %}
+              <tr id="noDataRow">
+                <td colspan="7" style="text-align:center;color:var(--text-secondary);padding:40px;">
+                  No trading sessions yet. <a href="/trading" style="color:var(--accent-gold);">Start trading</a>
+                </td>
+              </tr>
+            {% endif %}
+          </tbody>
+          <tfoot>
+            <tr class="table-footer-row">
+              <td colspan="5" class="footer-label">Total profit across all sessions</td>
+              <td colspan="2" class="footer-total mono {{ 'positive' if total_profit >= 0 else 'negative' }}" id="totalProfitCell">
+                {{ '+' if total_profit >= 0 else '' }}${{ "%.2f"|format(total_profit) }}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div class="history-empty" id="historyEmpty" style="display:none;">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#4B5563" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+        </svg>
+        <p>No sessions match your filters.</p>
+        <button class="btn-clear-filters" onclick="clearFilters()">Clear filters</button>
+      </div>
+    </div>
+
+  </main>
+
+  <script src="/static/js/history.js"></script>
+  <script src="/static/js/realtime.js"></script>
+</body>
+</html>

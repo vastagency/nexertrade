@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/auth.css">
+</head>
+<body>
+
+  <canvas id="authCanvas"></canvas>
+  <div class="auth-overlay"></div>
+
+  <div class="auth-wrapper">
+
+    <a href="/" class="auth-logo">
+      <div class="logo-icon">
+        <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
+          <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+    </a>
+
+    <div class="auth-card">
+      <div class="auth-card-header">
+        <h1 class="auth-title">Welcome back</h1>
+        <p class="auth-subtitle">Login to access your dashboard.</p>
+      </div>
+
+      <div class="auth-form" id="loginForm">
+
+        <div class="form-group" id="group-login-email">
+          <label class="form-label">EMAIL</label>
+          <div class="input-wrapper">
+            <input type="email" id="loginEmail" class="form-input" placeholder="you@example.com" autocomplete="email"/>
+          </div>
+          <span class="form-error" id="error-login-email"></span>
+        </div>
+
+        <div class="form-group" id="group-login-password">
+          <label class="form-label">PASSWORD</label>
+          <div class="input-wrapper">
+            <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" autocomplete="current-password"/>
+            <button type="button" class="input-toggle" id="toggleLoginPassword">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <span class="form-error" id="error-login-password"></span>
+        </div>
+
+        <div class="login-meta-row">
+          <div class="remember-row">
+            <input type="checkbox" id="rememberMe"/>
+            <label for="rememberMe">Remember me</label>
+          </div>
+          <a href="/forgot-password" class="forgot-link-inline">Forgot password?</a>
+        </div>
+
+        <button class="btn-submit" id="loginBtn" type="button">
+          <span id="submitText">Login</span>
+          <div class="btn-spinner" id="btnSpinner"></div>
+        </button>
+
+        <div class="flash-message" id="flashMessage"></div>
+
+        <p class="auth-switch">
+          Don't have an account? <a href="/register" class="auth-switch-link">Register</a>
+        </p>
+
+      </div>
+    </div>
+
+  </div>
+
+  <script src="/static/js/auth.js"></script>
+</body>
+</html>

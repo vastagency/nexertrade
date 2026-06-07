@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Trading</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+  <link rel="stylesheet" href="/static/css/trading.css">
+</head>
+<body>
+
+  <nav class="dash-nav">
+    <div class="dash-nav-inner">
+      <div class="dash-nav-left">
+        <a href="/" class="dash-logo">
+          <div class="logo-icon">
+            <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
+              <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+        </a>
+        <ul class="dash-nav-links">
+          <li><a href="/dashboard" class="nav-link">Dashboard</a></li>
+          <li><a href="/trading"   class="nav-link active">Trading</a></li>
+          <li><a href="/deposit"   class="nav-link">Deposit</a></li>
+          <li><a href="/withdraw"  class="nav-link">Withdraw</a></li>
+          <li><a href="/history"   class="nav-link">History</a></li>
+        </ul>
+      </div>
+      <div class="dash-nav-right">
+        <button class="nav-icon-btn" id="notifBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          <span class="notif-dot"></span>
+        </button>
+        <div class="nav-user">
+          <div class="nav-user-avatar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+          <span class="nav-user-name">{{ user.name.split()[0] }}</span>
+        </div>
+        <a href="/logout" class="nav-icon-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="dash-main">
+
+    <div class="trading-header-row">
+      <div>
+        <h1 class="page-title">Trading</h1>
+        <p class="page-subtitle">Pick a timeframe, set an amount, hit start. The bot handles the rest.</p>
+      </div>
+      <div class="balance-badge">
+        <span class="balance-label">Available balance</span>
+        <span class="balance-value mono" id="availableBalance">${{ "%.2f"|format(user.balance) }}</span>
+      </div>
+    </div>
+
+    <div class="setup-card" id="setupCard">
+
+      <div class="setup-section">
+        <label class="setup-label">TIMEFRAME</label>
+        <div class="timeframe-buttons">
+          <button class="tf-btn" data-minutes="1">1 min</button>
+          <button class="tf-btn" data-minutes="2">2 min</button>
+          <button class="tf-btn active" data-minutes="5">5 min</button>
+          <button class="tf-btn" data-minutes="10">10 min</button>
+        </div>
+      </div>
+
+      <div class="amount-action-row">
+        <div class="setup-section amount-section">
+          <label class="setup-label">AMOUNT TO TRADE ($10 – $200)</label>
+          <div class="amount-row">
+            <div class="amount-input-box">
+              <span class="amount-sign">$</span>
+              <input
+                type="number"
+                id="tradeAmount"
+                class="trade-amount-input"
+                value="50"
+                min="10"
+                max="200"
+                placeholder="50"
+              />
+            </div>
+            <div class="quick-amounts">
+              <button class="quick-btn" data-amount="10">$10</button>
+              <button class="quick-btn" data-amount="25">$25</button>
+              <button class="quick-btn active" data-amount="50">$50</button>
+              <button class="quick-btn" data-amount="100">$100</button>
+              <button class="quick-btn" data-amount="200">$200</button>
+            </div>
+          </div>
+        </div>
+
+        <button class="btn-start-trading" id="mainActionBtn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" id="actionBtnIcon">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          <span id="actionBtnText">START TRADING</span>
+        </button>
+      </div>
+
+    </div>
+
+    <div class="session-panel" id="sessionPanel" style="display:none;">
+
+      <div class="session-header">
+        <div class="session-status-left">
+          <div class="session-icon" id="sessionIcon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#00D48B" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+          </div>
+          <div class="session-status-text">
+            <span class="session-status-title" id="sessionStatusTitle">Waiting for signal...</span>
+            <span class="session-status-sub" id="sessionStatusSub">Timeframe: 5 min · Amount: $50</span>
+          </div>
+        </div>
+        <div class="session-timer mono" id="sessionTimer">05:00</div>
+      </div>
+
+      <div class="session-progress-track">
+        <div class="session-progress-bar" id="sessionProgressBar"></div>
+      </div>
+
+      <div class="session-stats">
+        <div class="session-stat">
+          <span class="session-stat-label">TRADES</span>
+          <span class="session-stat-value mono" id="statTrades">0/10</span>
+        </div>
+        <div class="session-stat">
+          <span class="session-stat-label">WINS</span>
+          <div class="session-stat-with-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00D48B" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+            <span class="session-stat-value mono positive" id="statWins">0</span>
+          </div>
+        </div>
+        <div class="session-stat">
+          <span class="session-stat-label">LOSSES</span>
+          <div class="session-stat-with-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF4D4D" stroke-width="2"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></svg>
+            <span class="session-stat-value mono negative" id="statLosses">0</span>
+          </div>
+        </div>
+        <div class="session-stat">
+          <span class="session-stat-label">SESSION PNL</span>
+          <span class="session-stat-value mono positive large" id="statPnl">+$0.00</span>
+        </div>
+      </div>
+
+      <div class="live-chart-section">
+        <div class="live-chart-header">
+          <span class="live-chart-label" id="liveChartLabel">
+            <span class="live-dot"></span>
+            Live · BTC/USD
+          </span>
+          <span class="live-chart-price mono" id="liveChartPrice">0.00</span>
+        </div>
+        <div class="live-chart-wrapper">
+          <canvas id="liveChart"></canvas>
+        </div>
+      </div>
+
+      <div class="trade-stream-section">
+        <p class="trade-stream-label">TRADE STREAM</p>
+        <div class="trade-stream-list" id="tradeStreamList">
+          <p class="trade-stream-empty">Waiting for first trade...</p>
+        </div>
+      </div>
+
+      <div class="session-summary" id="sessionSummary" style="display:none;">
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="summary-label">TOTAL TRADES</span>
+            <span class="summary-value mono" id="summaryTrades">0</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">WINS / LOSSES</span>
+            <span class="summary-value mono" id="summaryWL">0 / 0</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">NET PNL</span>
+            <span class="summary-value mono positive" id="summaryPnl">+$0.00</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">UPDATED BALANCE</span>
+            <span class="summary-value mono gold" id="summaryBalance">$0.00</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">WIN RATE</span>
+            <span class="summary-value mono" id="summaryWinRate">0%</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">AVG TRADE</span>
+            <span class="summary-value mono" id="summaryAvg">$0.00</span>
+          </div>
+        </div>
+        <div class="summary-actions">
+          <button class="btn-new-session" id="newSessionBtn">Start New Session</button>
+          <a href="/withdraw" class="btn-withdraw-profit">Withdraw Profit</a>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <script>
+    window.USER_BALANCE = {{ user.balance }};
+  </script>
+  <script src="/static/js/trading.js"></script>
+  <script src="/static/js/realtime.js"></script>
+</body>
+</html>

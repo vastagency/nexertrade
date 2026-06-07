@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Admin Panel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+
+  <!-- ========== SIDEBAR ========== -->
+  <aside class="admin-sidebar" id="adminSidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">
+        <svg width="20" height="20" viewBox="0 0 28 28" fill="none">
+          <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+      <span class="admin-badge">ADMIN</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="sidebar-section-label">OVERVIEW</div>
+      <a href="#" class="sidebar-link active" data-page="overview">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        Overview
+      </a>
+
+      <div class="sidebar-section-label">MANAGEMENT</div>
+      <a href="#" class="sidebar-link" data-page="users">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Users
+        <span class="sidebar-badge" id="sidebarUserBadge">10</span>
+      </a>
+      <a href="#" class="sidebar-link" data-page="deposits">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Deposits
+        <span class="sidebar-badge warning" id="sidebarDepositBadge">3</span>
+      </a>
+      <a href="#" class="sidebar-link" data-page="withdrawals">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Withdrawals
+        <span class="sidebar-badge warning" id="sidebarWithdrawBadge">2</span>
+      </a>
+
+      <div class="sidebar-section-label">MONITORING</div>
+      <a href="#" class="sidebar-link" data-page="sessions">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        Live Sessions
+        <span class="sidebar-badge live" id="sidebarSessionBadge">2</span>
+      </a>
+      <a href="#" class="sidebar-link" data-page="reports">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Reports
+      </a>
+
+      <div class="sidebar-section-label">SYSTEM</div>
+      <a href="#" class="sidebar-link" data-page="settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Platform Settings
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <a href="/dashboard" class="sidebar-back-link">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        Back to Platform
+      </a>
+      <a href="/logout" class="sidebar-logout">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        Logout
+      </a>
+    </div>
+  </aside>
+
+  <!-- ========== MAIN AREA ========== -->
+  <div class="admin-main">
+
+    <!-- Top Bar -->
+    <header class="admin-topbar">
+      <div class="topbar-left">
+        <button class="sidebar-toggle" id="sidebarToggle">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <h1 class="admin-page-title" id="adminPageTitle">Overview</h1>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-time mono" id="topbarTime"></div>
+        <div class="topbar-admin">
+          <div class="topbar-avatar">A</div>
+          <span>Admin</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ========== PAGE: OVERVIEW ========== -->
+    <div class="admin-page active" id="page-overview">
+      <div class="admin-content">
+
+        <!-- Stat Cards -->
+        <div class="admin-stats-grid">
+  <div class="admin-stat-card">
+    <div class="admin-stat-icon blue">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    </div>
+    <div>
+      <p class="admin-stat-label">TOTAL USERS</p>
+      <h2 class="admin-stat-value" id="overviewTotalUsers">10</h2>
+      <p class="admin-stat-sub" id="overviewUserSub">8 active · 2 inactive</p>
+    </div>
+  </div>
+  <div class="admin-stat-card">
+    <div class="admin-stat-icon gold">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+    </div>
+    <div>
+      <p class="admin-stat-label">PLATFORM VOLUME</p>
+      <h2 class="admin-stat-value mono" id="overviewVolume">$12,480</h2>
+      <p class="admin-stat-sub positive">+$840 this week</p>
+    </div>
+  </div>
+  <div class="admin-stat-card">
+    <div class="admin-stat-icon green">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
+    </div>
+    <div>
+      <p class="admin-stat-label">TOTAL PROFITS GENERATED</p>
+      <h2 class="admin-stat-value mono positive" id="overviewProfit">$940.80</h2>
+      <p class="admin-stat-sub positive">Across all users</p>
+    </div>
+  </div>
+  <div class="admin-stat-card">
+    <div class="admin-stat-icon red">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/></svg>
+    </div>
+    <div>
+      <p class="admin-stat-label">TOTAL WITHDRAWALS</p>
+      <h2 class="admin-stat-value mono" id="overviewWithdrawn">$400.00</h2>
+      <p class="admin-stat-sub neutral">5 processed</p>
+    </div>
+  </div>
+  <div class="admin-stat-card">
+    <div class="admin-stat-icon" style="background: rgba(168,85,247,0.15); color: #a855f7;">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    </div>
+    <div>
+      <p class="admin-stat-label">ADMIN EARNINGS (FEES)</p>
+      <h2 class="admin-stat-value mono" style="color: #a855f7;">${{ "%.2f"|format(total_earned) }}</h2>
+      <p class="admin-stat-sub" style="color: #a855f7;">From withdrawal fees</p>
+    </div>
+  </div>
+</div>
+
+        <!-- Bottom Row -->
+        <div class="admin-bottom-grid">
+
+          <!-- Recent Activity -->
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Recent Activity</h3>
+              <span class="admin-card-sub">Last 24 hours</span>
+            </div>
+            <div class="activity-list">
+              <div class="activity-item">
+                <div class="activity-dot green"></div>
+                <div class="activity-text">
+                  <span class="activity-main">Alex completed a 5min trading session</span>
+                  <span class="activity-time">2 mins ago</span>
+                </div>
+                <span class="activity-pnl positive">+$4.21</span>
+              </div>
+              <div class="activity-item">
+                <div class="activity-dot gold"></div>
+                <div class="activity-text">
+                  <span class="activity-main">Sarah submitted a withdrawal request</span>
+                  <span class="activity-time">14 mins ago</span>
+                </div>
+                <span class="activity-pnl neutral">$25.00</span>
+              </div>
+              <div class="activity-item">
+                <div class="activity-dot blue"></div>
+                <div class="activity-text">
+                  <span class="activity-main">James made a deposit</span>
+                  <span class="activity-time">32 mins ago</span>
+                </div>
+                <span class="activity-pnl neutral">$100.00</span>
+              </div>
+              <div class="activity-item">
+                <div class="activity-dot green"></div>
+                <div class="activity-text">
+                  <span class="activity-main">Mike completed a 1min trading session</span>
+                  <span class="activity-time">1 hour ago</span>
+                </div>
+                <span class="activity-pnl positive">+$1.84</span>
+              </div>
+              <div class="activity-item">
+                <div class="activity-dot red"></div>
+                <div class="activity-text">
+                  <span class="activity-main">Lisa's deposit pending confirmation</span>
+                  <span class="activity-time">2 hours ago</span>
+                </div>
+                <span class="activity-pnl neutral">$50.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Top Users -->
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Top Users by Profit</h3>
+              <button class="admin-card-action" data-page="users">View all</button>
+            </div>
+            <div class="top-users-list">
+              <div class="top-user-row">
+                <div class="top-user-rank">1</div>
+                <div class="top-user-info">
+                  <span class="top-user-name">Alex Smith</span>
+                  <span class="top-user-sessions">18 sessions</span>
+                </div>
+                <span class="top-user-profit positive mono">+$94.40</span>
+              </div>
+              <div class="top-user-row">
+                <div class="top-user-rank">2</div>
+                <div class="top-user-info">
+                  <span class="top-user-name">Sarah Johnson</span>
+                  <span class="top-user-sessions">14 sessions</span>
+                </div>
+                <span class="top-user-profit positive mono">+$72.20</span>
+              </div>
+              <div class="top-user-row">
+                <div class="top-user-rank">3</div>
+                <div class="top-user-info">
+                  <span class="top-user-name">James Williams</span>
+                  <span class="top-user-sessions">11 sessions</span>
+                </div>
+                <span class="top-user-profit positive mono">+$58.80</span>
+              </div>
+              <div class="top-user-row">
+                <div class="top-user-rank">4</div>
+                <div class="top-user-info">
+                  <span class="top-user-name">Mike Brown</span>
+                  <span class="top-user-sessions">9 sessions</span>
+                </div>
+                <span class="top-user-profit positive mono">+$41.60</span>
+              </div>
+              <div class="top-user-row">
+                <div class="top-user-rank">5</div>
+                <div class="top-user-info">
+                  <span class="top-user-name">Lisa Davis</span>
+                  <span class="top-user-sessions">7 sessions</span>
+                </div>
+                <span class="top-user-profit positive mono">+$28.40</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+        <!-- Admin Earnings Log -->
+<div class="admin-card" style="margin-top: 1.5rem;">
+  <div class="admin-card-header">
+    <h3 class="admin-card-title">Fee Earnings Log</h3>
+    <span class="admin-card-sub" style="color: #a855f7;">Total: ${{ "%.2f"|format(total_earned) }}</span>
+  </div>
+  <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+    <thead>
+      <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+        <th style="text-align:left; padding: 0.5rem 0.75rem;">DATE</th>
+        <th style="text-align:left; padding: 0.5rem 0.75rem;">DESCRIPTION</th>
+        <th style="text-align:right; padding: 0.5rem 0.75rem;">AMOUNT</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if earnings %}
+        {% for e in earnings %}
+        <tr style="border-bottom: 1px solid var(--border);">
+          <td style="padding: 0.6rem 0.75rem; color: var(--text-muted);">{{ e.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td style="padding: 0.6rem 0.75rem;">{{ e.description }}</td>
+          <td style="padding: 0.6rem 0.75rem; text-align:right; color: #a855f7; font-family: monospace;">+${{ "%.4f"|format(e.amount) }}</td>
+        </tr>
+        {% endfor %}
+      {% else %}
+        <tr><td colspan="3" style="padding: 1rem 0.75rem; color: var(--text-muted); text-align:center;">No earnings yet</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: USERS ========== -->
+    <div class="admin-page" id="page-users">
+      <div class="admin-content">
+        <div class="admin-card">
+          <div class="admin-card-header">
+            <h3 class="admin-card-title">All Users</h3>
+            <div class="admin-card-actions-row">
+              <input type="text" class="admin-search" id="userSearch" placeholder="Search users..."/>
+            </div>
+          </div>
+          <div class="admin-table-wrapper">
+            <table class="admin-table" id="usersTable">
+              <thead>
+                <tr>
+                  <th>USER</th>
+                  <th>EMAIL</th>
+                  <th>BALANCE</th>
+                  <th>TOTAL PROFIT</th>
+                  <th>SESSIONS</th>
+                  <th>STATUS</th>
+                  <th>JOINED</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="usersTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: DEPOSITS ========== -->
+    <div class="admin-page" id="page-deposits">
+      <div class="admin-content">
+        <div class="admin-card">
+          <div class="admin-card-header">
+            <h3 class="admin-card-title">Deposit Management</h3>
+            <div class="admin-card-actions-row">
+              <select class="admin-filter-select" id="depositFilter">
+                <option value="all">All Deposits</option>
+                <option value="pending">Pending</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="rejected">Rejected</option>
+              </select>
+            </div>
+          </div>
+          <div class="admin-table-wrapper">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>DATE</th>
+                  <th>USER</th>
+                  <th>AMOUNT</th>
+                  <th>TX HASH</th>
+                  <th>STATUS</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="depositsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: WITHDRAWALS ========== -->
+    <div class="admin-page" id="page-withdrawals">
+      <div class="admin-content">
+        <div class="admin-card">
+          <div class="admin-card-header">
+            <h3 class="admin-card-title">Withdrawal Management</h3>
+            <div class="admin-card-actions-row">
+              <select class="admin-filter-select" id="withdrawFilter">
+                <option value="all">All Withdrawals</option>
+                <option value="pending">Pending</option>
+                <option value="processed">Processed</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+          </div>
+          <div class="admin-table-wrapper">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>DATE</th>
+                  <th>USER</th>
+                  <th>AMOUNT</th>
+                  <th>WALLET</th>
+                  <th>STATUS</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="withdrawalsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: LIVE SESSIONS ========== -->
+    <div class="admin-page" id="page-sessions">
+      <div class="admin-content">
+        <div class="sessions-status-row">
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">ACTIVE SESSIONS</p>
+              <h2 class="admin-stat-value" id="activeSessionCount">2</h2>
+            </div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon gold">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">USERS ONLINE</p>
+              <h2 class="admin-stat-value">3</h2>
+            </div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon blue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">SESSIONS TODAY</p>
+              <h2 class="admin-stat-value">8</h2>
+            </div>
+          </div>
+        </div>
+        <div class="admin-card">
+          <div class="admin-card-header">
+            <h3 class="admin-card-title">Active Trading Sessions</h3>
+            <span class="live-indicator"><span class="live-dot"></span>Live</span>
+          </div>
+          <div class="admin-table-wrapper">
+            <table class="admin-table">
+              <thead>
+                <tr>
+                  <th>USER</th>
+                  <th>TIMEFRAME</th>
+                  <th>AMOUNT</th>
+                  <th>TRADES</th>
+                  <th>PNL</th>
+                  <th>TIME LEFT</th>
+                  <th>ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="sessionsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: REPORTS ========== -->
+    <div class="admin-page" id="page-reports">
+      <div class="admin-content">
+        <div class="admin-stats-grid">
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon green">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">AVG WIN RATE</p>
+              <h2 class="admin-stat-value" id="reportAvgWinRate">74%</h2>
+              <p class="admin-stat-sub positive">Across all users</p>
+            </div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon gold">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">AVG SESSION DURATION</p>
+              <h2 class="admin-stat-value" id="reportAvgDuration">4.2 min</h2>
+              <p class="admin-stat-sub neutral">Per session</p>
+            </div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon blue">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">TOTAL SESSIONS</p>
+              <h2 class="admin-stat-value" id="reportTotalSessions">142</h2>
+              <p class="admin-stat-sub positive">+12 this week</p>
+            </div>
+          </div>
+          <div class="admin-stat-card">
+            <div class="admin-stat-icon red">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+            </div>
+            <div>
+              <p class="admin-stat-label">LOSS SESSIONS</p>
+              <h2 class="admin-stat-value" id="reportLossSessions">37</h2>
+              <p class="admin-stat-sub neutral">26% of total</p>
+            </div>
+          </div>
+        </div>
+        <div class="admin-bottom-grid">
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Platform Revenue Chart</h3>
+              <div class="chart-tabs">
+                <button class="chart-tab active" data-range="7D">7D</button>
+                <button class="chart-tab" data-range="1M">1M</button>
+                <button class="chart-tab" data-range="All">All</button>
+              </div>
+            </div>
+            <div class="admin-chart-wrapper">
+              <canvas id="adminRevenueChart"></canvas>
+            </div>
+          </div>
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Most Traded Pairs</h3>
+            </div>
+            <div class="pairs-list">
+              <div class="pairs-row">
+                <span class="pairs-name mono">BTC/USD</span>
+                <div class="pairs-bar-wrap"><div class="pairs-bar" style="width:82%"></div></div>
+                <span class="pairs-pct">82%</span>
+              </div>
+              <div class="pairs-row">
+                <span class="pairs-name mono">ETH/USD</span>
+                <div class="pairs-bar-wrap"><div class="pairs-bar" style="width:64%"></div></div>
+                <span class="pairs-pct">64%</span>
+              </div>
+              <div class="pairs-row">
+                <span class="pairs-name mono">EUR/USD</span>
+                <div class="pairs-bar-wrap"><div class="pairs-bar" style="width:48%"></div></div>
+                <span class="pairs-pct">48%</span>
+              </div>
+              <div class="pairs-row">
+                <span class="pairs-name mono">GBP/USD</span>
+                <div class="pairs-bar-wrap"><div class="pairs-bar" style="width:35%"></div></div>
+                <span class="pairs-pct">35%</span>
+              </div>
+              <div class="pairs-row">
+                <span class="pairs-name mono">SOL/USD</span>
+                <div class="pairs-bar-wrap"><div class="pairs-bar" style="width:28%"></div></div>
+                <span class="pairs-pct">28%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== PAGE: SETTINGS ========== -->
+    <div class="admin-page" id="page-settings">
+      <div class="admin-content">
+        <div class="admin-settings-grid">
+
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Platform Rules</h3>
+            </div>
+            <div class="admin-settings-fields">
+              <div class="admin-settings-field">
+                <label class="admin-settings-label">MINIMUM DEPOSIT ($)</label>
+                <input type="number" class="admin-settings-input" id="minDeposit" value="10"/>
+              </div>
+              <div class="admin-settings-field">
+                <label class="admin-settings-label">MAXIMUM DEPOSIT ($)</label>
+                <input type="number" class="admin-settings-input" id="maxDeposit" value="200"/>
+              </div>
+              <div class="admin-settings-field">
+                <label class="admin-settings-label">MAX USERS ALLOWED</label>
+                <input type="number" class="admin-settings-input" id="maxUsers" value="10"/>
+              </div>
+              <div class="admin-settings-field">
+                <label class="admin-settings-label">PLATFORM FEE (%)</label>
+                <input type="number" class="admin-settings-input" id="platformFee" value="0" min="0" max="10"/>
+              </div>
+            </div>
+            <button class="admin-btn-save" id="saveRulesBtn">Save Rules</button>
+            <span class="admin-save-feedback" id="rulesFeedback"></span>
+          </div>
+
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Invite Codes</h3>
+            </div>
+            <div class="invite-codes-list" id="inviteCodesList">
+              <div class="invite-code-row">
+                <span class="invite-code mono">NEX-A1B2-C3D4</span>
+                <span class="invite-code-status used">Used</span>
+                <button class="invite-code-revoke">Revoke</button>
+              </div>
+              <div class="invite-code-row">
+                <span class="invite-code mono">NEX-E5F6-G7H8</span>
+                <span class="invite-code-status active">Active</span>
+                <button class="invite-code-revoke">Revoke</button>
+              </div>
+              <div class="invite-code-row">
+                <span class="invite-code mono">NEX-I9J0-K1L2</span>
+                <span class="invite-code-status active">Active</span>
+                <button class="invite-code-revoke">Revoke</button>
+              </div>
+            </div>
+            <button class="admin-btn-generate" id="generateCodeBtn">+ Generate New Code</button>
+          </div>
+
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">Registration Control</h3>
+            </div>
+            <div class="admin-toggle-row">
+              <div>
+                <p class="admin-toggle-title">Allow New Registrations</p>
+                <p class="admin-toggle-sub">When disabled, no new users can register even with a valid invite code.</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="allowRegistrations" checked/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="admin-toggle-row">
+              <div>
+                <p class="admin-toggle-title">Maintenance Mode</p>
+                <p class="admin-toggle-sub">Displays a maintenance page to all non-admin users.</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="maintenanceMode"/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="admin-toggle-row">
+              <div>
+                <p class="admin-toggle-title">Auto-approve Deposits</p>
+                <p class="admin-toggle-sub">Automatically confirms deposits without manual review.</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="autoDeposits"/>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="admin-card">
+            <div class="admin-card-header">
+              <h3 class="admin-card-title">USDT Wallet Address</h3>
+            </div>
+            <div class="admin-settings-fields">
+              <div class="admin-settings-field" style="grid-column: span 2">
+                <label class="admin-settings-label">PLATFORM RECEIVING WALLET</label>
+                <input type="text" class="admin-settings-input" id="platformWallet" value="TFiZ1cdbfseGUrPTCa1iSQhgztVudQvXt8"/>
+              </div>
+            </div>
+            <button class="admin-btn-save" id="saveWalletBtn">Update Wallet</button>
+            <span class="admin-save-feedback" id="walletFeedback"></span>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ========== USER ACTION MODAL ========== -->
+  <div class="admin-modal-overlay" id="modalOverlay" style="display:none;">
+    <div class="admin-modal" id="adminModal">
+      <div class="admin-modal-header">
+        <h3 class="admin-modal-title" id="modalTitle">User Details</h3>
+        <button class="admin-modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="admin-modal-body" id="modalBody"></div>
+      <div class="admin-modal-footer" id="modalFooter"></div>
+    </div>
+  </div>
+
+  <script>
+  window.ADMIN_API = {
+    users:       '/api/admin/users',
+    deposits:    '/api/admin/deposits',
+    withdrawals: '/api/admin/withdrawals',
+    stats:       '/api/admin/stats',
+    settings:    '/api/admin/settings'
+  };
+</script>
+<script src="/static/js/admin.js"></script>
+<script src="/static/js/realtime.js"></script>
+</body>
+</html>

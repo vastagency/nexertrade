@@ -1,0 +1,324 @@
+/* ============================================
+   NEXERTRADE — WITHDRAW PAGE STYLES
+============================================ */
+
+.page-title {
+  font-family: var(--font-heading);
+  font-size: 1.9rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
+}
+
+.page-subtitle {
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+  margin-top: 5px;
+}
+
+/* Balance Cards */
+.withdraw-balance-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.withdraw-balance-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 26px 28px;
+  transition: border-color 0.2s;
+}
+
+.withdraw-balance-card:hover {
+  border-color: rgba(245, 197, 24, 0.2);
+}
+
+.wbal-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.wbal-value {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.wbal-value.gold { color: var(--accent-gold); }
+.wbal-value.green { color: var(--accent-green); }
+
+/* Withdraw Form */
+.withdraw-form-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 760px;
+}
+
+.wform-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wform-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.wform-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 13px 16px;
+  font-size: 0.9rem;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.wform-input:focus {
+  border-color: rgba(245, 197, 24, 0.5);
+  box-shadow: 0 0 0 3px rgba(245, 197, 24, 0.08);
+}
+
+.wform-input.error {
+  border-color: var(--accent-red);
+  box-shadow: 0 0 0 3px rgba(255, 77, 77, 0.08);
+}
+
+.wform-amount-wrapper {
+  display: flex;
+  align-items: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  max-width: 260px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.wform-amount-wrapper:focus-within {
+  border-color: rgba(245, 197, 24, 0.5);
+  box-shadow: 0 0 0 3px rgba(245, 197, 24, 0.08);
+}
+
+.wform-prefix {
+  padding: 0 12px;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-right: 1px solid var(--border-color);
+}
+
+.wform-amount-input {
+  background: none;
+  border: none;
+  outline: none;
+  padding: 13px 14px;
+  font-size: 0.95rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-primary);
+  width: 160px;
+}
+
+.wform-amount-input::-webkit-outer-spin-button,
+.wform-amount-input::-webkit-inner-spin-button { -webkit-appearance: none; }
+
+.wform-error {
+  font-size: 0.78rem;
+  color: var(--accent-red);
+  display: none;
+}
+
+.wform-error.visible { display: block; }
+
+/* Warning Banner */
+.withdraw-warning {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 77, 77, 0.06);
+  border: 1px solid rgba(255, 77, 77, 0.25);
+  border-radius: 10px;
+  padding: 13px 16px;
+  font-size: 0.875rem;
+  color: var(--accent-red);
+}
+
+/* Confirm Button */
+.btn-confirm-withdraw {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: fit-content;
+  background: var(--accent-gold);
+  color: var(--bg-main);
+  font-family: var(--font-main);
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 13px 28px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 20px rgba(245, 197, 24, 0.25);
+}
+
+.btn-confirm-withdraw:hover {
+  background: var(--accent-gold-bright);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 28px rgba(245, 197, 24, 0.4);
+}
+
+.btn-confirm-withdraw:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-spinner {
+  display: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(10, 14, 26, 0.3);
+  border-top-color: var(--bg-main);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.btn-spinner.visible { display: block; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Flash */
+.withdraw-flash {
+  display: none;
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.withdraw-flash.visible { display: block; }
+.withdraw-flash.success {
+  background: rgba(0, 212, 139, 0.1);
+  border: 1px solid rgba(0, 212, 139, 0.25);
+  color: var(--accent-green);
+}
+.withdraw-flash.error {
+  background: rgba(255, 77, 77, 0.1);
+  border: 1px solid rgba(255, 77, 77, 0.25);
+  color: var(--accent-red);
+}
+
+/* History Card */
+.withdraw-history-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 28px 32px;
+}
+
+.withdraw-history-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+}
+
+.withdraw-table-wrapper { overflow-x: auto; }
+
+.withdraw-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.withdraw-table thead tr {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.withdraw-table th {
+  text-align: left;
+  padding: 0 16px 12px 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+}
+
+.withdraw-table td {
+  padding: 15px 16px 15px 0;
+  border-bottom: 1px solid rgba(31, 41, 55, 0.6);
+  color: var(--text-primary);
+  vertical-align: middle;
+}
+
+.withdraw-table tbody tr:last-child td { border-bottom: none; }
+.withdraw-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+.withdraw-table td.mono { font-family: var(--font-mono); font-size: 0.85rem; }
+.withdraw-table td.amount-col { font-weight: 600; }
+.withdraw-table td.wallet-col { color: var(--text-secondary); }
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 100px;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.status-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.status-badge.processed {
+  background: rgba(0, 212, 139, 0.1);
+  border: 1px solid rgba(0, 212, 139, 0.25);
+  color: var(--accent-green);
+}
+.status-badge.processed::before { background: var(--accent-green); }
+
+.status-badge.pending {
+  background: rgba(156, 163, 175, 0.1);
+  border: 1px solid rgba(156, 163, 175, 0.2);
+  color: var(--text-secondary);
+}
+.status-badge.pending::before { background: var(--text-secondary); }
+
+.status-badge.failed {
+  background: rgba(255, 77, 77, 0.1);
+  border: 1px solid rgba(255, 77, 77, 0.25);
+  color: var(--accent-red);
+}
+.status-badge.failed::before { background: var(--accent-red); }
+
+@media (max-width: 768px) {
+  .withdraw-balance-row { grid-template-columns: 1fr; }
+  .withdraw-form-card { padding: 20px; }
+  .withdraw-history-card { padding: 20px; }
+}

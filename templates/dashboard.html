@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NexerTrade — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+  <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+
+  <nav class="dash-nav">
+    <div class="dash-nav-inner">
+      <div class="dash-nav-left">
+        <a href="/" class="dash-logo">
+          <div class="logo-icon">
+            <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
+              <polygon points="16,2 6,16 13,16 10,26 22,12 15,12" fill="#F5C518" stroke="#F5C518" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <span class="logo-text">Nexer<span class="gold">Trade</span></span>
+        </a>
+        <ul class="dash-nav-links">
+          <li><a href="/dashboard" class="nav-link active">Dashboard</a></li>
+          <li><a href="/trading"   class="nav-link">Trading</a></li>
+          <li><a href="/deposit"   class="nav-link">Deposit</a></li>
+          <li><a href="/withdraw"  class="nav-link">Withdraw</a></li>
+          <li><a href="/history"   class="nav-link">History</a></li>
+        </ul>
+      </div>
+      <div class="dash-nav-right">
+        <button class="nav-icon-btn" id="notifBtn" title="Notifications">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          <span class="notif-dot"></span>
+        </button>
+        <div class="nav-user">
+          <div class="nav-user-avatar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+          <span><a href="/profile" class="nav-user-name" id="navUserName">{{ user.name.split()[0] }}</a></span>
+        </div>
+        <a href="/logout" class="nav-icon-btn" title="Logout">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="dash-main">
+
+    <div class="dash-header-row">
+      <div class="dash-welcome">
+        <h1 class="dash-welcome-title">Welcome back, <span id="welcomeName">{{ user.name.split()[0] }}</span></h1>
+        <p class="dash-welcome-sub">Here's what's happening on your account today.</p>
+      </div>
+      <div class="bot-status" id="botStatus">
+        <span class="bot-status-dot"></span>
+        <span class="bot-status-text">Bot idle · Ready to start</span>
+      </div>
+    </div>
+
+    <!-- STAT CARDS -->
+    <div class="stats-grid">
+
+      <div class="stat-card">
+        <div class="stat-card-top">
+          <div class="stat-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+              <rect x="2" y="5" width="20" height="14" rx="2"/>
+              <line x1="2" y1="10" x2="22" y2="10"/>
+            </svg>
+          </div>
+        </div>
+        <p class="stat-label">CURRENT BALANCE</p>
+        <h2 class="stat-value mono" id="statBalance">${{ "%.2f"|format(user.balance) }}</h2>
+        <p class="stat-sub positive" id="statBalanceSub">Available to trade</p>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-card-top">
+          <div class="stat-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+              <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+              <polyline points="16 7 22 7 22 13"/>
+            </svg>
+          </div>
+        </div>
+        <p class="stat-label">TOTAL PROFIT</p>
+        <h2 class="stat-value mono" id="statProfit">${{ "%.2f"|format(user.total_profit) }}</h2>
+        <p class="stat-sub positive" id="statProfitSub">All time earnings</p>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-card-top">
+          <div class="stat-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+              <line x1="12" y1="1" x2="12" y2="23"/>
+              <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+            </svg>
+          </div>
+        </div>
+        <p class="stat-label">TOTAL WITHDRAWN</p>
+        <h2 class="stat-value mono" id="statWithdrawn">${{ "%.2f"|format(user.total_withdrawn) }}</h2>
+        <p class="stat-sub neutral" id="statWithdrawnSub">Sent to wallet</p>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-card-top">
+          <div class="stat-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+              <polyline points="17 1 21 5 17 9"/>
+              <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+              <polyline points="7 23 3 19 7 15"/>
+              <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+            </svg>
+          </div>
+        </div>
+        <p class="stat-label">SESSIONS COMPLETED</p>
+        <h2 class="stat-value mono" id="statSessions">{{ user.sessions_completed }}</h2>
+        <p class="stat-sub positive" id="statSessionsSub">Trading sessions</p>
+      </div>
+
+    </div>
+
+    <!-- QUICK ACTIONS -->
+    <div class="quick-actions">
+      <a href="/deposit" class="action-card">
+        <div class="action-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+        </div>
+        <div class="action-text">
+          <h3>Deposit</h3>
+          <p>Fund your account</p>
+        </div>
+      </a>
+
+      <a href="/trading" class="action-card action-card-primary">
+        <div class="action-icon action-icon-primary">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0A0E1A" stroke-width="2.5">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+        </div>
+        <div class="action-text">
+          <h3>Start Trading</h3>
+          <p>Launch a new session</p>
+        </div>
+      </a>
+
+      <a href="/withdraw" class="action-card">
+        <div class="action-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#F5C518" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <div class="action-text">
+          <h3>Withdraw</h3>
+          <p>Send profit to wallet</p>
+        </div>
+      </a>
+    </div>
+
+    <!-- BOTTOM ROW -->
+    <div class="dash-bottom-row">
+
+      <!-- Profit Chart -->
+      <div class="chart-card">
+        <div class="chart-card-header">
+          <div>
+            <p class="chart-label">PROFIT GROWTH</p>
+            <h2 class="chart-total" id="chartTotal">+${{ "%.2f"|format(user.total_profit) }}</h2>
+          </div>
+          <div class="chart-tabs">
+            <button class="chart-tab" data-range="7D">7D</button>
+            <button class="chart-tab active" data-range="1M">1M</button>
+            <button class="chart-tab" data-range="3M">3M</button>
+            <button class="chart-tab" data-range="All">All</button>
+          </div>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="profitChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Recent Trades -->
+      <div class="recent-card">
+        <div class="recent-card-header">
+          <h3 class="recent-title">Recent Trades</h3>
+          <a href="/history" class="recent-view-all">View all</a>
+        </div>
+        <div class="recent-trades-list" id="recentTradesList">
+          {% if sessions %}
+            {% for s in sessions[:5] %}
+            <div class="trade-row">
+              <div class="trade-info">
+                <span class="trade-pair">Session #{{ s.id }}</span>
+                <span class="trade-time">{{ s.started_at.strftime('%H:%M:%S') }} · {{ s.timeframe }}m</span>
+              </div>
+              <span class="trade-pnl {{ 'positive' if s.net_pnl >= 0 else 'negative' }}">
+                {{ '+' if s.net_pnl >= 0 else '' }}${{ "%.2f"|format(s.net_pnl) }}
+              </span>
+            </div>
+            {% endfor %}
+          {% else %}
+            <div class="trade-row">
+              <div class="trade-info">
+                <span class="trade-pair" style="color:var(--text-secondary);">No trades yet</span>
+                <span class="trade-time">Start your first session</span>
+              </div>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Pass real data to JavaScript -->
+  <script>
+     /* jshint ignore:start */
+    window.USER_DATA = {
+      name: "{{ user.name }}",
+      balance: {{ user.balance }},
+      total_profit: {{ user.total_profit }},
+      total_withdrawn: {{ user.total_withdrawn }},
+      sessions_completed: {{ user.sessions_completed }}
+    };
+     /* jshint ignore:start */
+  </script>
+  <script src="/static/js/dashboard.js"></script>
+  <script src="/static/js/realtime.js"></script>
+</body>
+</html>

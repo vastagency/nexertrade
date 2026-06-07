@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+instance/
+*.db
+.env
+check.py
+check_tables.py
