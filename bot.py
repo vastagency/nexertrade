@@ -335,7 +335,8 @@ def close_trade(symbol, direction, quantity):
         actual_quantity = 0
         for attempt in range(5):
             balance = bybit.fetch_balance()
-            actual_quantity = float(balance.get(base_currency, {}).get('free', 0))
+            bal = balance.get(base_currency, {})
+            actual_quantity = float(bal.get('free') or bal.get('total') or 0)
             print(f'  Settlement check {attempt+1}/5: {base_currency} balance = {actual_quantity}')
             if actual_quantity > 0.1:
                 break
@@ -459,17 +460,18 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
 
                     print(f'  ✓ Position closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f}')
                 else:
-                    # Close failed — estimate from signal confidence
                     print(f'  ⚠ Close order failed: {close_order.get("error")}')
-                    real_pnl, won = calculate_estimated_profit(trade_usdt, signal['confidence'])
+                    real_pnl = 0.0
+                    won = False
             else:
-                print(f'  ⚠ Entry order failed: {entry_order.get("error")}')
-                # Fall back to estimated profit for this trade
-                real_pnl, won = calculate_estimated_profit(trade_usdt, signal['confidence'])
+                 print(f'  ⚠ Entry order failed: {entry_order.get("error")}')
+                 real_pnl = 0.0
+                 won = False
 
         except Exception as e:
             print(f'  ⚠ Trade execution error: {e}')
-            real_pnl, won = calculate_estimated_profit(trade_usdt, signal['confidence'])
+            real_pnl = 0.0
+            won = False
 
         trade = {
             'index':      i + 1,
