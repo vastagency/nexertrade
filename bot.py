@@ -350,7 +350,7 @@ def close_trade(symbol, direction, quantity):
             print(f'  Settlement check {attempt+1}/5: {base_currency} balance = {actual_quantity}')
             if actual_quantity > 0.1:
                 break
-            time.sleep(10)
+            time.sleep(5)
 
         if actual_quantity < 0.1:
             return {'success': False, 'error': f'No {base_currency} balance after 5 attempts', 'close_price': 0}
@@ -437,9 +437,26 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
         close_order = None
 
         try:
-            # Place real opening order
-            # On spot trading, we can only BUY (we have USDT, not the crypto)
             spot_direction = 'BUY'
+
+            # Skip trade if signal confidence too low
+            if signal['confidence'] < 68:
+                print(f'  ⊘ Signal too weak ({signal["confidence"]}%) — skipping trade')
+                real_pnl = 0.0
+                won = False
+                results['trades'].append({
+                    'index': i + 1, 'symbol': symbol,
+                    'direction': signal['direction'],
+                    'confidence': signal['confidence'],
+                    'rsi': signal['rsi'], 'ema_trend': signal['ema_trend'],
+                    'macd_trend': signal['macd_trend'],
+                    'profit': 0.0, 'won': False,
+                    'price': signal['current_price'], 'real_order': False
+                })
+                results['total_trades'] += 1
+                results['losses'] += 1
+                continue
+
             entry_order = execute_real_trade(symbol, spot_direction, trade_usdt)
 
             if entry_order['success']:
@@ -448,35 +465,47 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
 
                 print(f'  ✓ Entry order placed: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
 
-                # Brief hold time — let trade run
-                hold_seconds = max(45, timeframe_minutes * 60)
-                time.sleep(hold_seconds)
+                # Target-based exit
+                take_profit = entry_price * 1.005  # +0.5%
+                stop_loss   = entry_price * 0.997  # -0.3%
+                max_wait    = timeframe_minutes * 60
+                elapsed     = 0
+                print(f'  Monitoring: TP=${take_profit:.4f} SL=${stop_loss:.4f}')
+
+                while elapsed < max_wait:
+                    time.sleep(10)
+                    elapsed += 10
+                    try:
+                        ticker     = bybit.fetch_ticker(symbol)
+                        live_price = float(ticker['last'])
+                        print(f'  Price: ${live_price:.4f} | {elapsed}s/{max_wait}s')
+                        if live_price >= take_profit:
+                            print(f'  ✓ Take profit hit @ ${live_price:.4f}')
+                            break
+                        if live_price <= stop_loss:
+                            print(f'  ✗ Stop loss hit @ ${live_price:.4f}')
+                            break
+                    except Exception:
+                        pass
 
                 # Close position
                 close_order = close_trade(symbol, spot_direction, quantity)
 
                 if close_order['success']:
-                    close_price = close_order['close_price']
-
-                    # Calculate REAL profit from actual price movement
-                    if True:  # always BUY on spot
-                        price_change = close_price - entry_price
-                    else:
-                        price_change = entry_price - close_price
-
-                    bybit_fee = trade_usdt * 0.002  # 0.2% for buy + sell
-                    real_pnl = (price_change / entry_price) * trade_usdt - bybit_fee
-                    real_pnl = round(real_pnl, 4)
-
+                    close_price  = close_order['close_price']
+                    price_change = close_price - entry_price
+                    bybit_fee    = trade_usdt * 0.002
+                    real_pnl     = round((price_change / entry_price) * trade_usdt - bybit_fee, 4)
+                    won          = real_pnl > 0
                     print(f'  ✓ Position closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f}')
                 else:
                     print(f'  ⚠ Close order failed: {close_order.get("error")}')
                     real_pnl = 0.0
                     won = False
             else:
-                 print(f'  ⚠ Entry order failed: {entry_order.get("error")}')
-                 real_pnl = 0.0
-                 won = False
+                print(f'  ⚠ Entry order failed: {entry_order.get("error")}')
+                real_pnl = 0.0
+                won = False
 
         except Exception as e:
             print(f'  ⚠ Trade execution error: {e}')
