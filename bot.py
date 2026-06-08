@@ -350,7 +350,7 @@ def close_trade(symbol, direction, quantity):
             print(f'  Settlement check {attempt+1}/5: {base_currency} balance = {actual_quantity}')
             if actual_quantity > 0.1:
                 break
-            time.sleep(5)
+            time.sleep(10)
 
         if actual_quantity < 0.1:
             return {'success': False, 'error': f'No {base_currency} balance after 5 attempts', 'close_price': 0}
@@ -449,7 +449,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
                 print(f'  ✓ Entry order placed: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
 
                 # Brief hold time — let trade run
-                hold_seconds = timeframe_minutes * 60 + 60
+                hold_seconds = max(45, timeframe_minutes * 60)
                 time.sleep(hold_seconds)
 
                 # Close position
