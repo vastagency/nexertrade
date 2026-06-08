@@ -592,7 +592,7 @@ def api_bot_execute():
             'timeframe': timeframe
         }, room='admin_room')
 
-        results = execute_session(amount, timeframe, num_trades)
+        results = execute_session(amount, timeframe, num_trades, force=force)
 
         # Block if Bybit was unreachable — no fake profits added
         if results.get('error'):

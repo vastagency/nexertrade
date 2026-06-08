@@ -374,7 +374,7 @@ def close_trade(symbol, direction, quantity):
 # ============================================
 # 7. REAL SESSION EXECUTION
 # ============================================
-def execute_session(amount, timeframe_minutes, num_trades=1):
+def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
     """
     Execute a complete real trading session on Bybit.
 
@@ -439,8 +439,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
         try:
             spot_direction = 'BUY'
 
-            # Skip trade if signal confidence too low
-            if signal['confidence'] < 68:
+            # Skip trade if signal confidence too low — unless user forced it
+            if signal['confidence'] < 68 and not force:
                 print(f'  ⊘ Signal too weak ({signal["confidence"]}%) — skipping trade')
                 real_pnl = 0.0
                 won = False
