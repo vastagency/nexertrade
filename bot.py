@@ -464,9 +464,9 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
                     else:
                         price_change = entry_price - close_price
 
-                    real_pnl = (price_change / entry_price) * trade_usdt
+                    bybit_fee = trade_usdt * 0.002  # 0.2% for buy + sell
+                    real_pnl = (price_change / entry_price) * trade_usdt - bybit_fee
                     real_pnl = round(real_pnl, 4)
-                    won      = real_pnl > 0
 
                     print(f'  ✓ Position closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f}')
                 else:
