@@ -118,10 +118,10 @@ def set_setting(key, value):
 def time_ago(dt):
     diff    = datetime.utcnow() - dt
     seconds = int(diff.total_seconds())
-    if seconds < 60:     return f'{seconds} secs ago'
-    elif seconds < 3600: return f'{seconds // 60} mins ago'
+    if seconds < 60:      return f'{seconds} secs ago'
+    elif seconds < 3600:  return f'{seconds // 60} mins ago'
     elif seconds < 86400: return f'{seconds // 3600} hours ago'
-    else:                return f'{seconds // 86400} days ago'
+    else:                 return f'{seconds // 86400} days ago'
 
 def validate_crypto_wallet(address):
     if not address or len(address) < 10:
@@ -129,22 +129,15 @@ def validate_crypto_wallet(address):
     # USDT TRC20 (Tron) — starts with T, 34 chars
     if address.startswith('T') and len(address) == 34:
         return True, 'USDT_TRC20'
-    # USDT ERC20 (Ethereum) — starts with 0x, 42 chars
+    # USDT ERC20 / BEP20 (Ethereum/BSC) — starts with 0x, 42 chars
     if address.startswith('0x') and len(address) == 42:
         return True, 'USDT_ERC20'
-    # USDT BEP20 (BSC) — starts with 0x, 42 chars (same as ERC20)
-    if address.startswith('0x') and len(address) == 42:
-        return True, 'USDT_BEP20'
-    # Keep BTC support just in case
+    # BTC
     if address.startswith('bc1') or address.startswith('1') or address.startswith('3'):
         return True, 'BTC'
     return False, None
 
 def check_pending_withdrawal(user_id):
-    """
-    Check if user already has a pending withdrawal.
-    Prevents double-spend.
-    """
     pending = Withdrawal.query.filter_by(
         user_id=user_id,
         status='pending'
@@ -250,7 +243,7 @@ def deposit():
 def withdraw():
     if current_user.is_admin:
         return redirect(url_for('admin'))
-    withdrawals = Withdrawal.query.filter_by(user_id=current_user.id).order_by(Withdrawal.created_at.desc()).all()
+    withdrawals    = Withdrawal.query.filter_by(user_id=current_user.id).order_by(Withdrawal.created_at.desc()).all()
     min_withdrawal = float(get_setting('min_withdrawal', '1'))
     return render_template('withdraw.html', user=current_user, withdrawals=withdrawals, min_withdrawal=min_withdrawal)
 
@@ -278,7 +271,7 @@ def profile():
 @admin_required
 def admin():
     from models import AdminEarning
-    earnings = AdminEarning.query.order_by(AdminEarning.created_at.desc()).all()
+    earnings     = AdminEarning.query.order_by(AdminEarning.created_at.desc()).all()
     total_earned = round(sum(e.amount for e in earnings), 2)
     return render_template('admin.html', user=current_user, earnings=earnings, total_earned=total_earned)
 
@@ -404,12 +397,10 @@ def api_withdraw():
 
     amount = float(amount)
 
-    # Validate wallet address
     is_valid, coin_type = validate_crypto_wallet(wallet_address)
     if not is_valid:
         return jsonify({'success': False, 'message': 'Invalid wallet address format'}), 400
 
-    # Min/Max withdrawal
     min_withdrawal = float(get_setting('min_withdrawal', '1'))
     max_withdrawal = float(get_setting('max_withdrawal', '500'))
 
@@ -419,20 +410,16 @@ def api_withdraw():
     if amount > max_withdrawal:
         return jsonify({'success': False, 'message': f'Maximum withdrawal is ${max_withdrawal:.2f}'}), 400
 
-    # Balance check
     if amount > current_user.balance:
         return jsonify({'success': False, 'message': f'Insufficient balance. Available: ${current_user.balance:.2f}'}), 400
 
-    # Double spend protection
     if check_pending_withdrawal(current_user.id):
         return jsonify({'success': False, 'message': 'You already have a pending withdrawal. Please wait for it to be processed.'}), 400
 
-    # Calculate platform fee
     fee_pct    = float(get_setting('platform_fee', '0'))
     fee        = round(amount * (fee_pct / 100), 4) if fee_pct > 0 else 0.0
     net_amount = round(amount - fee, 4)
 
-    # Create withdrawal with fee tracked
     withdrawal = Withdrawal(
         user_id=current_user.id,
         amount=amount,
@@ -443,12 +430,10 @@ def api_withdraw():
     )
     db.session.add(withdrawal)
 
-    # Deduct full amount from user balance
     current_user.balance         -= amount
     current_user.total_withdrawn += amount
     current_user.total_fees_paid += fee
 
-    # Track fee as admin earning
     if fee > 0:
         from models import AdminEarning
         earning = AdminEarning(
@@ -460,7 +445,6 @@ def api_withdraw():
 
     db.session.commit()
 
-    # Real-time balance update
     socketio.emit('balance_update', {
         'balance':            round(current_user.balance, 2),
         'total_profit':       round(current_user.total_profit, 2),
@@ -468,7 +452,6 @@ def api_withdraw():
         'sessions_completed': current_user.sessions_completed
     }, room=f'user_{current_user.id}')
 
-    # Notify admin
     socketio.emit('new_withdrawal', {
         'user':      current_user.name,
         'amount':    amount,
@@ -489,6 +472,7 @@ def api_withdraw():
         'fee':        fee,
         'net_amount': net_amount
     }), 201
+
 # ============================================
 # API — TRADE COMPLETE
 # ============================================
@@ -560,9 +544,11 @@ def api_trade_complete():
 def api_bot_execute():
     try:
         from bot import execute_session
-        data       = request.get_json()
-        amount     = float(data.get('amount', 50))
-        timeframe  = int(data.get('timeframe', 5))
+        data      = request.get_json()
+        amount    = float(data.get('amount', 50))
+        timeframe = int(data.get('timeframe', 5))
+        force     = bool(data.get('force', False))  # FIX: read force flag from request
+
         # Dynamic trades based on user balance tier
         if current_user.balance >= 200:
             num_trades = 10
@@ -581,6 +567,24 @@ def api_bot_execute():
         # Block trading above user's actual NexerTrade balance
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
+
+        # FIX: Weak signal pre-check — only runs if user has NOT forced the trade
+        if not force:
+            try:
+                from bot import generate_signal
+                preview_signal = generate_signal('XRP/USDT')
+                if preview_signal['confidence'] < 68:
+                    return jsonify({
+                        'success':     False,
+                        'weak_signal': True,
+                        'confidence':  round(preview_signal['confidence'], 1),
+                        'rsi':         round(preview_signal.get('rsi', 0), 2),
+                        'direction':   preview_signal.get('direction', 'BUY'),
+                        'message':     f"Signal confidence is only {preview_signal['confidence']:.0f}%. Market conditions are uncertain right now."
+                    }), 200
+            except Exception as signal_err:
+                # If signal check fails, allow trade to continue
+                print(f'Signal pre-check error (non-fatal): {signal_err}')
 
         socketio.emit('session_started', {
             'user':      current_user.name,
@@ -1069,18 +1073,14 @@ def api_bot_prices():
         return jsonify(get_live_prices())
     except Exception:
         return jsonify([])
-    
-
-
-
 
 @app.route('/api/admin/earnings')
 @login_required
 @admin_required
 def api_admin_earnings():
     from models import AdminEarning
-    earnings      = AdminEarning.query.order_by(AdminEarning.created_at.desc()).all()
-    total_earned  = sum(e.amount for e in earnings)
+    earnings     = AdminEarning.query.order_by(AdminEarning.created_at.desc()).all()
+    total_earned = sum(e.amount for e in earnings)
     return jsonify({
         'total_earned': round(total_earned, 4),
         'earnings': [{

@@ -79,7 +79,6 @@ function initLiveChart(basePrice) {
 
   currentBasePrice = basePrice && basePrice > 1 ? basePrice : 100;
 
-  // Build smooth price history from real base price
   let price = currentBasePrice;
   for (let i = 0; i < 40; i++) {
     price += price * (Math.random() - 0.48) * 0.0005;
@@ -141,7 +140,7 @@ function drawLiveChart() {
   liveChartCtx.fillStyle = lineColor;
   liveChartCtx.fill();
 
-  // Update price display with real price format
+  // Price display
   const priceEl = document.getElementById('liveChartPrice');
   if (priceEl) {
     if (lastVal > 1000) {
@@ -162,13 +161,11 @@ function tickLiveChart(newPrice) {
 
   let next;
   if (newPrice && newPrice > 1) {
-    // Use real price with tiny realistic movement
     const last  = liveChartData[liveChartData.length - 1] || newPrice;
     const delta = newPrice * (Math.random() - 0.48) * 0.0005;
     next = Math.max(0.001, newPrice + delta);
     currentBasePrice = newPrice;
   } else {
-    // Simulate from last known price
     const last  = liveChartData[liveChartData.length - 1] || currentBasePrice;
     const delta = last * (Math.random() - 0.48) * 0.0005;
     next = Math.max(0.001, last + delta);
@@ -182,7 +179,7 @@ function tickLiveChart(newPrice) {
 
 
 // ============================================
-// 5. TIMER — Matches real timeframe duration
+// 5. TIMER
 // ============================================
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -255,7 +252,7 @@ function addToTradeStream(trade) {
 // ============================================
 function updateStatsUI() {
   const totalTrades = availableBalance >= 200 ? 10 : availableBalance >= 100 ? 5 : availableBalance >= 50 ? 3 : 1;
-document.getElementById('statTrades').textContent = `${tradesCount}/${totalTrades}`;
+  document.getElementById('statTrades').textContent = `${tradesCount}/${totalTrades}`;
   document.getElementById('statWins').textContent   = winsCount;
   document.getElementById('statLosses').textContent = lossesCount;
 
@@ -269,7 +266,7 @@ document.getElementById('statTrades').textContent = `${tradesCount}/${totalTrade
 // ============================================
 // 8. START SESSION
 // ============================================
-async function startSession() {
+async function startSession(force = false) {
   isTrading   = true;
   tradesCount = 0;
   winsCount   = 0;
@@ -311,23 +308,32 @@ async function startSession() {
     initLiveChart(100);
   }
 
- // Start timer IMMEDIATELY when user clicks start
+  // Start timer immediately
   const sessionSecs = selectedTimeframe * 60;
   startTimer(sessionSecs);
   document.getElementById('sessionStatusTitle').textContent = 'Connected — executing live trade...';
 
   try {
+    // FIX: properly closed fetch with all brackets correct
     const botRes = await fetch('/api/bot/execute', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        amount:     selectedAmount,
-        timeframe:  selectedTimeframe,
-        num_trades: 1
+        amount:    selectedAmount,
+        timeframe: selectedTimeframe,
+        num_trades: 1,
+        force:     force
       })
     });
 
     const botData = await botRes.json();
+
+    // Weak signal — show warning modal instead of crashing
+    if (!botData.success && botData.weak_signal) {
+      stopSession(false);
+      showWeakSignalModal(botData);
+      return;
+    }
 
     if (!botData.success) {
       document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (botData.message || 'Trade blocked');
@@ -337,15 +343,13 @@ async function startSession() {
       return;
     }
 
-    const trades      = botData.trades;
+    const trades       = botData.trades;
     const tradeInterval = Math.floor(sessionSecs / trades.length);
-
 
     // Animate each trade at correct time intervals
     for (let i = 0; i < trades.length; i++) {
       if (!isTrading) break;
 
-      // Wait for the correct moment in the session
       await new Promise(resolve => setTimeout(resolve, tradeInterval * 1000));
 
       if (!isTrading) break;
@@ -360,13 +364,11 @@ async function startSession() {
       updateStatsUI();
       addToTradeStream(trade);
 
-      // Update chart with trade's real price
       if (trade.price) {
         currentBasePrice = trade.price;
         tickLiveChart(trade.price);
       }
 
-      // Update status
       if (trade.won) {
         document.getElementById('sessionStatusTitle').textContent =
           `✓ ${trade.symbol} ${trade.direction} — WIN (RSI: ${trade.rsi}, Conf: ${trade.confidence}%)`;
@@ -377,15 +379,13 @@ async function startSession() {
     }
 
     if (isTrading) {
-      // Update final balance from server
       availableBalance = botData.new_balance;
       const balEl = document.getElementById('availableBalance');
       if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
-
       stopSession(true, botData);
     }
 
- } catch (err) {
+  } catch (err) {
     console.error('Bot execute error:', err);
     document.getElementById('sessionStatusTitle').textContent = '⚠ Network error — trade blocked';
     document.getElementById('sessionStatusTitle').style.color = '#ef4444';
@@ -472,7 +472,6 @@ async function stopSession(natural = false, botData = null) {
 
   document.querySelectorAll('.tf-btn, .quick-btn, .trade-amount-input').forEach(el => el.disabled = false);
 
-  // Use server balance if available
   if (botData && botData.success) {
     availableBalance = botData.new_balance;
     tradesCount      = botData.total_trades;
@@ -480,7 +479,6 @@ async function stopSession(natural = false, botData = null) {
     lossesCount      = botData.losses;
     sessionPnl       = botData.net_pnl;
   } else if (!botData) {
-    // Save manually via API
     try {
       const winRate = tradesCount > 0 ? Math.round((winsCount / tradesCount) * 100) : 0;
       const res = await fetch('/api/trade/complete', {
@@ -506,7 +504,6 @@ async function stopSession(natural = false, botData = null) {
   const balEl = document.getElementById('availableBalance');
   if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
 
-  // Summary
   const winRate  = tradesCount > 0 ? Math.round((winsCount / tradesCount) * 100) : 0;
   const avgTrade = tradesCount > 0 ? (Math.abs(sessionPnl) / tradesCount).toFixed(4) : '0.0000';
 
@@ -595,7 +592,69 @@ setInterval(updateTicker, 30000);
 
 
 // ============================================
-// 15. NOTIFICATION BUTTON
+// 15. WEAK SIGNAL MODAL
+// ============================================
+function showWeakSignalModal(data) {
+  const existing = document.getElementById('weakSignalModal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'weakSignalModal';
+  modal.style.cssText = `
+    position:fixed; top:0; left:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.7); z-index:9999;
+    display:flex; align-items:center; justify-content:center;
+  `;
+  modal.innerHTML = `
+    <div style="background:#1a1a2e; border:1px solid #f59e0b; border-radius:12px;
+                padding:32px; max-width:420px; width:90%; text-align:center;">
+      <div style="font-size:2rem; margin-bottom:12px;">⚠️</div>
+      <h3 style="color:#f59e0b; margin-bottom:8px;">Weak Signal Detected</h3>
+      <p style="color:#9ca3af; margin-bottom:20px;">${data.message}</p>
+      <div style="background:#0f0f1a; border-radius:8px; padding:16px; margin-bottom:24px; text-align:left;">
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+          <span style="color:#6b7280;">Confidence</span>
+          <span style="color:#ef4444; font-weight:600;">${data.confidence}%</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+          <span style="color:#6b7280;">RSI</span>
+          <span style="color:#fff;">${data.rsi}</span>
+        </div>
+        <div style="display:flex; justify-content:space-between;">
+          <span style="color:#6b7280;">Direction</span>
+          <span style="color:#fff;">${data.direction}</span>
+        </div>
+      </div>
+      <div style="display:flex; gap:12px; justify-content:center;">
+        <button id="abortTradeBtn" style="
+          padding:10px 24px; border-radius:8px; border:1px solid #4b5563;
+          background:transparent; color:#9ca3af; cursor:pointer; font-size:14px;">
+          Abort Trade
+        </button>
+        <button id="forceTradeBtn" style="
+          padding:10px 24px; border-radius:8px; border:none;
+          background:#f59e0b; color:#000; cursor:pointer;
+          font-size:14px; font-weight:600;">
+          Continue Anyway
+        </button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  document.getElementById('abortTradeBtn').onclick = () => {
+    modal.remove();
+  };
+
+  document.getElementById('forceTradeBtn').onclick = async () => {
+    modal.remove();
+    await startSession(true);
+  };
+}
+
+
+// ============================================
+// 16. NOTIFICATION BUTTON
 // ============================================
 const notifBtn = document.getElementById('notifBtn');
 if (notifBtn) {

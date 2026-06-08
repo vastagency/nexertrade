@@ -453,8 +453,6 @@ def execute_session(amount, timeframe_minutes, num_trades=1):
                     'profit': 0.0, 'won': False,
                     'price': signal['current_price'], 'real_order': False
                 })
-                results['total_trades'] += 1
-                results['losses'] += 1
                 continue
 
             entry_order = execute_real_trade(symbol, spot_direction, trade_usdt)
