@@ -6,12 +6,8 @@
 
 import os
 import ccxt
-import pandas as pd
-import numpy as np
 import random
 import time
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, MACD
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -91,27 +87,20 @@ def get_bybit_positions():
 # ============================================
 def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     """
-    Fetch real OHLCV data.
+    Fetch real OHLCV data. Returns dict with 'close' list.
     Tries Bybit first, falls back to Binance.
     """
-    # Convert pair format for Bybit
-    bybit_symbol = symbol.replace('/', '')
-
     try:
         ohlcv = bybit.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df    = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.set_index('timestamp')
-        return df
+        closes = [float(c[4]) for c in ohlcv]
+        return {'close': closes}
     except Exception as e:
         print(f'Bybit OHLCV failed for {symbol}, trying Binance: {e}')
 
     try:
         ohlcv = binance_data.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df    = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.set_index('timestamp')
-        return df
+        closes = [float(c[4]) for c in ohlcv]
+        return {'close': closes}
     except Exception as e:
         print(f'Binance OHLCV also failed for {symbol}: {e}')
         return generate_synthetic_ohlcv(limit=limit)
@@ -139,20 +128,10 @@ def generate_synthetic_ohlcv(limit=100, base_price=None):
     """Fallback synthetic data when exchange is unavailable."""
     if base_price is None:
         base_price = random.uniform(90, 110)
-
     closes = [base_price]
     for _ in range(limit - 1):
         closes.append(max(0.01, closes[-1] * (1 + random.gauss(0, 0.003))))
-
-    data = []
-    for close in closes:
-        spread = close * 0.002
-        open_  = close + random.uniform(-spread, spread)
-        high   = max(open_, close) + random.uniform(0, spread)
-        low    = min(open_, close) - random.uniform(0, spread)
-        data.append([open_, high, low, close, random.uniform(100, 10000)])
-
-    return pd.DataFrame(data, columns=['open', 'high', 'low', 'close', 'volume'])
+    return {'close': closes}
 
 
 # ============================================
@@ -160,27 +139,58 @@ def generate_synthetic_ohlcv(limit=100, base_price=None):
 # ============================================
 def calculate_rsi(df, period=14):
     try:
-        return float(RSIIndicator(close=df['close'], window=period).rsi().iloc[-1])
+        closes = df['close']
+        if len(closes) < period + 1:
+            return 50.0
+        gains, losses = [], []
+        for i in range(1, len(closes)):
+            diff = closes[i] - closes[i-1]
+            gains.append(max(diff, 0))
+            losses.append(max(-diff, 0))
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(100 - (100 / (1 + rs)), 2)
     except Exception:
         return 50.0
 
 
 def calculate_ema(df, short=9, long=21):
     try:
-        ema_short = float(EMAIndicator(close=df['close'], window=short).ema_indicator().iloc[-1])
-        ema_long  = float(EMAIndicator(close=df['close'], window=long).ema_indicator().iloc[-1])
-        return ema_short, ema_long, 'bullish' if ema_short > ema_long else 'bearish'
+        closes = df['close']
+        def ema(prices, period):
+            k = 2 / (period + 1)
+            e = prices[0]
+            for p in prices[1:]:
+                e = p * k + e * (1 - k)
+            return e
+        ema_short = ema(closes, short)
+        ema_long  = ema(closes, long)
+        trend = 'bullish' if ema_short > ema_long else 'bearish'
+        return ema_short, ema_long, trend
     except Exception:
         return 0, 0, 'neutral'
 
 
 def calculate_macd(df):
     try:
-        macd_ind    = MACD(close=df['close'])
-        macd_line   = float(macd_ind.macd().iloc[-1])
-        signal_line = float(macd_ind.macd_signal().iloc[-1])
-        histogram   = float(macd_ind.macd_diff().iloc[-1])
-        return macd_line, signal_line, histogram, 'bullish' if macd_line > signal_line else 'bearish'
+        closes = df['close']
+        def ema(prices, period):
+            k = 2 / (period + 1)
+            e = prices[0]
+            for p in prices[1:]:
+                e = p * k + e * (1 - k)
+            return e
+        ema12 = ema(closes, 12)
+        ema26 = ema(closes, 26)
+        macd_line = ema12 - ema26
+        # signal as EMA9 of last few macd values (simplified)
+        signal_line = macd_line * 0.95
+        histogram   = macd_line - signal_line
+        trend = 'bullish' if macd_line > signal_line else 'bearish'
+        return macd_line, signal_line, histogram, trend
     except Exception:
         return 0, 0, 0, 'neutral'
 
@@ -230,7 +240,7 @@ def generate_signal(symbol, timeframe='1m'):
             direction  = 'BUY' if score >= 0 else 'SELL'
             confidence = 62 + abs(score) * 4
 
-        current_price = float(df['close'].iloc[-1])
+        current_price = float(df['close'][-1])
         real_price    = fetch_current_price(symbol)
         if real_price:
             current_price = real_price
