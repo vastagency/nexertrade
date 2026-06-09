@@ -573,7 +573,7 @@ def api_bot_execute():
             try:
                 from bot import generate_signal
                 preview_signal = generate_signal('XRP/USDT')
-                if preview_signal['confidence'] < 68:
+                if preview_signal['confidence'] < 62:
                     return jsonify({
                         'success':     False,
                         'weak_signal': True,
