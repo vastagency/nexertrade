@@ -13,27 +13,43 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================
-# 1. EXCHANGE SETUP — BYBIT REAL CONNECTION
+# 1. EXCHANGE SETUP — BYBIT DUAL MODE
 # ============================================
 BYBIT_API_KEY    = os.getenv('BYBIT_API_KEY', '')
 BYBIT_API_SECRET = os.getenv('BYBIT_API_SECRET', '')
 USE_TESTNET      = os.getenv('BYBIT_TESTNET', 'false').lower() == 'true'
-DEFAULT_PAIR     = os.getenv('BYBIT_DEFAULT_PAIR', 'BTC/USDT')
+DEFAULT_PAIR     = os.getenv('BYBIT_DEFAULT_PAIR', 'XRP/USDT')
 TRADE_TYPE       = os.getenv('BYBIT_TRADE_TYPE', 'spot')
+LEVERAGE         = int(os.getenv('BYBIT_LEVERAGE', '2'))
 
-# Primary exchange — Bybit for real trading
-bybit = ccxt.bybit({
+# Spot exchange instance
+bybit_spot = ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
     'options': {
-        'defaultType': TRADE_TYPE,
+        'defaultType': 'spot',
         'recvWindow': 20000
     }
 })
 
+# Futures exchange instance
+bybit_futures = ccxt.bybit({
+    'apiKey': BYBIT_API_KEY,
+    'secret': BYBIT_API_SECRET,
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'linear',
+        'recvWindow': 20000
+    }
+})
+
+# Default bybit instance (used for market data)
+bybit = bybit_spot
+
 if USE_TESTNET:
-    bybit.set_sandbox_mode(True)
+    bybit_spot.set_sandbox_mode(True)
+    bybit_futures.set_sandbox_mode(True)
     print('⚠ Running in TESTNET mode')
 else:
     print('✓ Connected to Bybit LIVE trading')
@@ -46,28 +62,65 @@ binance_data = ccxt.binance({
 
 CRYPTO_PAIRS = ['XRP/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT', 'BTC/USDT']
 
+# Futures pairs (uses : notation for perpetual contracts)
+FUTURES_PAIRS = ['XRP/USDT:USDT', 'SOL/USDT:USDT', 'ETH/USDT:USDT', 'BTC/USDT:USDT']
+
 
 # ============================================
 # 2. ACCOUNT MANAGEMENT
 # ============================================
 def get_bybit_balance():
     """
-    Fetch real balance from Bybit account.
-    Returns dict of available balances.
+    Check both spot and futures (UTA) wallets.
+    Returns balance info and which trade mode to use.
+    Prefers futures if UTA has enough balance, falls back to spot.
     """
+    spot_usdt    = 0.0
+    futures_usdt = 0.0
+
     try:
-        balance  = bybit.fetch_balance()
-        usdt_bal = float(balance.get('USDT', {}).get('total') or balance.get('USDT', {}).get('free') or 0)
-        btc_bal  = float(balance.get('BTC', {}).get('free', 0))
-        return {
-            'USDT':  usdt_bal,
-            'BTC':   btc_bal,
-            'total': usdt_bal,
-            'success': True
-        }
+        spot_bal  = bybit_spot.fetch_balance()
+        spot_usdt = float(
+            spot_bal.get('USDT', {}).get('total') or
+            spot_bal.get('USDT', {}).get('free') or 0
+        )
     except Exception as e:
-        print(f'Balance fetch error: {e}')
-        return {'USDT': 0, 'BTC': 0, 'total': 0, 'success': False, 'error': str(e)}
+        print(f'Spot balance error: {e}')
+
+    try:
+        fut_bal      = bybit_futures.fetch_balance()
+        futures_usdt = float(
+            fut_bal.get('USDT', {}).get('total') or
+            fut_bal.get('USDT', {}).get('free') or 0
+        )
+    except Exception as e:
+        print(f'Futures balance error: {e}')
+
+    total = max(spot_usdt, futures_usdt)
+
+    if total == 0 and spot_usdt == 0 and futures_usdt == 0:
+        return {'USDT': 0, 'total': 0, 'success': False,
+                'error': 'Could not fetch balance from Bybit',
+                'trade_mode': 'spot'}
+
+    # Use futures if it has enough balance (min $5), else use spot
+    if futures_usdt >= 5.0:
+        trade_mode = 'futures'
+        usdt       = futures_usdt
+        print(f'Bybit USDT balance (futures/UTA): ${futures_usdt:.2f}')
+    else:
+        trade_mode = 'spot'
+        usdt       = spot_usdt
+        print(f'Bybit USDT balance (spot): ${spot_usdt:.2f}')
+
+    return {
+        'USDT':       usdt,
+        'spot_usdt':  spot_usdt,
+        'futures_usdt': futures_usdt,
+        'total':      usdt,
+        'trade_mode': trade_mode,
+        'success':    True
+    }
 
 
 def get_bybit_positions():
@@ -323,55 +376,96 @@ def generate_signal(symbol, timeframe='5m'):
 # ============================================
 # 6. REAL TRADE EXECUTION ON BYBIT
 # ============================================
-def execute_real_trade(symbol, direction, usdt_amount):
+def execute_real_trade(symbol, direction, usdt_amount, trade_mode='spot'):
     """
     Place a REAL market order on Bybit.
+    Supports both spot and futures (linear perpetual) trading.
 
-    For spot trading:
-    - BUY: spend USDT_amount to buy crypto
-    - SELL: sell crypto worth USDT_amount
-
-    Returns trade result with entry price, order ID etc.
+    Spot:    BUY  = buy crypto with USDT
+    Futures: LONG = open long contract (profit when price rises)
+             SHORT = open short contract (profit when price falls)
     """
     try:
-        ticker       = bybit.fetch_ticker(symbol)
-        current_price = float(ticker['last'])
+        if trade_mode == 'futures':
+            # Convert spot symbol to futures format
+            futures_symbol = symbol.replace('/USDT', '/USDT:USDT')
+            exchange       = bybit_futures
 
-        # Calculate quantity
-        base_currency = symbol.split('/')[0]  # e.g. BTC from BTC/USDT
-        quantity      = usdt_amount / current_price
+            ticker        = exchange.fetch_ticker(futures_symbol)
+            current_price = float(ticker['last'])
+            quantity      = usdt_amount * LEVERAGE / current_price
 
-        # Minimum order size check
-        markets = bybit.load_markets()
-        if symbol in markets:
-            min_amount = markets[symbol].get('limits', {}).get('amount', {}).get('min', 0)
-            if quantity < min_amount:
-                return {
-                    'success':  False,
-                    'error':    f'Order too small. Min: {min_amount} {base_currency}',
-                    'quantity': quantity,
-                    'price':    current_price
-                }
+            # Set leverage
+            try:
+                exchange.set_leverage(LEVERAGE, futures_symbol)
+            except Exception:
+                pass  # leverage may already be set
 
-        # Round quantity to exchange precision
-        precision = markets[symbol]['precision']['amount'] if symbol in markets else 6
-        quantity  = bybit.amount_to_precision(symbol, quantity)
+            markets = exchange.load_markets()
+            if futures_symbol in markets:
+                min_qty = markets[futures_symbol].get('limits', {}).get('amount', {}).get('min', 0)
+                if quantity < min_qty:
+                    return {
+                        'success': False,
+                        'error':   f'Order too small for futures. Min: {min_qty}',
+                        'price':   current_price
+                    }
+                quantity = exchange.amount_to_precision(futures_symbol, quantity)
 
-        # Place real market order
-        side  = 'buy' if direction == 'BUY' else 'sell'
-        order = bybit.create_market_order(symbol, side, float(quantity))
+            side  = 'buy' if direction == 'BUY' else 'sell'
+            order = exchange.create_market_order(
+                futures_symbol, side, float(quantity),
+                params={'reduceOnly': False}
+            )
+            print(f'  [FUTURES {LEVERAGE}x] {direction} {quantity} contracts @ ${current_price:.4f}')
 
-        return {
-            'success':    True,
-            'order_id':   order.get('id', 'unknown'),
-            'symbol':     symbol,
-            'direction':  direction,
-            'quantity':   float(quantity),
-            'price':      current_price,
-            'cost':       usdt_amount,
-            'status':     order.get('status', 'filled'),
-            'timestamp':  order.get('timestamp', None)
-        }
+            return {
+                'success':    True,
+                'order_id':   order.get('id', 'unknown'),
+                'symbol':     futures_symbol,
+                'direction':  direction,
+                'quantity':   float(quantity),
+                'price':      current_price,
+                'cost':       usdt_amount,
+                'trade_mode': 'futures',
+                'leverage':   LEVERAGE,
+                'status':     order.get('status', 'filled')
+            }
+
+        else:
+            # SPOT trading
+            exchange      = bybit_spot
+            ticker        = exchange.fetch_ticker(symbol)
+            current_price = float(ticker['last'])
+            quantity      = usdt_amount / current_price
+
+            markets = exchange.load_markets()
+            if symbol in markets:
+                min_qty = markets[symbol].get('limits', {}).get('amount', {}).get('min', 0)
+                if quantity < min_qty:
+                    return {
+                        'success': False,
+                        'error':   f'Order too small. Min: {min_qty}',
+                        'price':   current_price
+                    }
+                quantity = exchange.amount_to_precision(symbol, quantity)
+
+            side  = 'buy'  # spot always buys
+            order = exchange.create_market_order(symbol, side, float(quantity))
+            print(f'  [SPOT] BUY {quantity} {symbol.split("/")[0]} @ ${current_price:.4f}')
+
+            return {
+                'success':    True,
+                'order_id':   order.get('id', 'unknown'),
+                'symbol':     symbol,
+                'direction':  'BUY',
+                'quantity':   float(quantity),
+                'price':      current_price,
+                'cost':       usdt_amount,
+                'trade_mode': 'spot',
+                'leverage':   1,
+                'status':     order.get('status', 'filled')
+            }
 
     except ccxt.InsufficientFunds as e:
         return {'success': False, 'error': f'Insufficient funds: {str(e)}', 'price': 0}
@@ -381,43 +475,72 @@ def execute_real_trade(symbol, direction, usdt_amount):
         return {'success': False, 'error': f'Network error: {str(e)}', 'price': 0}
     except Exception as e:
         return {'success': False, 'error': str(e), 'price': 0}
+        return {'success': False, 'error': f'Network error: {str(e)}', 'price': 0}
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'price': 0}
 
 
-def close_trade(symbol, direction, quantity):
+def close_trade(symbol, direction, quantity, trade_mode='spot'):
     """
-    Close an open position by placing reverse order.
-    Fetches actual balance from Bybit to avoid settlement issues.
+    Close an open position.
+    Spot: sell the crypto we bought.
+    Futures: place reduce-only opposite order to close contract.
     """
     try:
-        base_currency = symbol.split('/')[0]  # e.g. XRP from XRP/USDT
+        if trade_mode == 'futures':
+            futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
+            exchange       = bybit_futures
 
-        # Wait for settlement and retry up to 5 times
-        actual_quantity = 0
-        for attempt in range(5):
-            balance = bybit.fetch_balance()
-            bal = balance.get(base_currency, {})
-            actual_quantity = float(bal.get('free') or bal.get('total') or 0)
-            print(f'  Settlement check {attempt+1}/5: {base_currency} balance = {actual_quantity}')
-            if actual_quantity > 0.1:
-                break
-            time.sleep(5)
+            # Opposite side closes the position
+            close_side = 'sell' if direction == 'BUY' else 'buy'
 
-        if actual_quantity < 0.1:
-            return {'success': False, 'error': f'No {base_currency} balance after 5 attempts', 'close_price': 0}
+            order = exchange.create_market_order(
+                futures_symbol, close_side, float(quantity),
+                params={'reduceOnly': True}
+            )
 
-        # Sell exactly what we have
-        quantity = bybit.amount_to_precision(symbol, actual_quantity * 0.999)
-        order = bybit.create_market_order(symbol, 'sell', float(quantity))
+            ticker      = exchange.fetch_ticker(futures_symbol)
+            close_price = float(ticker['last'])
+            print(f'  [FUTURES] Closed {direction} position @ ${close_price:.4f}')
 
-        ticker = bybit.fetch_ticker(symbol)
-        close_price = float(ticker['last'])
+            return {
+                'success':     True,
+                'order_id':    order.get('id', 'unknown'),
+                'close_price': close_price,
+                'status':      order.get('status', 'filled')
+            }
 
-        return {
-            'success':     True,
-            'order_id':    order.get('id', 'unknown'),
-            'close_price': close_price,
-            'status':      order.get('status', 'filled')
-        }
+        else:
+            # SPOT — fetch actual balance and sell
+            exchange      = bybit_spot
+            base_currency = symbol.split('/')[0]
+
+            actual_quantity = 0
+            for attempt in range(5):
+                balance = exchange.fetch_balance()
+                bal     = balance.get(base_currency, {})
+                actual_quantity = float(bal.get('free') or bal.get('total') or 0)
+                print(f'  Settlement check {attempt+1}/5: {base_currency} balance = {actual_quantity}')
+                if actual_quantity > 0.1:
+                    break
+                time.sleep(10)
+
+            if actual_quantity < 0.1:
+                return {'success': False, 'error': f'No {base_currency} balance after 5 attempts', 'close_price': 0}
+
+            qty   = exchange.amount_to_precision(symbol, actual_quantity * 0.999)
+            order = exchange.create_market_order(symbol, 'sell', float(qty))
+
+            ticker      = exchange.fetch_ticker(symbol)
+            close_price = float(ticker['last'])
+
+            return {
+                'success':     True,
+                'order_id':    order.get('id', 'unknown'),
+                'close_price': close_price,
+                'status':      order.get('status', 'filled')
+            }
+
     except Exception as e:
         return {'success': False, 'error': str(e), 'close_price': 0}
 
@@ -459,7 +582,10 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
         }
 
     available_usdt = balance_info['USDT']
-    print(f'Bybit USDT balance: ${available_usdt:.2f}')
+    trade_mode     = balance_info.get('trade_mode', 'spot')
+    leverage       = LEVERAGE if trade_mode == 'futures' else 1
+    print(f'Bybit USDT balance: ${available_usdt:.2f} | Mode: {trade_mode.upper()} | Leverage: {leverage}x')
+
     # Safety: never trade more than available balance
     amount = min(amount, available_usdt * 0.99)
 
@@ -480,15 +606,20 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
         symbol = CRYPTO_PAIRS[i % len(CRYPTO_PAIRS)]
         signal = signals.get(symbol) or generate_signal(symbol)
 
-        print(f'Trade {i+1}/{num_trades}: {symbol} {signal["direction"]} | RSI:{signal["rsi"]} | Conf:{signal["confidence"]}%')
+        # For futures, use actual signal direction (BUY=long, SELL=short)
+        # For spot, always BUY
+        if trade_mode == 'futures':
+            trade_direction = signal['direction']
+        else:
+            trade_direction = 'BUY'
+
+        print(f'Trade {i+1}/{num_trades}: {symbol} {trade_direction} | RSI:{signal["rsi"]} | Conf:{signal["confidence"]}% | {trade_mode.upper()}')
 
         entry_price = signal['current_price']
         entry_order = None
         close_order = None
 
         try:
-            spot_direction = 'BUY'
-
             # Skip trade if signal confidence too low — unless user forced it
             if signal['confidence'] < 68 and not force:
                 print(f'  ⊘ Signal too weak ({signal["confidence"]}%) — skipping trade')
@@ -496,7 +627,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
                 won = False
                 results['trades'].append({
                     'index': i + 1, 'symbol': symbol,
-                    'direction': signal['direction'],
+                    'direction': trade_direction,
                     'confidence': signal['confidence'],
                     'rsi': signal['rsi'], 'ema_trend': signal['ema_trend'],
                     'macd_trend': signal['macd_trend'],
@@ -505,7 +636,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
                 })
                 continue
 
-            entry_order = execute_real_trade(symbol, spot_direction, trade_usdt)
+            entry_order = execute_real_trade(symbol, trade_direction, trade_usdt, trade_mode)
 
             if entry_order['success']:
                 entry_price = entry_order['price']
@@ -514,38 +645,61 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
                 print(f'  ✓ Entry order placed: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
 
                 # Target-based exit
-                take_profit = entry_price * 1.008  # +0.8% target
-                stop_loss   = entry_price * 0.996  # -0.4% stop loss
-                max_wait    = timeframe_minutes * 60
-                elapsed     = 0
-                print(f'  Monitoring: TP=${take_profit:.4f} SL=${stop_loss:.4f}')
+                # Adjust TP/SL based on leverage
+                tp_pct = 0.008 / leverage   # 0.8% spot, 0.4% futures (hit faster with leverage)
+                sl_pct = 0.004 / leverage   # 0.4% spot, 0.2% futures
+
+                if trade_direction == 'BUY':
+                    take_profit = entry_price * (1 + tp_pct)
+                    stop_loss   = entry_price * (1 - sl_pct)
+                else:  # SHORT
+                    take_profit = entry_price * (1 - tp_pct)
+                    stop_loss   = entry_price * (1 + sl_pct)
+
+                max_wait = timeframe_minutes * 60
+                elapsed  = 0
+                print(f'  Monitoring: TP=${take_profit:.4f} SL=${stop_loss:.4f} ({trade_mode.upper()})')
+
+                # Use correct exchange for price monitoring
+                price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
+                monitor_symbol = entry_order['symbol']  # may be futures format
 
                 while elapsed < max_wait:
                     time.sleep(10)
                     elapsed += 10
                     try:
-                        ticker     = bybit.fetch_ticker(symbol)
+                        ticker     = price_exchange.fetch_ticker(monitor_symbol)
                         live_price = float(ticker['last'])
                         print(f'  Price: ${live_price:.4f} | {elapsed}s/{max_wait}s')
-                        if live_price >= take_profit:
+                        if trade_direction == 'BUY' and live_price >= take_profit:
                             print(f'  ✓ Take profit hit @ ${live_price:.4f}')
                             break
-                        if live_price <= stop_loss:
+                        if trade_direction == 'BUY' and live_price <= stop_loss:
                             print(f'  ✗ Stop loss hit @ ${live_price:.4f}')
+                            break
+                        if trade_direction == 'SELL' and live_price <= take_profit:
+                            print(f'  ✓ Take profit hit (short) @ ${live_price:.4f}')
+                            break
+                        if trade_direction == 'SELL' and live_price >= stop_loss:
+                            print(f'  ✗ Stop loss hit (short) @ ${live_price:.4f}')
                             break
                     except Exception:
                         pass
 
                 # Close position
-                close_order = close_trade(symbol, spot_direction, quantity)
+                close_order = close_trade(monitor_symbol, trade_direction, quantity, trade_mode)
 
                 if close_order['success']:
                     close_price  = close_order['close_price']
-                    price_change = close_price - entry_price
-                    bybit_fee    = trade_usdt * 0.002
-                    real_pnl     = round((price_change / entry_price) * trade_usdt - bybit_fee, 4)
-                    won          = real_pnl > 0
-                    print(f'  ✓ Position closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f}')
+                    if trade_direction == 'BUY':
+                        price_change = close_price - entry_price
+                    else:  # SHORT profits when price falls
+                        price_change = entry_price - close_price
+
+                    bybit_fee = trade_usdt * 0.001 * (2 if trade_mode == 'futures' else 2)
+                    real_pnl  = round((price_change / entry_price) * trade_usdt * leverage - bybit_fee, 4)
+                    won       = real_pnl > 0
+                    print(f'  ✓ Position closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f} [{trade_mode.upper()}]')
                 else:
                     print(f'  ⚠ Close order failed: {close_order.get("error")}')
                     real_pnl = 0.0
