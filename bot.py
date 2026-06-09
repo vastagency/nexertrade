@@ -196,51 +196,99 @@ def calculate_macd(df):
 
 
 # ============================================
-# 5. SIGNAL GENERATION
+# 5. SIGNAL GENERATION — Multi-Timeframe
 # ============================================
-def generate_signal(symbol, timeframe='1m'):
+def generate_signal(symbol, timeframe='5m'):
     """
-    Generate trade signal using RSI + EMA + MACD.
-    Returns direction, confidence and indicator values.
+    Generate trade signal using multi-timeframe RSI + EMA + MACD.
+    Checks 5m and 15m timeframes for confirmation.
+    Higher confidence when both timeframes agree.
     """
     try:
-        df = fetch_ohlcv(symbol, timeframe=timeframe, limit=100)
-        if df is None or len(df) < 30:
-            df = generate_synthetic_ohlcv(limit=100)
+        # Primary timeframe (5m)
+        df5  = fetch_ohlcv(symbol, timeframe='5m',  limit=100)
+        # Secondary timeframe (15m) for trend confirmation
+        df15 = fetch_ohlcv(symbol, timeframe='15m', limit=60)
 
-        rsi                              = calculate_rsi(df)
-        ema_short, ema_long, ema_trend   = calculate_ema(df)
-        macd_line, sig_line, hist, macd_trend = calculate_macd(df)
+        if not df5 or len(df5['close']) < 20:
+            df5 = generate_synthetic_ohlcv(limit=100)
+        if not df15 or len(df15['close']) < 20:
+            df15 = generate_synthetic_ohlcv(limit=60)
 
+        # --- 5m indicators ---
+        rsi5                                = calculate_rsi(df5, period=14)
+        ema_s5, ema_l5, ema_trend5          = calculate_ema(df5, short=9, long=21)
+        macd5, sig5, hist5, macd_trend5     = calculate_macd(df5)
+
+        # --- 15m indicators ---
+        rsi15                               = calculate_rsi(df15, period=14)
+        ema_s15, ema_l15, ema_trend15       = calculate_ema(df15, short=9, long=21)
+        _, _, hist15, macd_trend15          = calculate_macd(df15)
+
+        # --- Price momentum: last 3 closes ---
+        closes5 = df5['close']
+        momentum = 0
+        if len(closes5) >= 4:
+            recent = closes5[-4:]
+            ups   = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
+            downs = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
+            if ups > downs:   momentum =  1
+            elif downs > ups: momentum = -1
+
+        # --- Score system ---
         score = 0
 
-        if rsi < 30:       score += 3
-        elif rsi < 40:     score += 2
-        elif rsi < 48:     score += 1
-        elif rsi > 70:     score -= 3
-        elif rsi > 60:     score -= 2
-        elif rsi > 52:     score -= 1
+        # RSI 5m (weighted heavily)
+        if   rsi5 < 25:   score += 4   # extremely oversold — strong BUY
+        elif rsi5 < 35:   score += 3
+        elif rsi5 < 45:   score += 2
+        elif rsi5 < 50:   score += 1
+        elif rsi5 > 75:   score -= 4   # extremely overbought
+        elif rsi5 > 65:   score -= 3
+        elif rsi5 > 55:   score -= 2
+        elif rsi5 > 52:   score -= 1
 
-        if ema_trend   == 'bullish': score += 1
-        elif ema_trend == 'bearish': score -= 1
+        # RSI 15m agreement bonus
+        if rsi5 < 50 and rsi15 < 50:   score += 1   # both timeframes agree bearish → BUY dip
+        if rsi5 > 50 and rsi15 > 50:   score -= 1
 
-        if macd_trend   == 'bullish': score += 1
-        elif macd_trend == 'bearish': score -= 1
+        # EMA trend
+        if   ema_trend5  == 'bullish': score += 1
+        elif ema_trend5  == 'bearish': score -= 1
+        if   ema_trend15 == 'bullish': score += 1
+        elif ema_trend15 == 'bearish': score -= 1
 
-        if hist > 0:  score += 1
-        elif hist < 0: score -= 1
+        # MACD
+        if   macd_trend5  == 'bullish': score += 1
+        elif macd_trend5  == 'bearish': score -= 1
+        if   hist5 > 0:  score += 1
+        elif hist5 < 0:  score -= 1
 
-        if score >= 2:
+        # 15m MACD confirmation
+        if   macd_trend15 == 'bullish': score += 1
+        elif macd_trend15 == 'bearish': score -= 1
+
+        # Price momentum
+        score += momentum
+
+        # --- Direction and confidence ---
+        if score >= 3:
             direction  = 'BUY'
-            confidence = min(94, 65 + score * 6)
-        elif score <= -2:
+            confidence = min(95, 68 + (score - 3) * 5)
+        elif score <= -3:
             direction  = 'SELL'
-            confidence = min(94, 65 + abs(score) * 6)
+            confidence = min(95, 68 + (abs(score) - 3) * 5)
+        elif score >= 1:
+            direction  = 'BUY'
+            confidence = 60 + score * 3
+        elif score <= -1:
+            direction  = 'SELL'
+            confidence = 60 + abs(score) * 3
         else:
-            direction  = 'BUY' if score >= 0 else 'SELL'
-            confidence = 62 + abs(score) * 4
+            direction  = 'BUY'
+            confidence = 58.0   # neutral — weak
 
-        current_price = float(df['close'][-1])
+        current_price = float(df5['close'][-1])
         real_price    = fetch_current_price(symbol)
         if real_price:
             current_price = real_price
@@ -250,9 +298,10 @@ def generate_signal(symbol, timeframe='1m'):
             'direction':     direction,
             'confidence':    round(confidence, 1),
             'score':         score,
-            'rsi':           round(rsi, 2),
-            'ema_trend':     ema_trend,
-            'macd_trend':    macd_trend,
+            'rsi':           round(rsi5, 2),
+            'rsi15':         round(rsi15, 2),
+            'ema_trend':     ema_trend5,
+            'macd_trend':    macd_trend5,
             'current_price': current_price
         }
 
@@ -261,12 +310,13 @@ def generate_signal(symbol, timeframe='1m'):
         return {
             'symbol':        symbol,
             'direction':     'BUY',
-            'confidence':    65.0,
+            'confidence':    58.0,
             'score':         0,
             'rsi':           50.0,
+            'rsi15':         50.0,
             'ema_trend':     'neutral',
             'macd_trend':    'neutral',
-            'current_price': fetch_current_price(symbol) or 100.0
+            'current_price': fetch_current_price(symbol) or 1.0
         }
 
 
@@ -417,7 +467,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
     signals = {}
     for pair in CRYPTO_PAIRS:
         try:
-            signals[pair] = generate_signal(pair, timeframe='1m')
+            signals[pair] = generate_signal(pair, timeframe='5m')
             time.sleep(0.1)
         except Exception as e:
             print(f'Signal failed for {pair}: {e}')
@@ -464,8 +514,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
                 print(f'  ✓ Entry order placed: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
 
                 # Target-based exit
-                take_profit = entry_price * 1.005  # +0.5%
-                stop_loss   = entry_price * 0.997  # -0.3%
+                take_profit = entry_price * 1.008  # +0.8% target
+                stop_loss   = entry_price * 0.996  # -0.4% stop loss
                 max_wait    = timeframe_minutes * 60
                 elapsed     = 0
                 print(f'  Monitoring: TP=${take_profit:.4f} SL=${stop_loss:.4f}')
@@ -584,7 +634,7 @@ def execute_session_simulated(amount, timeframe_minutes, num_trades=1):
     signals = {}
     for pair in CRYPTO_PAIRS:
         try:
-            signals[pair] = generate_signal(pair, timeframe='1m')
+            signals[pair] = generate_signal(pair, timeframe='5m')
         except Exception:
             signals[pair] = None
 
