@@ -648,7 +648,8 @@ def api_bot_execute():
             'losses':       results['losses'],
             'net_pnl':      results['net_pnl'],
             'win_rate':     results['win_rate'],
-            'new_balance':  round(current_user.balance, 2)
+            'new_balance':  round(current_user.balance, 2),
+            'trade_mode':   results.get('trade_mode', 'spot')
         })
 
     except Exception as e:

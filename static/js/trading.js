@@ -286,7 +286,7 @@ async function startSession(force = false) {
 
   document.getElementById('sessionSummary').style.display   = 'none';
   document.getElementById('sessionStatusTitle').textContent = 'Connecting to market data...';
-  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount}`;
+  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Checking mode...`;
   document.getElementById('sessionIcon').className          = 'session-icon';
   document.getElementById('sessionPanel').style.display     = 'block';
 
@@ -341,6 +341,13 @@ async function startSession(force = false) {
       alert('Trade blocked: ' + (botData.message || 'Unknown error'));
       stopSession(false);
       return;
+    }
+
+    // Show trade mode (FUTURES or SPOT)
+    if (botData.trade_mode) {
+      const modeLabel = botData.trade_mode === 'futures' ? '⚡ FUTURES 2x' : '📦 SPOT';
+      document.getElementById('sessionStatusSub').textContent =
+        `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
     }
 
     const trades       = botData.trades;

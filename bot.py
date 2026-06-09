@@ -213,15 +213,32 @@ def calculate_rsi(df, period=14):
 def calculate_ema(df, short=9, long=21):
     try:
         closes = df['close']
-        def ema(prices, period):
+        if len(closes) < long + 1:
+            return 0, 0, 'neutral'
+
+        def ema_series(prices, period):
             k = 2 / (period + 1)
-            e = prices[0]
+            result = [prices[0]]
             for p in prices[1:]:
-                e = p * k + e * (1 - k)
-            return e
-        ema_short = ema(closes, short)
-        ema_long  = ema(closes, long)
-        trend = 'bullish' if ema_short > ema_long else 'bearish'
+                result.append(p * k + result[-1] * (1 - k))
+            return result
+
+        short_series = ema_series(closes, short)
+        long_series  = ema_series(closes, long)
+
+        ema_short = short_series[-1]
+        ema_long  = long_series[-1]
+
+        # Trend: short EMA above long EMA = bullish
+        # Also check if gap is widening (stronger signal)
+        prev_diff = short_series[-3] - long_series[-3]
+        curr_diff = ema_short - ema_long
+
+        if ema_short > ema_long:
+            trend = 'bullish'
+        else:
+            trend = 'bearish'
+
         return ema_short, ema_long, trend
     except Exception:
         return 0, 0, 'neutral'
@@ -230,19 +247,39 @@ def calculate_ema(df, short=9, long=21):
 def calculate_macd(df):
     try:
         closes = df['close']
-        def ema(prices, period):
+        if len(closes) < 26:
+            return 0, 0, 0, 'neutral'
+
+        def ema_series(prices, period):
+            """Returns full EMA series, not just last value."""
             k = 2 / (period + 1)
-            e = prices[0]
+            result = [prices[0]]
             for p in prices[1:]:
-                e = p * k + e * (1 - k)
-            return e
-        ema12 = ema(closes, 12)
-        ema26 = ema(closes, 26)
-        macd_line = ema12 - ema26
-        # signal as EMA9 of last few macd values (simplified)
-        signal_line = macd_line * 0.95
+                result.append(p * k + result[-1] * (1 - k))
+            return result
+
+        ema12_series = ema_series(closes, 12)
+        ema26_series = ema_series(closes, 26)
+
+        # MACD line = EMA12 - EMA26
+        macd_series = [e12 - e26 for e12, e26 in zip(ema12_series, ema26_series)]
+
+        # Signal line = EMA9 of MACD series
+        if len(macd_series) < 9:
+            return 0, 0, 0, 'neutral'
+
+        signal_series = ema_series(macd_series, 9)
+
+        macd_line   = macd_series[-1]
+        signal_line = signal_series[-1]
         histogram   = macd_line - signal_line
+
+        # Trend based on MACD crossing signal
         trend = 'bullish' if macd_line > signal_line else 'bearish'
+
+        # Also check if histogram is increasing (momentum)
+        hist_momentum = 'increasing' if len(macd_series) > 1 and histogram > (macd_series[-2] - signal_series[-2]) else 'decreasing'
+
         return macd_line, signal_line, histogram, trend
     except Exception:
         return 0, 0, 0, 'neutral'
@@ -291,19 +328,19 @@ def generate_signal(symbol, timeframe='5m'):
         # --- Score system ---
         score = 0
 
-        # RSI 5m (weighted heavily)
-        if   rsi5 < 25:   score += 4   # extremely oversold — strong BUY
-        elif rsi5 < 35:   score += 3
-        elif rsi5 < 45:   score += 2
-        elif rsi5 < 50:   score += 1
-        elif rsi5 > 75:   score -= 4   # extremely overbought
-        elif rsi5 > 65:   score -= 3
-        elif rsi5 > 55:   score -= 2
+        # RSI 5m — most important indicator
+        if   rsi5 < 20:   score += 5   # extremely oversold — very strong BUY
+        elif rsi5 < 30:   score += 4
+        elif rsi5 < 40:   score += 2
+        elif rsi5 < 48:   score += 1
+        elif rsi5 > 80:   score -= 5   # extremely overbought — very strong SELL
+        elif rsi5 > 70:   score -= 4
+        elif rsi5 > 60:   score -= 2
         elif rsi5 > 52:   score -= 1
 
-        # RSI 15m agreement bonus
-        if rsi5 < 50 and rsi15 < 50:   score += 1   # both timeframes agree bearish → BUY dip
-        if rsi5 > 50 and rsi15 > 50:   score -= 1
+        # RSI 15m agreement
+        if   rsi15 < 40:  score += 1
+        elif rsi15 > 60:  score -= 1
 
         # EMA trend
         if   ema_trend5  == 'bullish': score += 1
@@ -311,35 +348,43 @@ def generate_signal(symbol, timeframe='5m'):
         if   ema_trend15 == 'bullish': score += 1
         elif ema_trend15 == 'bearish': score -= 1
 
-        # MACD
-        if   macd_trend5  == 'bullish': score += 1
-        elif macd_trend5  == 'bearish': score -= 1
+        # MACD (now correctly calculated)
+        if   macd_trend5  == 'bullish': score += 2
+        elif macd_trend5  == 'bearish': score -= 2
         if   hist5 > 0:  score += 1
         elif hist5 < 0:  score -= 1
 
-        # 15m MACD confirmation
+        # 15m MACD
         if   macd_trend15 == 'bullish': score += 1
         elif macd_trend15 == 'bearish': score -= 1
 
         # Price momentum
         score += momentum
 
-        # --- Direction and confidence ---
-        if score >= 3:
+        # --- CRITICAL: RSI extremes OVERRIDE everything ---
+        # RSI below 25 is always a BUY regardless of other indicators
+        # RSI above 75 is always a SELL regardless of other indicators
+        if rsi5 < 25:
             direction  = 'BUY'
-            confidence = min(95, 68 + (score - 3) * 5)
+            confidence = min(95, 75 + (25 - rsi5))
+        elif rsi5 > 75:
+            direction  = 'SELL'
+            confidence = min(95, 75 + (rsi5 - 75))
+        elif score >= 3:
+            direction  = 'BUY'
+            confidence = min(95, 68 + (score - 3) * 4)
         elif score <= -3:
             direction  = 'SELL'
-            confidence = min(95, 68 + (abs(score) - 3) * 5)
+            confidence = min(95, 68 + (abs(score) - 3) * 4)
         elif score >= 1:
             direction  = 'BUY'
-            confidence = 60 + score * 3
+            confidence = 58 + score * 3
         elif score <= -1:
             direction  = 'SELL'
-            confidence = 60 + abs(score) * 3
+            confidence = 58 + abs(score) * 3
         else:
             direction  = 'BUY'
-            confidence = 58.0   # neutral — weak
+            confidence = 55.0   # truly neutral
 
         current_price = float(df5['close'][-1])
         real_price    = fetch_current_price(symbol)
@@ -567,7 +612,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
         'losses':       0,
         'net_pnl':      0.0,
         'win_rate':     0.0,
-        'real_trading': True
+        'real_trading': True,
+        'trade_mode':   'spot'
     }
 
     # Check Bybit connection and balance
@@ -581,9 +627,10 @@ def execute_session(amount, timeframe_minutes, num_trades=1, force=False):
             'error': 'Bybit unreachable. Please try again in a few minutes.'
         }
 
-    available_usdt = balance_info['USDT']
-    trade_mode     = balance_info.get('trade_mode', 'spot')
-    leverage       = LEVERAGE if trade_mode == 'futures' else 1
+    available_usdt       = balance_info['USDT']
+    trade_mode           = balance_info.get('trade_mode', 'spot')
+    leverage             = LEVERAGE if trade_mode == 'futures' else 1
+    results['trade_mode'] = trade_mode
     print(f'Bybit USDT balance: ${available_usdt:.2f} | Mode: {trade_mode.upper()} | Leverage: {leverage}x')
 
     # Safety: never trade more than available balance
