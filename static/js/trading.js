@@ -313,22 +313,28 @@ async function startSession(force = false) {
   startTimer(sessionSecs);
   document.getElementById('sessionStatusTitle').textContent = 'Connected — executing live trade...';
 
+  // 7-minute timeout so long sessions don't get cut off by browser
+  const controller   = new AbortController();
+  const fetchTimeout = setTimeout(() => controller.abort(), 420000);
+
   try {
-    // FIX: properly closed fetch with all brackets correct
     const botRes = await fetch('/api/bot/execute', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal:  controller.signal,
       body: JSON.stringify({
-        amount:    selectedAmount,
-        timeframe: selectedTimeframe,
+        amount:     selectedAmount,
+        timeframe:  selectedTimeframe,
         num_trades: 1,
-        force:     force
+        force:      force
       })
     });
 
+    clearTimeout(fetchTimeout);
+
     const botData = await botRes.json();
 
-    // Weak signal — show warning modal instead of crashing
+    // Weak signal — show warning modal
     if (!botData.success && botData.weak_signal) {
       stopSession(false);
       showWeakSignalModal(botData);
@@ -350,7 +356,7 @@ async function startSession(force = false) {
         `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
     }
 
-    const trades       = botData.trades;
+    const trades        = botData.trades;
     const tradeInterval = Math.floor(sessionSecs / trades.length);
 
     // Animate each trade at correct time intervals
@@ -393,11 +399,26 @@ async function startSession(force = false) {
     }
 
   } catch (err) {
+    clearTimeout(fetchTimeout);
     console.error('Bot execute error:', err);
-    document.getElementById('sessionStatusTitle').textContent = '⚠ Network error — trade blocked';
-    document.getElementById('sessionStatusTitle').style.color = '#ef4444';
-    alert('Connection error. Please check your internet and try again.');
-    stopSession(false);
+
+    if (err.name === 'AbortError') {
+      // Timed out — trade likely completed on server, silently refresh balance
+      document.getElementById('sessionStatusTitle').textContent = 'Session timed out — refreshing balance...';
+      try {
+        const dataRes  = await fetch('/api/user/data');
+        const userData = await dataRes.json();
+        availableBalance = userData.balance;
+        const balEl = document.getElementById('availableBalance');
+        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+      } catch (_) {}
+      stopSession(false);
+    } else {
+      document.getElementById('sessionStatusTitle').textContent = '⚠ Network error — trade blocked';
+      document.getElementById('sessionStatusTitle').style.color = '#ef4444';
+      alert('Connection error. Please check your internet and try again.');
+      stopSession(false);
+    }
   }
 }
 
@@ -578,8 +599,8 @@ async function updateTicker() {
     if (!prices || !prices.length) return;
 
     document.querySelectorAll('.ticker-item').forEach((item, i) => {
-      const data    = prices[i % prices.length];
-      const priceEl = item.querySelector('.ticker-price');
+      const data     = prices[i % prices.length];
+      const priceEl  = item.querySelector('.ticker-price');
       const changeEl = item.querySelector('.ticker-change');
       if (priceEl && data) {
         priceEl.textContent = data.price > 1000
