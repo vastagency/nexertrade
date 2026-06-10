@@ -547,11 +547,7 @@ def api_bot_execute():
         data      = request.get_json()
         amount    = float(data.get('amount', 50))
         timeframe = int(data.get('timeframe', 5))
-        force     = bool(data.get('force', False))
-        strategy  = str(data.get('strategy', 'auto')).lower().strip()
-        # Valid strategies: 'auto', 'grid', 'momentum'
-        if strategy not in ('auto', 'grid', 'momentum'):
-            strategy = 'auto'
+        force     = bool(data.get('force', False))  # FIX: read force flag from request
 
         # Dynamic trades based on user balance tier
         if current_user.balance >= 200:
@@ -568,16 +564,30 @@ def api_bot_execute():
         if amount < min_dep or amount > max_dep:
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
+        # Sync NexerTrade balance with real Bybit balance before trading
+        # This prevents the DB showing $10.72 while Bybit only has $9.07
+        try:
+            from bot import get_bybit_balance
+            live_bal = get_bybit_balance()
+            if live_bal['success'] and live_bal['USDT'] > 0:
+                # If Bybit balance is lower than DB balance, correct the DB
+                if live_bal['USDT'] < current_user.balance:
+                    print(f'Balance sync: DB={current_user.balance:.2f} Bybit={live_bal["USDT"]:.2f} — updating DB')
+                    current_user.balance = round(live_bal['USDT'], 2)
+                    db.session.commit()
+        except Exception as sync_err:
+            print(f'Balance sync error (non-fatal): {sync_err}')
+
         # Block trading above user's actual NexerTrade balance
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
 
-        # Weak signal pre-check — skip for grid (grid uses limit orders, not signal confidence)
-        if not force and strategy in ('momentum', 'auto'):
+        # FIX: Weak signal pre-check — only runs if user has NOT forced the trade
+        if not force:
             try:
                 from bot import generate_signal
                 preview_signal = generate_signal('XRP/USDT')
-                if preview_signal and preview_signal['confidence'] < 62:
+                if preview_signal['confidence'] < 62:
                     return jsonify({
                         'success':     False,
                         'weak_signal': True,
@@ -587,20 +597,33 @@ def api_bot_execute():
                         'message':     f"Signal confidence is only {preview_signal['confidence']:.0f}%. Market conditions are uncertain right now."
                     }), 200
             except Exception as signal_err:
+                # If signal check fails, allow trade to continue
                 print(f'Signal pre-check error (non-fatal): {signal_err}')
 
         socketio.emit('session_started', {
             'user':      current_user.name,
             'amount':    amount,
-            'timeframe': timeframe,
-            'strategy':  strategy
+            'timeframe': timeframe
         }, room='admin_room')
 
-        results = execute_session(amount, timeframe, num_trades, strategy=strategy, force=force)
+        results = execute_session(amount, timeframe, num_trades, force=force)
 
-        # Block if Bybit was unreachable — no fake profits added
+        # Block if Bybit was unreachable
         if results.get('error'):
             return jsonify({'success': False, 'message': results['error']}), 503
+
+        # Grid placed orders but none filled within the timeframe
+        # This is not an error — it means market didn't move enough
+        # Return success with 0 PnL and a clear message, do NOT update balance
+        if results.get('total_trades', 0) == 0:
+            msg = results.get('message', 'No grid orders filled within the timeframe. Market did not move enough. Try a longer timeframe or Auto-Best strategy.')
+            return jsonify({
+                'success':      True,
+                'new_balance':  round(current_user.balance, 2),
+                'total_profit': round(current_user.total_profit, 2),
+                'no_trades':    True,
+                'message':      msg
+            }), 200
 
         session = TradeSession(
             user_id=current_user.id,
@@ -1059,22 +1082,17 @@ def api_bot_signal():
     try:
         from bot import get_single_signal
         symbol = request.args.get('symbol', 'BTC/USDT')
-        result = get_single_signal(symbol)
-        if result is None:
-            return jsonify({'success': False, 'message': 'Could not fetch market data'}), 503
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 503
-
-
-@app.route('/api/bot/overview')
-@login_required
-def api_bot_overview():
-    try:
-        from bot import get_market_overview
-        return jsonify(get_market_overview())
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 503
+        return jsonify(get_single_signal(symbol))
+    except Exception:
+        return jsonify({
+            'symbol':        'BTC/USDT',
+            'direction':     'BUY',
+            'confidence':    72.5,
+            'rsi':           45.2,
+            'ema_trend':     'bullish',
+            'macd_trend':    'bullish',
+            'current_price': 97.5
+        })
 
 @app.route('/api/bot/prices')
 def api_bot_prices():

@@ -683,21 +683,65 @@ def close_trade(symbol, direction, quantity, trade_mode='spot'):
 # ============================================
 # 7. GRID / DCA ENGINE
 # ============================================
+def select_best_grid_pair(pairs, usdt_per_level, trade_mode, leverage):
+    """
+    Pick the best pair for grid trading:
+    - Must have enough balance to meet minimum order size
+    - Prefer pairs with higher recent volatility (ATR) — more likely to fill
+    - Ignore signal direction (grid buys regardless of direction)
+    """
+    exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
+    best_pair = None
+    best_atr_pct = 0
+
+    for pair in pairs:
+        try:
+            # Check minimum order size first
+            trade_symbol = pair.replace('/USDT', '/USDT:USDT') if trade_mode == 'futures' else pair
+            markets = exchange.load_markets()
+            market  = markets.get(trade_symbol, {})
+            ticker  = exchange.fetch_ticker(trade_symbol)
+            price   = float(ticker['last'])
+            qty     = (usdt_per_level * leverage) / price
+            min_qty = market.get('limits', {}).get('amount', {}).get('min', 0)
+
+            if qty < min_qty:
+                print(f'  Grid skip {pair}: qty={qty:.6f} < min={min_qty} (need more balance)')
+                continue
+
+            # Check ATR for volatility
+            df = fetch_ohlcv(pair, timeframe='5m', limit=50)
+            if not df:
+                continue
+            atr = calculate_atr(df)
+            atr_pct = (atr / price) * 100 if price > 0 else 0
+
+            print(f'  Grid candidate {pair}: qty={qty:.4f} ATR={atr_pct:.3f}%')
+
+            if atr_pct > best_atr_pct:
+                best_atr_pct = atr_pct
+                best_pair    = pair
+            time.sleep(0.2)
+        except Exception as e:
+            print(f'  Grid pair check failed {pair}: {e}')
+
+    if best_pair:
+        print(f'  Best grid pair: {best_pair} (ATR {best_atr_pct:.3f}%)')
+    else:
+        print(f'  No viable grid pair found for balance level')
+    return best_pair
+
+
 def execute_grid_session(amount, timeframe_minutes, symbol=None):
     """
-    Grid/DCA strategy — the closest equivalent to the high-win-rate
-    platform you used. Places GRID_LEVELS buy orders at evenly spaced
-    price levels below current price. Sells each filled level when
-    price recovers by GRID_TP_PCT. Profitable in ranging and
-    mild-trending markets. Very high win rate because each individual
-    level is a small, tight trade.
+    Grid/DCA strategy.
 
-    How it works:
-    1. Get current price for the best or specified pair
-    2. Place GRID_LEVELS limit buy orders spaced GRID_SPACING_PCT apart
-    3. Monitor fills, place sell order above each fill at TP
-    4. Run until all levels close or time expires
-    5. Cancel any unfilled levels and report real PnL
+    Key fixes vs original:
+    1. Spacing is dynamic — based on ATR so orders actually fill within the session
+    2. Pair selected by volatility (ATR), not signal direction
+    3. Pairs where balance is too small are skipped cleanly
+    4. Returns clear message if no orders can be placed (not a crash)
+    5. Tighter TP (0.3%) so fills turn profit faster in short sessions
     """
     results = {
         'strategy':     'grid_dca',
@@ -721,89 +765,106 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
 
     available_usdt        = balance_info['USDT']
     trade_mode            = balance_info.get('trade_mode', 'spot')
+    leverage              = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     exchange              = bybit_futures if trade_mode == 'futures' else bybit_spot
 
-    # Cap amount to available balance
     amount = min(amount, available_usdt * 0.95)
     usdt_per_level = amount / GRID_LEVELS
 
-    # Pick best pair if none specified
+    # Pick best pair by volatility if none specified
     if not symbol:
-        best = select_best_pair(CRYPTO_PAIRS)
-        if best:
-            symbol = best['symbol']
-        else:
-            symbol = DEFAULT_PAIR
+        symbol = select_best_grid_pair(CRYPTO_PAIRS, usdt_per_level, trade_mode, leverage)
+        if not symbol:
+            # All pairs too expensive for current balance — fall back to most affordable
+            symbol = 'XRP/USDT'
+            print(f'  Falling back to XRP/USDT (most affordable)')
 
-    # Futures symbol conversion
+    trade_symbol = symbol.replace('/USDT', '/USDT:USDT') if trade_mode == 'futures' else symbol
+
     if trade_mode == 'futures':
-        trade_symbol = symbol.replace('/USDT', '/USDT:USDT')
         try:
             exchange.set_leverage(LEVERAGE, trade_symbol)
         except Exception:
             pass
-    else:
-        trade_symbol = symbol
 
     ticker        = exchange.fetch_ticker(trade_symbol)
     entry_price   = float(ticker['last'])
 
-    print(f'Grid session: {trade_symbol} | Price: ${entry_price:.4f} | '
-          f'{GRID_LEVELS} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()}')
+    # Dynamic spacing based on ATR — this is the key fix
+    # Spacing should be ~0.3x ATR so orders fill within the session timeframe
+    df5 = fetch_ohlcv(symbol, timeframe='5m', limit=50)
+    if df5:
+        atr = calculate_atr(df5)
+        atr_pct = (atr / entry_price) * 100
+        # Use 0.25-0.5x ATR as spacing — tight enough to fill, wide enough to profit
+        dynamic_spacing = max(0.001, min(0.003, atr_pct * 0.003))
+        # Tighter for very short sessions
+        if timeframe_minutes <= 2:
+            dynamic_spacing = max(0.001, dynamic_spacing * 0.5)
+        elif timeframe_minutes <= 5:
+            dynamic_spacing = max(0.0015, dynamic_spacing * 0.7)
+    else:
+        dynamic_spacing = 0.002  # 0.2% fallback
 
-    # Calculate grid levels (buy below current price)
+    # TP should be just above spacing so it's achievable
+    dynamic_tp = dynamic_spacing * 1.2
+
+    print(f'Grid session: {trade_symbol} | Price: ${entry_price:.4f} | '
+          f'{GRID_LEVELS} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()} | '
+          f'Spacing: {dynamic_spacing*100:.3f}% | TP: {dynamic_tp*100:.3f}%')
+
+    # Calculate grid levels below current price
     grid_prices = []
     for i in range(GRID_LEVELS):
-        level_price = entry_price * (1 - GRID_SPACING_PCT * (i + 1))
+        level_price = entry_price * (1 - dynamic_spacing * (i + 1))
         grid_prices.append(round(level_price, 6))
 
     print(f'  Grid levels: {[f"${p:.4f}" for p in grid_prices]}')
 
     markets = exchange.load_markets()
     market  = markets.get(trade_symbol, {})
-
-    open_orders  = []  # (order_id, level_price, quantity, level_index)
-    closed_trades = []
+    open_orders  = []
+    completed_levels = []
 
     # Place all grid limit buy orders
+    placed_count = 0
     for idx, level_price in enumerate(grid_prices):
         try:
-            quantity = (usdt_per_level * (LEVERAGE if trade_mode == 'futures' else 1)) / level_price
+            quantity = (usdt_per_level * leverage) / level_price
             min_qty  = market.get('limits', {}).get('amount', {}).get('min', 0)
             if quantity < min_qty:
                 print(f'  Level {idx+1}: too small (qty={quantity:.6f} < min={min_qty})')
                 continue
             quantity = float(exchange.amount_to_precision(trade_symbol, quantity))
-            order = exchange.create_limit_order(trade_symbol, 'buy', quantity, level_price)
+            tp_price = level_price * (1 + dynamic_tp)
+            order    = exchange.create_limit_order(trade_symbol, 'buy', quantity, level_price)
             open_orders.append({
                 'order_id':    order['id'],
                 'level_price': level_price,
                 'quantity':    quantity,
                 'level_index': idx + 1,
-                'tp_price':    level_price * (1 + GRID_TP_PCT)
+                'tp_price':    tp_price
             })
-            print(f'  Level {idx+1}: limit BUY {quantity} @ ${level_price:.4f} (TP: ${level_price * (1 + GRID_TP_PCT):.4f})')
+            print(f'  Level {idx+1}: limit BUY {quantity} @ ${level_price:.4f} (TP: ${tp_price:.4f})')
+            placed_count += 1
             time.sleep(0.3)
         except Exception as e:
             print(f'  Level {idx+1} order failed: {e}')
 
-    if not open_orders:
-        return {
-            **results,
-            'real_trading': False,
-            'error': 'Could not place any grid orders — check balance and minimum order sizes.'
-        }
+    if placed_count == 0:
+        # Return a graceful no-trade result, not an error that crashes the session
+        print(f'  No grid orders placed — balance ${amount:.2f} too small for {symbol} minimum sizes')
+        results['message'] = f'Balance ${amount:.2f} is too small to place grid orders on {symbol}. Try XRP or deposit more.'
+        return results
 
     # Monitor and manage grid
-    max_wait   = timeframe_minutes * 60
-    elapsed    = 0
-    check_interval = 15  # check every 15 seconds
+    max_wait       = timeframe_minutes * 60
+    elapsed        = 0
+    check_interval = 10
     session_loss   = 0.0
     max_loss_limit = amount * MAX_SESSION_LOSS_PCT
-
-    filled_levels    = {}  # level_price -> sell_order_id
-    completed_levels = []
+    filled_levels  = {}
 
     while elapsed < max_wait and open_orders:
         time.sleep(check_interval)
@@ -815,17 +876,13 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
         except Exception:
             continue
 
-        # Check each open buy order for fill
         still_open = []
         for level in open_orders:
             try:
                 order_status = exchange.fetch_order(level['order_id'], trade_symbol)
                 status       = order_status.get('status', 'open')
-
-                if status == 'closed' or status == 'filled':
-                    # Level got filled — place TP sell order
-                    print(f'  ✓ Level {level["level_index"]} filled @ ${level["level_price"]:.4f} '
-                          f'— placing TP sell @ ${level["tp_price"]:.4f}')
+                if status in ('closed', 'filled'):
+                    print(f'  ✓ Level {level["level_index"]} filled @ ${level["level_price"]:.4f} — placing TP @ ${level["tp_price"]:.4f}')
                     try:
                         sell_order = exchange.create_limit_order(
                             trade_symbol, 'sell', level['quantity'], level['tp_price']
@@ -846,64 +903,58 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
 
         open_orders = still_open
 
-        # Check for filled TP (sell) orders
         completed_keys = []
         for buy_price, sell_info in filled_levels.items():
             try:
                 sell_status = exchange.fetch_order(sell_info['sell_order_id'], trade_symbol)
                 if sell_status.get('status') in ('closed', 'filled'):
-                    actual_sell_price = float(sell_status.get('average') or sell_info['tp_price'])
-                    bybit_fee = usdt_per_level * 0.002   # 0.1% per side
+                    actual_sell = float(sell_status.get('average') or sell_info['tp_price'])
+                    bybit_fee   = usdt_per_level * 0.002
                     pnl = round(
-                        (actual_sell_price - sell_info['buy_price'])
+                        (actual_sell - sell_info['buy_price'])
                         / sell_info['buy_price']
                         * usdt_per_level
-                        * (LEVERAGE if trade_mode == 'futures' else 1)
+                        * leverage
                         - bybit_fee, 4
                     )
-                    print(f'  ✓ TP hit level {sell_info["level_index"]}: '
-                          f'bought ${sell_info["buy_price"]:.4f} → sold ${actual_sell_price:.4f} | PnL: ${pnl:.4f}')
+                    print(f'  ✓ TP hit level {sell_info["level_index"]}: ${sell_info["buy_price"]:.4f}→${actual_sell:.4f} PnL:${pnl:.4f}')
                     completed_keys.append(buy_price)
                     completed_levels.append({
-                        'level_index':  sell_info['level_index'],
-                        'buy_price':    sell_info['buy_price'],
-                        'sell_price':   actual_sell_price,
-                        'pnl':          pnl,
-                        'won':          pnl > 0
+                        'level_index': sell_info['level_index'],
+                        'buy_price':   sell_info['buy_price'],
+                        'sell_price':  actual_sell,
+                        'pnl':         pnl,
+                        'won':         pnl > 0
                     })
-                    session_loss -= pnl  # negative = we made money
             except Exception:
                 pass
 
         for k in completed_keys:
             del filled_levels[k]
 
-        print(f'  [{elapsed}s/{max_wait}s] Price: ${live_price:.4f} | '
-              f'Open buys: {len(open_orders)} | Filled waiting TP: {len(filled_levels)} | '
-              f'Completed: {len(completed_levels)}')
+        print(f'  [{elapsed}s/{max_wait}s] Price:${live_price:.4f} | '
+              f'Open:{len(open_orders)} | Waiting TP:{len(filled_levels)} | Done:{len(completed_levels)}')
 
-        # Risk guard — stop if session loss exceeds limit
         current_loss = sum(t['pnl'] for t in completed_levels if t['pnl'] < 0)
         if abs(current_loss) > max_loss_limit:
-            print(f'  ⚠ Session loss limit reached (${current_loss:.4f}) — closing all positions')
+            print(f'  ⚠ Session loss limit reached — closing all')
             break
 
-    # Cancel all remaining open buy orders
+    # Cancel remaining open buys
     print('  Cancelling unfilled buy orders...')
     for level in open_orders:
         try:
             exchange.cancel_order(level['order_id'], trade_symbol)
-            print(f'  Cancelled level {level["level_index"]} buy @ ${level["level_price"]:.4f}')
+            print(f'  Cancelled level {level["level_index"]} @ ${level["level_price"]:.4f}')
         except Exception as e:
-            print(f'  Cancel failed for level {level["level_index"]}: {e}')
+            print(f'  Cancel failed level {level["level_index"]}: {e}')
 
-    # Cancel pending TP orders for filled buys and close them at market
+    # Close any filled-but-TP-not-hit levels at market
     for buy_price, sell_info in filled_levels.items():
         try:
             exchange.cancel_order(sell_info['sell_order_id'], trade_symbol)
         except Exception:
             pass
-        # Close at market to exit cleanly
         try:
             close_result = close_trade(trade_symbol, 'BUY', sell_info['quantity'], trade_mode)
             if close_result['success']:
@@ -913,7 +964,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
                     (close_price - sell_info['buy_price'])
                     / sell_info['buy_price']
                     * usdt_per_level
-                    * (LEVERAGE if trade_mode == 'futures' else 1)
+                    * leverage
                     - bybit_fee, 4
                 )
                 completed_levels.append({
@@ -923,20 +974,19 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
                     'pnl':         pnl,
                     'won':         pnl > 0
                 })
-                print(f'  Market close level {sell_info["level_index"]} @ ${close_price:.4f} | PnL: ${pnl:.4f}')
+                print(f'  Market close level {sell_info["level_index"]} @ ${close_price:.4f} PnL:${pnl:.4f}')
         except Exception as e:
-            print(f'  Market close failed for level {sell_info["level_index"]}: {e}')
+            print(f'  Market close failed: {e}')
 
-    # Build results
     for t in completed_levels:
         results['trades'].append({
-            'index':     t['level_index'],
-            'symbol':    symbol,
-            'direction': 'BUY',
-            'strategy':  'grid_dca',
-            'profit':    t['pnl'],
-            'won':       t['won'],
-            'price':     t['buy_price'],
+            'index':      t['level_index'],
+            'symbol':     symbol,
+            'direction':  'BUY',
+            'strategy':   'grid_dca',
+            'profit':     t['pnl'],
+            'won':        t['won'],
+            'price':      t['buy_price'],
             'real_order': True
         })
         results['total_trades'] += 1
@@ -954,9 +1004,6 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     return results
 
 
-# ============================================
-# 8. MOMENTUM SCALPER SESSION
-# ============================================
 def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=False):
     """
     Momentum scalper — multi-timeframe signal with trend-aware direction.
