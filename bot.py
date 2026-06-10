@@ -719,14 +719,16 @@ def select_best_grid_pair(pairs, usdt_per_level, trade_mode, leverage):
 
 def execute_grid_session(amount, timeframe_minutes, symbol=None):
     """
-    Grid/DCA strategy — high win rate design.
+    Grid/DCA strategy — RSI-aware version.
 
-    Key design:
-    - Level 1 is a MARKET order at current price — guaranteed fill every session
-    - Levels 2-5 are limit orders below current price — fill if price dips
-    - Dynamic spacing based on ATR so orders are within realistic price range
-    - TP is 0.18-0.3% above each fill — tight enough to close quickly
-    - Pair selected by ATR (volatility), not signal direction
+    Key logic:
+    - Only enter if RSI < 58 (not overbought). Overbought = likely to keep falling = bad for BUY grid.
+    - Level 1: market order ONLY when RSI < 48 (oversold/neutral = likely to bounce).
+      When RSI 48-58: Level 1 is a tight limit 0.05% below entry (not immediate market).
+      When RSI > 58: skip Level 1 entirely (price at top, all levels below as limits).
+    - All TP levels calculated from their own fill price, not from entry.
+    - Dynamic TP/spacing based on ATR.
+    - At session end: if Level 1 TP not hit, market-close it to cut loss small.
     """
     results = {
         'strategy':     'grid_dca',
@@ -754,7 +756,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     amount         = min(amount, available_usdt * 0.95)
     usdt_per_level = amount / GRID_LEVELS
 
-    # Pick best pair by volatility
+    # Pick best pair by volatility (ATR)
     if not symbol:
         symbol = select_best_grid_pair(CRYPTO_PAIRS, usdt_per_level, trade_mode, leverage)
         if not symbol:
@@ -772,24 +774,51 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     ticker      = exchange.fetch_ticker(trade_symbol)
     entry_price = float(ticker['last'])
 
+    # Get RSI to decide Level 1 strategy
+    current_rsi  = 50.0
+    market_trend = 'neutral'
+    try:
+        df5 = fetch_ohlcv(symbol, timeframe='5m', limit=50)
+        if df5:
+            current_rsi = calculate_rsi(df5['close'], period=14)
+            _, _, ema_trend5  = calculate_ema_trend(df5['close'], short=9, long=21)
+            market_trend = ema_trend5
+    except Exception:
+        pass
+
+    print(f'  Grid RSI check: RSI={current_rsi:.1f} Trend={market_trend}')
+
+    # RSI gate: if price is overbought (RSI > 62), market is likely to keep falling
+    # A BUY grid in overbought conditions means we buy at the top and price just drops
+    if current_rsi > 62:
+        print(f'  ⚠ RSI {current_rsi:.1f} > 62 — market overbought, skipping grid to avoid buying into drop')
+        results['message'] = (
+            f'RSI is {current_rsi:.1f} — market may be overbought. '
+            f'Grid skipped to protect capital. Try again in a few minutes or use Auto-Best.'
+        )
+        return results
+
     # Dynamic spacing from ATR
-    df5 = fetch_ohlcv(symbol, timeframe='5m', limit=50)
-    if df5:
-        atr     = calculate_atr(df5)
-        atr_pct = (atr / entry_price) * 100
-        dynamic_spacing = max(0.001, min(0.003, atr_pct * 0.003))
-        if timeframe_minutes <= 2:
-            dynamic_spacing = max(0.001, dynamic_spacing * 0.5)
-        elif timeframe_minutes <= 5:
-            dynamic_spacing = max(0.0015, dynamic_spacing * 0.7)
-    else:
+    try:
+        df5_check = fetch_ohlcv(symbol, timeframe='5m', limit=50) if not df5 else df5
+        if df5_check:
+            atr     = calculate_atr(df5_check)
+            atr_pct = (atr / entry_price) * 100 if entry_price > 0 else 0
+            dynamic_spacing = max(0.001, min(0.003, atr_pct * 0.003))
+            if timeframe_minutes <= 2:
+                dynamic_spacing = max(0.001, dynamic_spacing * 0.5)
+            elif timeframe_minutes <= 5:
+                dynamic_spacing = max(0.0015, dynamic_spacing * 0.7)
+        else:
+            dynamic_spacing = 0.002
+    except Exception:
         dynamic_spacing = 0.002
 
     dynamic_tp = dynamic_spacing * 1.2
 
     print(f'Grid session: {trade_symbol} | Price: ${entry_price:.4f} | '
           f'{GRID_LEVELS} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()} | '
-          f'Spacing: {dynamic_spacing*100:.3f}% | TP: {dynamic_tp*100:.3f}%')
+          f'Spacing: {dynamic_spacing*100:.3f}% | TP: {dynamic_tp*100:.3f}% | RSI: {current_rsi:.1f}')
 
     markets  = exchange.load_markets()
     market   = markets.get(trade_symbol, {})
@@ -803,29 +832,47 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     for idx in range(GRID_LEVELS):
         try:
             if idx == 0:
-                # Level 1: MARKET ORDER at current price — guaranteed fill
+                # Level 1 strategy depends on RSI:
+                # RSI < 48 (oversold/neutral): market order — price is low, likely to bounce
+                # RSI 48-62: tight limit just below entry — let price dip slightly before entering
+                # RSI > 62: already handled above (return early)
                 qty = (usdt_per_level * leverage) / entry_price
                 if qty < min_qty:
-                    print(f'  Level 1 market: too small ({qty:.6f} < {min_qty})')
+                    print(f'  Level 1: too small ({qty:.6f} < {min_qty})')
                 else:
-                    qty   = float(exchange.amount_to_precision(trade_symbol, qty))
-                    tp_p  = entry_price * (1 + dynamic_tp)
-                    side  = 'buy'
-                    order = exchange.create_market_order(trade_symbol, side, qty)
-                    # Immediately place TP sell for this guaranteed fill
-                    try:
-                        sell_ord = exchange.create_limit_order(trade_symbol, 'sell', qty, tp_p)
-                        filled_levels[entry_price] = {
-                            'sell_order_id': sell_ord['id'],
-                            'quantity':      qty,
-                            'buy_price':     entry_price,
-                            'tp_price':      tp_p,
-                            'level_index':   1
-                        }
-                        print(f'  Level 1: MARKET BUY {qty} @ ~${entry_price:.4f} (TP: ${tp_p:.4f}) — FILLED')
+                    qty  = float(exchange.amount_to_precision(trade_symbol, qty))
+                    tp_p = entry_price * (1 + dynamic_tp)
+
+                    if current_rsi < 48:
+                        # Market order — price is at/near bottom
+                        order = exchange.create_market_order(trade_symbol, 'buy', qty)
+                        try:
+                            sell_ord = exchange.create_limit_order(trade_symbol, 'sell', qty, tp_p)
+                            filled_levels[entry_price] = {
+                                'sell_order_id': sell_ord['id'],
+                                'quantity':      qty,
+                                'buy_price':     entry_price,
+                                'tp_price':      tp_p,
+                                'level_index':   1
+                            }
+                            print(f'  Level 1: MARKET BUY {qty} @ ~${entry_price:.4f} (TP: ${tp_p:.4f}) RSI={current_rsi:.1f} — FILLED')
+                            placed_count += 1
+                        except Exception as tp_err:
+                            print(f'  Level 1 TP order failed: {tp_err}')
+                    else:
+                        # RSI 48-62: limit order just below entry — safer entry
+                        level1_price = entry_price * (1 - dynamic_spacing * 0.5)
+                        tp_p_1 = level1_price * (1 + dynamic_tp)
+                        order  = exchange.create_limit_order(trade_symbol, 'buy', qty, level1_price)
+                        open_orders.append({
+                            'order_id':    order['id'],
+                            'level_price': level1_price,
+                            'quantity':    qty,
+                            'level_index': 1,
+                            'tp_price':    tp_p_1
+                        })
+                        print(f'  Level 1: limit BUY {qty} @ ${level1_price:.4f} (TP: ${tp_p_1:.4f}) RSI={current_rsi:.1f} — waiting fill')
                         placed_count += 1
-                    except Exception as tp_err:
-                        print(f'  Level 1 TP order failed: {tp_err}')
             else:
                 # Levels 2-5: limit orders below current price
                 level_price = entry_price * (1 - dynamic_spacing * idx)
@@ -853,7 +900,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
         results['message'] = f'Balance ${amount:.2f} too small for {symbol} minimum order sizes.'
         return results
 
-    # Monitor: check limit order fills + check if TP orders complete
+    # Monitor: check limit order fills and TP completions
     max_wait       = timeframe_minutes * 60
     elapsed        = 0
     check_interval = 10
@@ -875,16 +922,19 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
             try:
                 order_status = exchange.fetch_order(level['order_id'], trade_symbol)
                 if order_status.get('status') in ('closed', 'filled'):
-                    print(f'  ✓ Level {level["level_index"]} limit filled @ ${level["level_price"]:.4f}')
+                    actual_fill = float(order_status.get('average') or level['level_price'])
+                    # TP based on actual fill price, not original level price
+                    tp_from_fill = actual_fill * (1 + dynamic_tp)
+                    print(f'  ✓ Level {level["level_index"]} filled @ ${actual_fill:.4f} — TP @ ${tp_from_fill:.4f}')
                     try:
                         sell_ord = exchange.create_limit_order(
-                            trade_symbol, 'sell', level['quantity'], level['tp_price']
+                            trade_symbol, 'sell', level['quantity'], tp_from_fill
                         )
-                        filled_levels[level['level_price']] = {
+                        filled_levels[actual_fill] = {
                             'sell_order_id': sell_ord['id'],
                             'quantity':      level['quantity'],
-                            'buy_price':     level['level_price'],
-                            'tp_price':      level['tp_price'],
+                            'buy_price':     actual_fill,
+                            'tp_price':      tp_from_fill,
                             'level_index':   level['level_index']
                         }
                     except Exception as e:
@@ -895,7 +945,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
                 still_open.append(level)
         open_orders = still_open
 
-        # Check TP (sell) orders for completion
+        # Check TP sell orders for completion
         completed_keys = []
         for buy_price, sell_info in filled_levels.items():
             try:
@@ -924,7 +974,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
             del filled_levels[k]
 
         print(f'  [{elapsed}s/{max_wait}s] Price:${live_price:.4f} | '
-              f'Limit orders:{len(open_orders)} | Waiting TP:{len(filled_levels)} | Done:{len(completed_levels)}')
+              f'Limit:{len(open_orders)} | WaitingTP:{len(filled_levels)} | Done:{len(completed_levels)}')
 
         current_loss = sum(t['pnl'] for t in completed_levels if t['pnl'] < 0)
         if abs(current_loss) > max_loss_limit:
@@ -940,7 +990,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
         except Exception as e:
             print(f'  Cancel failed: {e}')
 
-    # Close any TP orders that didn't fill — market close
+    # Close filled-but-TP-not-hit positions at market
     for buy_price, sell_info in filled_levels.items():
         try:
             exchange.cancel_order(sell_info['sell_order_id'], trade_symbol)
