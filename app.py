@@ -13,6 +13,13 @@ from dotenv import load_dotenv
 from models import db, User, Deposit, Withdrawal, TradeSession, PlatformSetting
 from datetime import datetime, timedelta
 from functools import wraps
+import threading
+import uuid
+
+# In-memory job store for async trading sessions
+# Key: job_id (str), Value: dict with status/result
+_trade_jobs = {}
+_trade_jobs_lock = threading.Lock()
 
 load_dotenv()
 
@@ -539,15 +546,38 @@ def api_trade_complete():
 # ============================================
 # API — BOT EXECUTE
 # ============================================
+# ============================================
+# ASYNC TRADING JOB RUNNER
+# Railway kills HTTP connections after 30s on hobby plan.
+# Solution: start session in background thread, return job_id immediately.
+# Frontend polls /api/bot/result/<job_id> every 5 seconds.
+# ============================================
+def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force):
+    """Background thread that runs the trading session and stores result."""
+    with app.app_context():
+        try:
+            from bot import execute_session
+            results = execute_session(amount, timeframe, num_trades, strategy=strategy, force=force)
+            with _trade_jobs_lock:
+                _trade_jobs[job_id]['status'] = 'done'
+                _trade_jobs[job_id]['results'] = results
+        except Exception as e:
+            with _trade_jobs_lock:
+                _trade_jobs[job_id]['status'] = 'error'
+                _trade_jobs[job_id]['error']  = str(e)
+
+
 @app.route('/api/bot/execute', methods=['POST'])
 @login_required
 def api_bot_execute():
     try:
-        from bot import execute_session
         data      = request.get_json()
         amount    = float(data.get('amount', 50))
         timeframe = int(data.get('timeframe', 5))
-        force     = bool(data.get('force', False))  # FIX: read force flag from request
+        force     = bool(data.get('force', False))
+        strategy  = str(data.get('strategy', 'auto')).lower().strip()
+        if strategy not in ('auto', 'grid', 'momentum'):
+            strategy = 'auto'
 
         # Dynamic trades based on user balance tier
         if current_user.balance >= 200:
@@ -565,12 +595,10 @@ def api_bot_execute():
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
         # Sync NexerTrade balance with real Bybit balance before trading
-        # This prevents the DB showing $10.72 while Bybit only has $9.07
         try:
             from bot import get_bybit_balance
             live_bal = get_bybit_balance()
             if live_bal['success'] and live_bal['USDT'] > 0:
-                # If Bybit balance is lower than DB balance, correct the DB
                 if live_bal['USDT'] < current_user.balance:
                     print(f'Balance sync: DB={current_user.balance:.2f} Bybit={live_bal["USDT"]:.2f} — updating DB')
                     current_user.balance = round(live_bal['USDT'], 2)
@@ -582,12 +610,12 @@ def api_bot_execute():
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
 
-        # FIX: Weak signal pre-check — only runs if user has NOT forced the trade
-        if not force:
+        # Weak signal pre-check — skip for grid (grid uses limit orders not signal confidence)
+        if not force and strategy in ('momentum', 'auto'):
             try:
                 from bot import generate_signal
                 preview_signal = generate_signal('XRP/USDT')
-                if preview_signal['confidence'] < 62:
+                if preview_signal and preview_signal['confidence'] < 62:
                     return jsonify({
                         'success':     False,
                         'weak_signal': True,
@@ -597,94 +625,135 @@ def api_bot_execute():
                         'message':     f"Signal confidence is only {preview_signal['confidence']:.0f}%. Market conditions are uncertain right now."
                     }), 200
             except Exception as signal_err:
-                # If signal check fails, allow trade to continue
                 print(f'Signal pre-check error (non-fatal): {signal_err}')
 
         socketio.emit('session_started', {
-            'user':      current_user.name,
-            'amount':    amount,
-            'timeframe': timeframe
+            'user': current_user.name, 'amount': amount,
+            'timeframe': timeframe, 'strategy': strategy
         }, room='admin_room')
 
-        results = execute_session(amount, timeframe, num_trades, force=force)
-
-        # Block if Bybit was unreachable
-        if results.get('error'):
-            return jsonify({'success': False, 'message': results['error']}), 503
-
-        # Grid placed orders but none filled within the timeframe
-        # This is not an error — it means market didn't move enough
-        # Return success with 0 PnL and a clear message, do NOT update balance
-        if results.get('total_trades', 0) == 0:
-            msg = results.get('message', 'No grid orders filled within the timeframe. Market did not move enough. Try a longer timeframe or Auto-Best strategy.')
-            return jsonify({
-                'success':      True,
-                'new_balance':  round(current_user.balance, 2),
-                'total_profit': round(current_user.total_profit, 2),
-                'no_trades':    True,
-                'message':      msg
-            }), 200
-
-        session = TradeSession(
-            user_id=current_user.id,
-            timeframe=timeframe,
-            amount=amount,
-            total_trades=results['total_trades'],
-            wins=results['wins'],
-            losses=results['losses'],
-            net_pnl=results['net_pnl'],
-            win_rate=results['win_rate'],
-            status='completed',
-            ended_at=datetime.utcnow()
+        # Start session in background thread — return job_id immediately
+        # This prevents Railway's 30s HTTP timeout from killing the connection
+        job_id = str(uuid.uuid4())
+        with _trade_jobs_lock:
+            _trade_jobs[job_id] = {
+                'status':  'running',
+                'user_id': current_user.id,
+                'amount':  amount
+            }
+        t = threading.Thread(
+            target=_run_trade_job,
+            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force),
+            daemon=True
         )
-        db.session.add(session)
-
-        current_user.balance            += results['net_pnl']
-        current_user.total_profit       += max(results['net_pnl'], 0)
-        current_user.sessions_completed += 1
-        db.session.commit()
-
-        socketio.emit('balance_update', {
-            'balance':            round(current_user.balance, 2),
-            'total_profit':       round(current_user.total_profit, 2),
-            'total_withdrawn':    round(current_user.total_withdrawn, 2),
-            'sessions_completed': current_user.sessions_completed
-        }, room=f'user_{current_user.id}')
-
-        socketio.emit('session_complete', {
-            'net_pnl':  results['net_pnl'],
-            'wins':     results['wins'],
-            'losses':   results['losses'],
-            'win_rate': results['win_rate'],
-            'balance':  round(current_user.balance, 2)
-        }, room=f'user_{current_user.id}')
-
-        socketio.emit('session_update', {
-            'user':      current_user.name,
-            'pnl':       results['net_pnl'],
-            'wins':      results['wins'],
-            'losses':    results['losses'],
-            'timeframe': timeframe
-        }, room='admin_room')
-
-        return jsonify({
-            'success':      True,
-            'trades':       results['trades'],
-            'total_trades': results['total_trades'],
-            'wins':         results['wins'],
-            'losses':       results['losses'],
-            'net_pnl':      results['net_pnl'],
-            'win_rate':     results['win_rate'],
-            'new_balance':  round(current_user.balance, 2),
-            'trade_mode':   results.get('trade_mode', 'spot')
-        })
+        t.start()
+        return jsonify({'success': True, 'job_id': job_id, 'async': True}), 202
 
     except Exception as e:
+        print(f'Execute error: {e}')
         return jsonify({'success': False, 'message': str(e)}), 500
 
-# ============================================
-# API — USER DATA
-# ============================================
+
+@app.route('/api/bot/result/<job_id>')
+@login_required
+def api_bot_result(job_id):
+    """
+    Poll endpoint. Frontend calls this every 5 seconds to check if session is done.
+    Returns: {status: 'running'} or {status: 'done', ...full results}
+    """
+    with _trade_jobs_lock:
+        job = _trade_jobs.get(job_id)
+
+    if not job:
+        return jsonify({'status': 'not_found'}), 404
+
+    if job['status'] == 'running':
+        return jsonify({'status': 'running'}), 200
+
+    if job['status'] == 'error':
+        with _trade_jobs_lock:
+            _trade_jobs.pop(job_id, None)
+        return jsonify({'status': 'error', 'message': job.get('error', 'Unknown error')}), 200
+
+    # Status is 'done' — process and save results
+    results = job['results']
+    with _trade_jobs_lock:
+        _trade_jobs.pop(job_id, None)
+
+    # Safety check: verify this job belongs to current user
+    if job.get('user_id') != current_user.id:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+
+    if results.get('error'):
+        return jsonify({'status': 'done', 'success': False, 'message': results['error']}), 200
+
+    if results.get('total_trades', 0) == 0:
+        msg = results.get('message', 'No orders filled. Market did not move enough — try a longer timeframe or Auto-Best strategy.')
+        return jsonify({
+            'status':       'done',
+            'success':      True,
+            'no_trades':    True,
+            'message':      msg,
+            'new_balance':  round(current_user.balance, 2),
+            'total_profit': round(current_user.total_profit, 2),
+            'trades':       []
+        }), 200
+
+    # Save session to DB and update user balance
+    session = TradeSession(
+        user_id=current_user.id,
+        timeframe=job['amount'],
+        amount=job['amount'],
+        total_trades=results['total_trades'],
+        wins=results['wins'],
+        losses=results['losses'],
+        net_pnl=results['net_pnl'],
+        win_rate=results['win_rate'],
+        status='completed',
+        ended_at=datetime.utcnow()
+    )
+    db.session.add(session)
+    current_user.balance            += results['net_pnl']
+    current_user.total_profit       += max(results['net_pnl'], 0)
+    current_user.sessions_completed += 1
+    db.session.commit()
+
+    socketio.emit('balance_update', {
+        'balance':            round(current_user.balance, 2),
+        'total_profit':       round(current_user.total_profit, 2),
+        'total_withdrawn':    round(current_user.total_withdrawn, 2),
+        'sessions_completed': current_user.sessions_completed
+    }, room=f'user_{current_user.id}')
+
+    socketio.emit('session_complete', {
+        'net_pnl':  results['net_pnl'],
+        'wins':     results['wins'],
+        'losses':   results['losses'],
+        'win_rate': results['win_rate'],
+        'balance':  round(current_user.balance, 2)
+    }, room=f'user_{current_user.id}')
+
+    socketio.emit('session_update', {
+        'user': current_user.name, 'pnl': results['net_pnl'],
+        'wins': results['wins'], 'losses': results['losses'],
+        'timeframe': job.get('timeframe', 0)
+    }, room='admin_room')
+
+    return jsonify({
+        'status':       'done',
+        'success':      True,
+        'new_balance':  round(current_user.balance, 2),
+        'total_profit': round(current_user.total_profit, 2),
+        'trades':       results.get('trades', []),
+        'net_pnl':      results['net_pnl'],
+        'wins':         results['wins'],
+        'losses':       results['losses'],
+        'win_rate':     results['win_rate'],
+        'trade_mode':   results.get('trade_mode', 'spot'),
+        'strategy':     results.get('strategy', 'unknown')
+    }), 200
+
+
 @app.route('/api/user/data')
 @login_required
 def api_user_data():

@@ -17,7 +17,6 @@ let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
-let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let liveChartData     = [];
 let liveChartCtx      = null;
 let liveChartCanvas   = null;
@@ -34,28 +33,6 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
     document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     selectedTimeframe = parseInt(btn.dataset.minutes);
-  });
-});
-
-
-// ============================================
-// 2b. STRATEGY SELECTOR
-// ============================================
-const strategyHints = {
-  auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions — best all-round choice.',
-  grid:     'Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.',
-  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware — goes short when market is falling. Best in trending markets.'
-};
-
-document.querySelectorAll('.strategy-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    if (isTrading) return;
-    document.querySelectorAll('.strategy-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    selectedStrategy = btn.dataset.strategy;
-    window.SELECTED_STRATEGY = selectedStrategy;
-    const hint = document.getElementById('strategyHint');
-    if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
   });
 });
 
@@ -309,7 +286,7 @@ async function startSession(force = false) {
 
   document.getElementById('sessionSummary').style.display   = 'none';
   document.getElementById('sessionStatusTitle').textContent = 'Connecting to market data...';
-  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Strategy: ${selectedStrategy.toUpperCase()}...`;
+  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Checking mode...`;
   document.getElementById('sessionIcon').className          = 'session-icon';
   document.getElementById('sessionPanel').style.display     = 'block';
 
@@ -336,15 +313,14 @@ async function startSession(force = false) {
   startTimer(sessionSecs);
   document.getElementById('sessionStatusTitle').textContent = 'Connected — executing live trade...';
 
-  // 7-minute timeout so long sessions don't get cut off by browser
-  const controller   = new AbortController();
-  const fetchTimeout = setTimeout(() => controller.abort(), 420000);
-
+  // ASYNC JOB PATTERN — fixes Railway's 30s HTTP timeout
+  // Step 1: POST to /execute — returns job_id immediately (< 1s)
+  // Step 2: Poll /result/<job_id> every 5s until done
+  // No more 'Connection error' popups mid-session
   try {
-    const botRes = await fetch('/api/bot/execute', {
+    const startRes = await fetch('/api/bot/execute', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal:  controller.signal,
       body: JSON.stringify({
         amount:     selectedAmount,
         timeframe:  selectedTimeframe,
@@ -354,65 +330,110 @@ async function startSession(force = false) {
       })
     });
 
-    clearTimeout(fetchTimeout);
+    const startData = await startRes.json();
 
-    const botData = await botRes.json();
-
-    // Weak signal — show warning modal
-    if (!botData.success && botData.weak_signal) {
+    // Weak signal or pre-flight error
+    if (!startData.success && startData.weak_signal) {
       stopSession(false);
-      showWeakSignalModal(botData);
+      showWeakSignalModal(startData);
+      return;
+    }
+    if (!startData.success) {
+      document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (startData.message || 'Trade blocked');
+      document.getElementById('sessionStatusTitle').style.color = '#ef4444';
+      stopSession(false);
+      return;
+    }
+
+    // Got job_id — now poll until the session completes on the server
+    const jobId = startData.job_id;
+    document.getElementById('sessionStatusTitle').textContent = 'Bot is running — scanning markets...';
+
+    let botData = null;
+    const pollInterval = 5000; // check every 5 seconds
+    const maxPolls     = Math.ceil((sessionSecs + 60) * 1000 / pollInterval);
+
+    for (let poll = 0; poll < maxPolls; poll++) {
+      if (!isTrading) break;
+      await new Promise(r => setTimeout(r, pollInterval));
+      if (!isTrading) break;
+
+      try {
+        const pollRes  = await fetch(`/api/bot/result/${jobId}`);
+        const pollData = await pollRes.json();
+
+        if (pollData.status === 'running') {
+          // Update status message with elapsed time feel
+          const elapsed = (poll + 1) * 5;
+          document.getElementById('sessionStatusTitle').textContent =
+            `Bot trading live... (${elapsed}s elapsed)`;
+          continue;
+        }
+
+        if (pollData.status === 'error') {
+          document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (pollData.message || 'Trade error');
+          document.getElementById('sessionStatusTitle').style.color = '#ef4444';
+          stopSession(false);
+          return;
+        }
+
+        if (pollData.status === 'done') {
+          botData = pollData;
+          break;
+        }
+      } catch (pollErr) {
+        console.warn('Poll attempt failed (retrying):', pollErr);
+        // Don't stop — just retry next poll
+      }
+    }
+
+    if (!botData) {
+      document.getElementById('sessionStatusTitle').textContent = 'Session timed out — refreshing balance...';
+      try {
+        const dataRes  = await fetch('/api/user/data');
+        const userData = await dataRes.json();
+        availableBalance = userData.balance;
+        const balEl = document.getElementById('availableBalance');
+        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+      } catch (_) {}
+      stopSession(false);
       return;
     }
 
     if (!botData.success) {
       document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (botData.message || 'Trade blocked');
       document.getElementById('sessionStatusTitle').style.color = '#ef4444';
-      alert('Trade blocked: ' + (botData.message || 'Unknown error'));
       stopSession(false);
       return;
     }
 
-    // Show trade mode (FUTURES or SPOT)
+    // Show trade mode
     if (botData.trade_mode) {
       const modeLabel = botData.trade_mode === 'futures' ? '⚡ FUTURES 2x' : '📦 SPOT';
       document.getElementById('sessionStatusSub').textContent =
         `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
     }
 
-    const trades        = botData.trades;
-    const tradeInterval = Math.floor(sessionSecs / trades.length);
-
-    // Animate each trade at correct time intervals
+    // Animate trades in the UI
+    const trades = botData.trades || [];
     for (let i = 0; i < trades.length; i++) {
       if (!isTrading) break;
-
-      await new Promise(resolve => setTimeout(resolve, tradeInterval * 1000));
-
-      if (!isTrading) break;
-
       const trade = trades[i];
-
       tradesCount++;
       sessionPnl += trade.profit;
       if (trade.won) winsCount++;
       else lossesCount++;
-
       updateStatsUI();
       addToTradeStream(trade);
-
-      if (trade.price) {
-        currentBasePrice = trade.price;
-        tickLiveChart(trade.price);
-      }
-
+      if (trade.price) { currentBasePrice = trade.price; tickLiveChart(trade.price); }
       if (trade.won) {
         document.getElementById('sessionStatusTitle').textContent =
-          `✓ ${trade.symbol} ${trade.direction} — WIN (RSI: ${trade.rsi}, Conf: ${trade.confidence}%)`;
+          `✓ ${trade.symbol} ${trade.direction || 'BUY'} — WIN`;
       } else {
         document.getElementById('sessionStatusTitle').textContent =
-          `✗ ${trade.symbol} ${trade.direction} — LOSS (RSI: ${trade.rsi})`;
+          `✗ ${trade.symbol} ${trade.direction || 'BUY'} — LOSS`;
       }
+      await new Promise(r => setTimeout(r, 400));
     }
 
     if (isTrading) {
@@ -423,25 +444,10 @@ async function startSession(force = false) {
     }
 
   } catch (err) {
-    clearTimeout(fetchTimeout);
     console.error('Bot execute error:', err);
-
-    if (err.name === 'AbortError') {
-      // Timed out — trade likely completed on server, silently refresh balance
-      document.getElementById('sessionStatusTitle').textContent = 'Session timed out — refreshing balance...';
-      try {
-        const dataRes  = await fetch('/api/user/data');
-        const userData = await dataRes.json();
-        availableBalance = userData.balance;
-        const balEl = document.getElementById('availableBalance');
-        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
-      } catch (_) {}
-      stopSession(false);
-    } else {
-      document.getElementById('sessionStatusTitle').textContent = '⚠ Network error — trade blocked';
-      document.getElementById('sessionStatusTitle').style.color = '#ef4444';
-      alert('Connection error. Please check your internet and try again.');
-      stopSession(false);
+    document.getElementById('sessionStatusTitle').textContent = '⚠ Could not connect to server';
+    document.getElementById('sessionStatusTitle').style.color = '#ef4444';
+    stopSession(false);
     }
   }
 }
