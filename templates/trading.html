@@ -84,6 +84,28 @@
         </div>
       </div>
 
+      <div class="setup-section">
+        <label class="setup-label">STRATEGY</label>
+        <div class="strategy-buttons">
+          <button class="strategy-btn" data-strategy="auto" title="Bot scans all pairs and picks Grid or Momentum based on market conditions">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg>
+            <span class="strategy-btn-name">Auto-Best</span>
+            <span class="strategy-btn-desc">Bot chooses for you</span>
+          </button>
+          <button class="strategy-btn active" data-strategy="grid" title="Places a ladder of buy orders and sells each one as price bounces — high win rate in ranging markets">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            <span class="strategy-btn-name">Grid / DCA</span>
+            <span class="strategy-btn-desc">Ladder buys, high win rate</span>
+          </button>
+          <button class="strategy-btn" data-strategy="momentum" title="Multi-timeframe RSI, EMA, MACD signals with trend-aware direction — best in trending markets">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
+            <span class="strategy-btn-name">Momentum</span>
+            <span class="strategy-btn-desc">Signal-based scalping</span>
+          </button>
+        </div>
+        <p class="strategy-hint" id="strategyHint">Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.</p>
+      </div>
+
       <div class="amount-action-row">
         <div class="setup-section amount-section">
           <label class="setup-label">AMOUNT TO TRADE ($10 – $200)</label>
@@ -225,6 +247,7 @@
 
   <script>
     window.USER_BALANCE = {{ user.balance }};
+    window.SELECTED_STRATEGY = 'grid';
   </script>
   <script src="/static/js/trading.js"></script>
   <script src="/static/js/realtime.js"></script>

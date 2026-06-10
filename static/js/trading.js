@@ -17,6 +17,7 @@ let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
+let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let liveChartData     = [];
 let liveChartCtx      = null;
 let liveChartCanvas   = null;
@@ -33,6 +34,28 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
     document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     selectedTimeframe = parseInt(btn.dataset.minutes);
+  });
+});
+
+
+// ============================================
+// 2b. STRATEGY SELECTOR
+// ============================================
+const strategyHints = {
+  auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions — best all-round choice.',
+  grid:     'Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.',
+  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware — goes short when market is falling. Best in trending markets.'
+};
+
+document.querySelectorAll('.strategy-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (isTrading) return;
+    document.querySelectorAll('.strategy-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedStrategy = btn.dataset.strategy;
+    window.SELECTED_STRATEGY = selectedStrategy;
+    const hint = document.getElementById('strategyHint');
+    if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
   });
 });
 
@@ -286,7 +309,7 @@ async function startSession(force = false) {
 
   document.getElementById('sessionSummary').style.display   = 'none';
   document.getElementById('sessionStatusTitle').textContent = 'Connecting to market data...';
-  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Checking mode...`;
+  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Strategy: ${selectedStrategy.toUpperCase()}...`;
   document.getElementById('sessionIcon').className          = 'session-icon';
   document.getElementById('sessionPanel').style.display     = 'block';
 
@@ -326,6 +349,7 @@ async function startSession(force = false) {
         amount:     selectedAmount,
         timeframe:  selectedTimeframe,
         num_trades: 1,
+        strategy:   selectedStrategy,
         force:      force
       })
     });

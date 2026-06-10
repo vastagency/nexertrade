@@ -547,7 +547,11 @@ def api_bot_execute():
         data      = request.get_json()
         amount    = float(data.get('amount', 50))
         timeframe = int(data.get('timeframe', 5))
-        force     = bool(data.get('force', False))  # FIX: read force flag from request
+        force     = bool(data.get('force', False))
+        strategy  = str(data.get('strategy', 'auto')).lower().strip()
+        # Valid strategies: 'auto', 'grid', 'momentum'
+        if strategy not in ('auto', 'grid', 'momentum'):
+            strategy = 'auto'
 
         # Dynamic trades based on user balance tier
         if current_user.balance >= 200:
@@ -568,12 +572,12 @@ def api_bot_execute():
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
 
-        # FIX: Weak signal pre-check — only runs if user has NOT forced the trade
-        if not force:
+        # Weak signal pre-check — skip for grid (grid uses limit orders, not signal confidence)
+        if not force and strategy in ('momentum', 'auto'):
             try:
                 from bot import generate_signal
                 preview_signal = generate_signal('XRP/USDT')
-                if preview_signal['confidence'] < 62:
+                if preview_signal and preview_signal['confidence'] < 62:
                     return jsonify({
                         'success':     False,
                         'weak_signal': True,
@@ -583,16 +587,16 @@ def api_bot_execute():
                         'message':     f"Signal confidence is only {preview_signal['confidence']:.0f}%. Market conditions are uncertain right now."
                     }), 200
             except Exception as signal_err:
-                # If signal check fails, allow trade to continue
                 print(f'Signal pre-check error (non-fatal): {signal_err}')
 
         socketio.emit('session_started', {
             'user':      current_user.name,
             'amount':    amount,
-            'timeframe': timeframe
+            'timeframe': timeframe,
+            'strategy':  strategy
         }, room='admin_room')
 
-        results = execute_session(amount, timeframe, num_trades, force=force)
+        results = execute_session(amount, timeframe, num_trades, strategy=strategy, force=force)
 
         # Block if Bybit was unreachable — no fake profits added
         if results.get('error'):
@@ -1055,17 +1059,22 @@ def api_bot_signal():
     try:
         from bot import get_single_signal
         symbol = request.args.get('symbol', 'BTC/USDT')
-        return jsonify(get_single_signal(symbol))
-    except Exception:
-        return jsonify({
-            'symbol':        'BTC/USDT',
-            'direction':     'BUY',
-            'confidence':    72.5,
-            'rsi':           45.2,
-            'ema_trend':     'bullish',
-            'macd_trend':    'bullish',
-            'current_price': 97.5
-        })
+        result = get_single_signal(symbol)
+        if result is None:
+            return jsonify({'success': False, 'message': 'Could not fetch market data'}), 503
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 503
+
+
+@app.route('/api/bot/overview')
+@login_required
+def api_bot_overview():
+    try:
+        from bot import get_market_overview
+        return jsonify(get_market_overview())
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 503
 
 @app.route('/api/bot/prices')
 def api_bot_prices():
