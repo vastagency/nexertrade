@@ -594,8 +594,11 @@ def api_bot_execute():
         if amount < min_dep or amount > max_dep:
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
-        # User balance is tracked in DB from admin-approved deposits only.
-        # Bybit is the admin exchange account and must not overwrite per-user balances.
+        # NOTE: User balance in NexerTrade DB is independent from Admin's Bybit.
+        # User balance = what they deposited + trading profits/losses.
+        # Admin's Bybit is the pool that executes trades.
+        # These must NEVER be synced — each user has their own NexerTrade balance.
+
         # Block trading above user's actual NexerTrade balance
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400

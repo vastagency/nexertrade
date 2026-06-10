@@ -7,7 +7,6 @@
 // 1. STATE
 // ============================================
 let selectedTimeframe = 5;
-let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let selectedAmount    = 50;
 let isTrading         = false;
 let timerInterval     = null;
@@ -18,6 +17,7 @@ let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
+let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let liveChartData     = [];
 let liveChartCtx      = null;
 let liveChartCanvas   = null;
@@ -41,32 +41,23 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 // ============================================
 // 2b. STRATEGY SELECTOR
 // ============================================
-var strategyHints = {
+const strategyHints = {
   auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions.',
-  grid:     'Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.',
-  momentum: 'Multi-timeframe RSI, EMA and MACD signals with trend-aware direction. Best in trending markets.'
+  grid:     'Places 5 buy orders in a price ladder. Level 1 fills instantly. Very high win rate.',
+  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.'
 };
 
-document.querySelectorAll('.strategy-btn').forEach(function(btn) {
-  btn.addEventListener('click', function() {
+document.querySelectorAll('.strategy-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
     if (isTrading) return;
-    document.querySelectorAll('.strategy-btn').forEach(function(b) { b.classList.remove('active'); });
+    document.querySelectorAll('.strategy-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     selectedStrategy = btn.dataset.strategy;
-    var hint = document.getElementById('strategyHint');
+    window.SELECTED_STRATEGY = selectedStrategy;
+    const hint = document.getElementById('strategyHint');
     if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
   });
 });
-
-// Sync initial selected strategy from HTML
-(function() {
-  var activeBtn = document.querySelector('.strategy-btn.active');
-  if (activeBtn) {
-    selectedStrategy = activeBtn.dataset.strategy;
-    var hint = document.getElementById('strategyHint');
-    if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
-  }
-})();
 
 
 // ============================================
@@ -260,7 +251,7 @@ function addToTradeStream(trade) {
       <span class="stream-time">${time}</span>
       <span class="stream-pair">${trade.symbol}</span>
       <span style="font-size:0.7rem;color:var(--text-secondary);margin-left:6px;">
-        [${trade.direction} | RSI:${trade.rsi}]
+        [${trade.direction}${trade.rsi ? ' | RSI:' + trade.rsi : ''}${trade.strategy ? ' | ' + trade.strategy.toUpperCase() : ''}]
       </span>
     </div>
     <span class="stream-pnl ${trade.won ? 'positive' : 'negative'}">${pnlStr}</span>
@@ -484,60 +475,6 @@ async function startSession(force = false) {
 }
 
 
-// ============================================
-// 9. FALLBACK SIMULATED SESSION
-// ============================================
-function runFallbackSession() {
-  const pairs    = ['BTC/USD', 'ETH/USD', 'EUR/USD', 'SOL/USD', 'BNB/USD'];
-  const WIN_RATE = 0.80;
-  const sessionSecs = selectedTimeframe * 60;
-  const tradeGap    = Math.floor(sessionSecs / 10) * 1000;
-
-  startTimer(sessionSecs);
-
-  let fired = 0;
-  const iv  = setInterval(() => {
-    if (!isTrading || fired >= 10) {
-      clearInterval(iv);
-      if (isTrading) stopSession(true);
-      return;
-    }
-
-    fired++;
-    tradesCount++;
-
-    const won       = Math.random() < WIN_RATE;
-    const tradeSize = selectedAmount * 0.10;
-    const profit    = won
-      ? parseFloat((tradeSize * (0.012 + Math.random() * 0.023)).toFixed(4))
-      : -parseFloat((tradeSize * (0.003 + Math.random() * 0.005)).toFixed(4));
-
-    if (won) winsCount++;
-    else lossesCount++;
-    sessionPnl += profit;
-
-    const pair = pairs[Math.floor(Math.random() * pairs.length)];
-    const rsi  = (Math.random() * 40 + 30).toFixed(2);
-
-    updateStatsUI();
-    addToTradeStream({
-      symbol:    pair,
-      direction: won ? 'BUY' : 'SELL',
-      rsi:       rsi,
-      profit:    profit,
-      won:       won
-    });
-    tickLiveChart();
-
-    document.getElementById('sessionStatusTitle').textContent =
-      won ? `✓ ${pair} — WIN` : `✗ ${pair} — LOSS`;
-
-    if (fired >= 10) {
-      clearInterval(iv);
-      if (isTrading) stopSession(true);
-    }
-  }, tradeGap);
-}
 
 
 // ============================================
@@ -562,11 +499,11 @@ async function stopSession(natural = false, botData = null) {
   document.querySelectorAll('.tf-btn, .quick-btn, .trade-amount-input').forEach(el => el.disabled = false);
 
   if (botData && botData.success) {
-    availableBalance = botData.new_balance;
-    tradesCount      = botData.total_trades;
-    winsCount        = botData.wins;
-    lossesCount      = botData.losses;
-    sessionPnl       = botData.net_pnl;
+    availableBalance = botData.new_balance || availableBalance;
+    tradesCount      = botData.total_trades !== undefined ? botData.total_trades : tradesCount;
+    winsCount        = botData.wins        !== undefined ? botData.wins        : winsCount;
+    lossesCount      = botData.losses      !== undefined ? botData.losses      : lossesCount;
+    sessionPnl       = botData.net_pnl     !== undefined ? botData.net_pnl     : sessionPnl;
   } else if (!botData) {
     try {
       const winRate = tradesCount > 0 ? Math.round((winsCount / tradesCount) * 100) : 0;
