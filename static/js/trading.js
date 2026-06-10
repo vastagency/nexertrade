@@ -7,6 +7,7 @@
 // 1. STATE
 // ============================================
 let selectedTimeframe = 5;
+let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let selectedAmount    = 50;
 let isTrading         = false;
 let timerInterval     = null;
@@ -35,6 +36,37 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
     selectedTimeframe = parseInt(btn.dataset.minutes);
   });
 });
+
+
+// ============================================
+// 2b. STRATEGY SELECTOR
+// ============================================
+var strategyHints = {
+  auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions.',
+  grid:     'Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.',
+  momentum: 'Multi-timeframe RSI, EMA and MACD signals with trend-aware direction. Best in trending markets.'
+};
+
+document.querySelectorAll('.strategy-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    if (isTrading) return;
+    document.querySelectorAll('.strategy-btn').forEach(function(b) { b.classList.remove('active'); });
+    btn.classList.add('active');
+    selectedStrategy = btn.dataset.strategy;
+    var hint = document.getElementById('strategyHint');
+    if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
+  });
+});
+
+// Sync initial selected strategy from HTML
+(function() {
+  var activeBtn = document.querySelector('.strategy-btn.active');
+  if (activeBtn) {
+    selectedStrategy = activeBtn.dataset.strategy;
+    var hint = document.getElementById('strategyHint');
+    if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
+  }
+})();
 
 
 // ============================================
@@ -448,7 +480,6 @@ async function startSession(force = false) {
     document.getElementById('sessionStatusTitle').textContent = '⚠ Could not connect to server';
     document.getElementById('sessionStatusTitle').style.color = '#ef4444';
     stopSession(false);
-    }
   }
 }
 

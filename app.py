@@ -594,18 +594,8 @@ def api_bot_execute():
         if amount < min_dep or amount > max_dep:
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
-        # Sync NexerTrade balance with real Bybit balance before trading
-        try:
-            from bot import get_bybit_balance
-            live_bal = get_bybit_balance()
-            if live_bal['success'] and live_bal['USDT'] > 0:
-                if live_bal['USDT'] < current_user.balance:
-                    print(f'Balance sync: DB={current_user.balance:.2f} Bybit={live_bal["USDT"]:.2f} — updating DB')
-                    current_user.balance = round(live_bal['USDT'], 2)
-                    db.session.commit()
-        except Exception as sync_err:
-            print(f'Balance sync error (non-fatal): {sync_err}')
-
+        # User balance is tracked in DB from admin-approved deposits only.
+        # Bybit is the admin exchange account and must not overwrite per-user balances.
         # Block trading above user's actual NexerTrade balance
         if amount > current_user.balance:
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
