@@ -753,8 +753,24 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     results['trade_mode'] = trade_mode
     exchange              = bybit_futures if trade_mode == 'futures' else bybit_spot
 
-    amount         = min(amount, available_usdt * 0.95)
-    usdt_per_level = amount / GRID_LEVELS
+    amount = min(amount, available_usdt * 0.95)
+
+    # Enforce minimum 5-minute session for grid
+    # 2 minutes is too short for price to bounce and hit TP
+    if timeframe_minutes < 5:
+        print(f'  Grid: extending session from {timeframe_minutes}min to 5min')
+        timeframe_minutes = 5
+
+    # Dynamic grid levels based on balance — prevents margin errors
+    if amount >= 50:
+        active_levels = 5
+    elif amount >= 25:
+        active_levels = 4
+    else:
+        active_levels = 3  # $9-24: 3 levels keeps within margin limits
+
+    usdt_per_level = amount / active_levels
+    print(f'  Grid active levels: {active_levels} (balance=${amount:.2f})')
 
     # Pick best pair by volatility (ATR)
     if not symbol:
@@ -817,7 +833,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     dynamic_tp = dynamic_spacing * 1.2
 
     print(f'Grid session: {trade_symbol} | Price: ${entry_price:.4f} | '
-          f'{GRID_LEVELS} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()} | '
+          f'{active_levels} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()} | '
           f'Spacing: {dynamic_spacing*100:.3f}% | TP: {dynamic_tp*100:.3f}% | RSI: {current_rsi:.1f}')
 
     markets  = exchange.load_markets()
@@ -829,7 +845,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     placed_count     = 0
     filled_levels    = {}
 
-    for idx in range(GRID_LEVELS):
+    for idx in range(active_levels):
         try:
             if idx == 0:
                 # Level 1 strategy depends on RSI:
