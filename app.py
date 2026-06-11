@@ -552,12 +552,19 @@ def api_trade_complete():
 # Solution: start session in background thread, return job_id immediately.
 # Frontend polls /api/bot/result/<job_id> every 5 seconds.
 # ============================================
-def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force):
+def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force, compound_rate=0.0):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
             from bot import execute_session
             results = execute_session(amount, timeframe, num_trades, strategy=strategy, force=force)
+            # Apply compounding if enabled
+            if compound_rate > 0 and results.get('net_pnl', 0) != 0:
+                from bot import apply_compounding
+                results['next_amount'] = apply_compounding(
+                    amount, results.get('net_pnl', 0), compound_rate
+                )
+                results['compound_rate'] = compound_rate
             with _trade_jobs_lock:
                 _trade_jobs[job_id]['status'] = 'done'
                 _trade_jobs[job_id]['results'] = results
@@ -575,8 +582,9 @@ def api_bot_execute():
         amount    = float(data.get('amount', 50))
         timeframe = int(data.get('timeframe', 5))
         force     = bool(data.get('force', False))
-        strategy  = str(data.get('strategy', 'auto')).lower().strip()
-        if strategy not in ('auto', 'grid', 'momentum'):
+        strategy      = str(data.get('strategy', 'auto')).lower().strip()
+        compound_rate = float(data.get('compound_rate', 0.0))
+        if strategy not in ('auto', 'grid', 'momentum', 'ema_macd'):
             strategy = 'auto'
 
         # Dynamic trades based on user balance tier
@@ -604,7 +612,7 @@ def api_bot_execute():
             return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
 
         # Weak signal pre-check — skip for grid (grid uses limit orders not signal confidence)
-        if not force and strategy in ('momentum', 'auto'):
+        if not force and strategy in ('momentum', 'auto', 'ema_macd'):
             try:
                 from bot import generate_signal
                 preview_signal = generate_signal('XRP/USDT')
@@ -636,7 +644,7 @@ def api_bot_execute():
             }
         t = threading.Thread(
             target=_run_trade_job,
-            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force),
+            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force, compound_rate),
             daemon=True
         )
         t.start()
@@ -1186,6 +1194,23 @@ def api_admin_earnings():
 # RUN
 # ============================================
 init_db()
+
+
+
+@app.route('/api/bot/compound', methods=['POST'])
+@login_required
+def api_bot_compound():
+    data          = request.get_json() or {}
+    base_amount   = float(data.get('base_amount', 50))
+    session_pnl   = float(data.get('session_pnl', 0))
+    compound_rate = float(data.get('compound_rate', 0.5))
+    try:
+        from bot import apply_compounding
+        next_amount = apply_compounding(base_amount, session_pnl, compound_rate)
+        return jsonify({'success': True, 'next_amount': next_amount})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 
 if __name__ == '__main__':
     init_db()

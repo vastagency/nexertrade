@@ -102,10 +102,28 @@
             <span class="strategy-btn-name">Momentum</span>
             <span class="strategy-btn-desc">Signal-based scalping</span>
           </button>
+          <button class="strategy-btn" data-strategy="ema_macd" title="MACD crossover with EMA30/EMA9 candle confirmation. Best for clear trend reversals.">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 2 L22 22M7 17 L12 7 L17 17"/></svg>
+            <span class="strategy-btn-name">EMA / MACD</span>
+            <span class="strategy-btn-desc">Crossover reversal signals</span>
+          </button>
+
         </div>
         <p class="strategy-hint" id="strategyHint">Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.</p>
       </div>
 
+
+      <div class="setup-section compound-section">
+        <label class="setup-label">COMPOUNDING</label>
+        <div class="compound-row">
+          <label class="compound-toggle">
+            <input type="checkbox" id="compoundToggle" onchange="toggleCompound(this)">
+            <span class="compound-slider"></span>
+          </label>
+          <span class="compound-label" id="compoundLabel">Off &mdash; profits not reinvested</span>
+        </div>
+        <p class="strategy-hint" style="margin-top:6px;" id="compoundHint" style="display:none;">50% of each winning trade is added to your next session amount automatically.</p>
+      </div>
       <div class="amount-action-row">
         <div class="setup-section amount-section">
           <label class="setup-label">AMOUNT TO TRADE ($10 – $200)</label>
@@ -247,7 +265,22 @@
 
   <script>
     window.USER_BALANCE = {{ user.balance }};
+    function toggleCompound(cb) {
+      const label = document.getElementById("compoundLabel");
+      const hint  = document.getElementById("compoundHint");
+      if (cb.checked) {
+        compoundRate = 0.5;
+        label.textContent = "On \u2014 50% of profits reinvested next session";
+        if (hint) hint.style.display = "block";
+      } else {
+        compoundRate = 0.0;
+        label.textContent = "Off \u2014 profits not reinvested";
+        if (hint) hint.style.display = "none";
+      }
+    }
+
     window.SELECTED_STRATEGY = 'grid';
+
   </script>
   <script src="/static/js/trading.js"></script>
   <script src="/static/js/realtime.js"></script>

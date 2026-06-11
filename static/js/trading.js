@@ -18,6 +18,7 @@ let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
 let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
+let compoundRate      = 0.0;  // 0=off, 0.5=reinvest 50% of profits
 let liveChartData     = [];
 let liveChartCtx      = null;
 let liveChartCanvas   = null;
@@ -44,7 +45,8 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 const strategyHints = {
   auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions.',
   grid:     'Places 5 buy orders in a price ladder. Level 1 fills instantly. Very high win rate.',
-  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.'
+  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.',
+  ema_macd: 'MACD crossover (fast 50, slow 200) + two-candle EMA30/EMA9 confirmation. Precise trend reversal entries.'
 };
 
 document.querySelectorAll('.strategy-btn').forEach(btn => {
@@ -348,8 +350,9 @@ async function startSession(force = false) {
         amount:     selectedAmount,
         timeframe:  selectedTimeframe,
         num_trades: 1,
-        strategy:   selectedStrategy,
-        force:      force
+        strategy:      selectedStrategy,
+        compound_rate: compoundRate,
+        force:         force
       })
     });
 
@@ -370,6 +373,11 @@ async function startSession(force = false) {
 
     // Got job_id — now poll until the session completes on the server
     const jobId = startData.job_id;
+    if (startData.backtest) {
+      const bt = startData.backtest;
+      document.getElementById('sessionStatusSub').textContent =
+        `Backtest: ${bt.win_rate}% win rate on ${bt.total_trades} setups`;
+    }
     document.getElementById('sessionStatusTitle').textContent = 'Bot is running — scanning markets...';
 
     let botData = null;

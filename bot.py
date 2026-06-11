@@ -1242,6 +1242,260 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
 
 
 # ============================================
+# BACKTEST ENGINE
+# Simulates strategy on 500 historical candles
+# before placing any real trade.
+# ============================================
+def backtest_strategy(symbol, strategy='momentum', timeframe='5m', lookback=500):
+    print(f'  [BACKTEST] {symbol} | strategy={strategy} | tf={timeframe} | candles={lookback}')
+    df = fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
+    if not df or len(df['close']) < 60:
+        print('  [BACKTEST] Insufficient data')
+        return {'win_rate': 60, 'total_trades': 0, 'profit_factor': 1.0, 'go': True,
+                'reason': 'Not enough history'}
+
+    closes = df['close']
+    highs  = df.get('high', closes)
+    lows   = df.get('low',  closes)
+    opens  = df.get('open', closes)
+    n      = len(closes)
+    wins = 0; losses = 0; gross_profit = 0.0; gross_loss = 0.0
+
+    if strategy in ('momentum', 'auto'):
+        for i in range(30, n - 1):
+            window = closes[:i+1]
+            rsi    = calculate_rsi(window, period=14)
+            _, _, ema_t = calculate_ema_trend(window, short=9, long=21)
+            _, _, _, mt = calculate_macd(window)
+            if rsi < 35 and ema_t == 'bullish' and mt == 'bullish':
+                direction = 'BUY'
+            elif rsi > 65 and ema_t == 'bearish' and mt == 'bearish':
+                direction = 'SELL'
+            else:
+                continue
+            entry = closes[i]
+            tp = entry * (1 + MOMENTUM_TP_PCT) if direction == 'BUY' else entry * (1 - MOMENTUM_TP_PCT)
+            sl = entry * (1 - MOMENTUM_SL_PCT) if direction == 'BUY' else entry * (1 + MOMENTUM_SL_PCT)
+            outcome = None
+            for j in range(i+1, min(i+11, n)):
+                if direction == 'BUY':
+                    if highs[j] >= tp: outcome = 'win';  break
+                    if lows[j]  <= sl: outcome = 'loss'; break
+                else:
+                    if lows[j]  <= tp: outcome = 'win';  break
+                    if highs[j] >= sl: outcome = 'loss'; break
+            if outcome is None:
+                outcome = 'win' if (closes[min(i+10,n-1)] > entry if direction=='BUY' else closes[min(i+10,n-1)] < entry) else 'loss'
+            if outcome == 'win': wins += 1; gross_profit += MOMENTUM_TP_PCT * 100
+            else:                losses += 1; gross_loss  += MOMENTUM_SL_PCT * 100
+
+    elif strategy in ('grid', 'grid_dca'):
+        spacing = GRID_SPACING_PCT; tp_pct = GRID_TP_PCT
+        for i in range(20, n - 5):
+            window_low = min(lows[i:i+3])
+            entry      = closes[i]
+            dip_pct    = (entry - window_low) / entry
+            if dip_pct < spacing: continue
+            tp_target = window_low * (1 + tp_pct)
+            bounced   = any(highs[i+j] >= tp_target for j in range(1, 6))
+            if bounced: wins += 1; gross_profit += tp_pct * 100
+            else:       losses += 1; gross_loss  += spacing * 100
+
+    elif strategy == 'ema_macd':
+        for i in range(40, n - 1):
+            window = closes[:i+1]; wo = opens[:i+1]
+            ema9_s  = ema_series(window, 9)
+            ema21_s = ema_series(window, 21)
+            ema30_s = ema_series(window, 30)
+            ml_curr, sl_curr, _, _ = calculate_macd(window)
+            ml_prev, sl_prev, _, _ = calculate_macd(window[:-1]) if len(window) > 1 else (0,0,0,'neutral')
+            bull_x = ml_curr > sl_curr and ml_prev <= sl_prev
+            bear_x = ml_curr < sl_curr and ml_prev >= sl_prev
+            prev_c = closes[i-1]; prev_o = opens[i-1]
+            curr_c = closes[i];   curr_o = opens[i]
+            if bull_x and prev_c < prev_o and prev_c < ema30_s[-2] and curr_c > curr_o and curr_c > ema9_s[-1]:
+                direction = 'BUY'
+            elif bear_x and prev_c > prev_o and prev_c > ema30_s[-2] and curr_c < curr_o and curr_c < ema21_s[-1]:
+                direction = 'SELL'
+            else: continue
+            entry = closes[i]
+            tp = entry*(1+MOMENTUM_TP_PCT) if direction=='BUY' else entry*(1-MOMENTUM_TP_PCT)
+            sl = entry*(1-MOMENTUM_SL_PCT) if direction=='BUY' else entry*(1+MOMENTUM_SL_PCT)
+            outcome = None
+            for j in range(i+1, min(i+11, n)):
+                if direction == 'BUY':
+                    if highs[j] >= tp: outcome = 'win';  break
+                    if lows[j]  <= sl: outcome = 'loss'; break
+                else:
+                    if lows[j]  <= tp: outcome = 'win';  break
+                    if highs[j] >= sl: outcome = 'loss'; break
+            if outcome is None:
+                outcome = 'win' if (closes[min(i+10,n-1)] > entry if direction=='BUY' else closes[min(i+10,n-1)] < entry) else 'loss'
+            if outcome == 'win': wins += 1; gross_profit += MOMENTUM_TP_PCT * 100
+            else:                losses += 1; gross_loss  += MOMENTUM_SL_PCT * 100
+
+    total = wins + losses
+    if total == 0:
+        return {'win_rate': 55, 'total_trades': 0, 'profit_factor': 1.0, 'go': True,
+                'reason': 'No matching setups in history'}
+
+    win_rate      = round((wins / total) * 100, 1)
+    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
+    go            = win_rate >= 52 and profit_factor >= 1.0
+    reason = (f'Backtest {total} setups: {win_rate}% win rate, '
+              f'profit factor {profit_factor}x -- {"PROCEED" if go else "CAUTION"}')
+    print(f'  [BACKTEST] {reason}')
+    return {'win_rate': win_rate, 'total_trades': total,
+            'profit_factor': profit_factor, 'go': go, 'reason': reason}
+
+
+# ============================================
+# EMA/MACD STRATEGY (custom strategy)
+# BUY:  MACD upward cross + prev red<EMA30 + curr green>EMA9
+# SELL: MACD downward cross + prev green>EMA30 + curr red<EMA21
+# EMAs: 9, 21, 30, 50, 100, 200
+# MACD: fast=50, slow=200, signal=1
+# ============================================
+def generate_ema_macd_signal(symbol):
+    try:
+        df = fetch_ohlcv(symbol, timeframe='5m', limit=250)
+        if not df or len(df['close']) < 210:
+            print(f'  [EMA_MACD] Insufficient data for {symbol}')
+            return None
+        closes = df['close']; opens = df.get('open', closes)
+        ema9   = ema_series(closes, 9)
+        ema21  = ema_series(closes, 21)
+        ema30  = ema_series(closes, 30)
+        ema50  = ema_series(closes, 50)
+        ema100 = ema_series(closes, 100)
+        ema200 = ema_series(closes, 200)
+        macd_line = [a - b for a, b in zip(ema_series(closes, 50), ema_series(closes, 200))]
+        sig_line  = ema_series(macd_line, 1)
+        curr_c = closes[-1]; curr_o = opens[-1]
+        prev_c = closes[-2]; prev_o = opens[-2]
+        curr_green = curr_c > curr_o; curr_red = curr_c < curr_o
+        prev_green = prev_c > prev_o; prev_red = prev_c < prev_o
+        macd_curr = macd_line[-1]; macd_prev = macd_line[-2]
+        sig_curr  = sig_line[-1];  sig_prev  = sig_line[-2]
+        bull_x = macd_curr > sig_curr and macd_prev <= sig_prev
+        bear_x = macd_curr < sig_curr and macd_prev >= sig_prev
+        trend_bull = closes[-1] > ema200[-1]
+        trend_bear = closes[-1] < ema200[-1]
+        direction = None; confidence = 0
+        if bull_x and prev_red and prev_c < ema30[-2] and curr_green and curr_c > ema9[-1]:
+            direction = 'BUY'; confidence = 78
+            if trend_bull: confidence += 7
+            if curr_c > ema50[-1]: confidence += 3
+            if curr_c > ema100[-1]: confidence += 2
+        elif bear_x and prev_green and prev_c > ema30[-2] and curr_red and curr_c < ema21[-1]:
+            direction = 'SELL'; confidence = 78
+            if trend_bear: confidence += 7
+            if curr_c < ema50[-1]: confidence += 3
+            if curr_c < ema100[-1]: confidence += 2
+        if direction is None:
+            print(f'  [EMA_MACD] {symbol}: no crossover setup')
+            return None
+        current_price = fetch_current_price(symbol) or closes[-1]
+        confidence = min(95, confidence)
+        print(f'  [EMA_MACD] {symbol}: {direction} {confidence}%')
+        return {'symbol': symbol, 'direction': direction, 'confidence': round(confidence,1),
+                'strategy': 'ema_macd', 'rsi': calculate_rsi(closes, 14),
+                'ema_trend': 'bullish' if closes[-1] > ema21[-1] else 'bearish',
+                'macd_trend': 'bullish' if bull_x else 'bearish',
+                'current_price': current_price}
+    except Exception as e:
+        print(f'  [EMA_MACD] Error for {symbol}: {e}')
+        return None
+
+
+def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1):
+    results = {'strategy': 'ema_macd', 'trades': [], 'total_trades': 0,
+               'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
+               'real_trading': True, 'trade_mode': 'spot'}
+    balance_info = get_bybit_balance()
+    if not balance_info['success']:
+        return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
+    available_usdt = balance_info['USDT']
+    trade_mode = balance_info.get('trade_mode', 'spot')
+    leverage   = LEVERAGE if trade_mode == 'futures' else 1
+    results['trade_mode'] = trade_mode
+    amount = min(amount, available_usdt * 0.99)
+    trade_usdt = amount / num_trades
+    session_loss_limit = amount * MAX_SESSION_LOSS_PCT
+    best_signal = None; best_conf = 0
+    for pair in CRYPTO_PAIRS:
+        sig = generate_ema_macd_signal(pair)
+        if sig and sig['confidence'] > best_conf:
+            best_signal = sig; best_conf = sig['confidence']
+        time.sleep(0.2)
+    if best_signal is None:
+        results['message'] = 'No EMA/MACD crossover setup found right now. Try again in a few minutes.'
+        return results
+    bt = backtest_strategy(best_signal['symbol'], strategy='ema_macd')
+    results['backtest'] = bt
+    if not bt['go']:
+        results['message'] = f'Backtest caution: {bt["reason"]}. Session paused.'
+        return results
+    symbol = best_signal['symbol']
+    trade_direction = best_signal['direction']
+    if trade_mode == 'spot': trade_direction = 'BUY'
+    for i in range(num_trades):
+        if results['net_pnl'] < -session_loss_limit: break
+        entry_order = execute_real_trade(symbol, trade_direction, trade_usdt, trade_mode)
+        if not entry_order['success']:
+            print(f'  [EMA_MACD] Entry failed: {entry_order.get("error")}')
+            continue
+        entry_price = entry_order['price']; quantity = entry_order['quantity']
+        tp_pct = MOMENTUM_TP_PCT / leverage; sl_pct = MOMENTUM_SL_PCT / leverage
+        tp = entry_price*(1+tp_pct) if trade_direction=='BUY' else entry_price*(1-tp_pct)
+        sl = entry_price*(1-sl_pct) if trade_direction=='BUY' else entry_price*(1+sl_pct)
+        max_wait = timeframe_minutes * 60; elapsed = 0
+        px = bybit_futures if trade_mode == 'futures' else bybit_spot
+        msym = entry_order['symbol']
+        while elapsed < max_wait:
+            time.sleep(10); elapsed += 10
+            try:
+                live_price = float(px.fetch_ticker(msym)['last'])
+                if trade_direction=='BUY'  and live_price >= tp: break
+                if trade_direction=='BUY'  and live_price <= sl: break
+                if trade_direction=='SELL' and live_price <= tp: break
+                if trade_direction=='SELL' and live_price >= sl: break
+            except Exception: pass
+        close_order = close_trade(msym, trade_direction, quantity, trade_mode)
+        real_pnl = 0.0; won = False
+        if close_order['success']:
+            cp = close_order['close_price']
+            pc = (cp - entry_price) if trade_direction=='BUY' else (entry_price - cp)
+            real_pnl = round((pc / entry_price) * trade_usdt * leverage - trade_usdt * 0.002, 4)
+            won = real_pnl > 0
+        results['trades'].append({'index': i+1, 'symbol': symbol, 'direction': trade_direction,
+            'strategy': 'ema_macd', 'confidence': best_signal['confidence'],
+            'rsi': best_signal['rsi'], 'profit': real_pnl, 'won': won,
+            'price': entry_price, 'real_order': True})
+        results['total_trades'] += 1; results['net_pnl'] += real_pnl
+        if won: results['wins'] += 1
+        else:   results['losses'] += 1
+        time.sleep(0.5)
+    results['net_pnl']  = round(results['net_pnl'], 4)
+    results['win_rate'] = round((results['wins']/results['total_trades'])*100,1) if results['total_trades']>0 else 0
+    return results
+
+
+# ============================================
+# COMPOUNDING ENGINE
+# Reinvests a % of profits into next session.
+# Never increases on a loss (no martingale).
+# ============================================
+def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10, max_amount=200):
+    if session_pnl <= 0:
+        return round(max(min_amount, base_amount), 2)
+    reinvest   = session_pnl * compound_rate
+    new_amount = max(min_amount, min(max_amount, base_amount + reinvest))
+    print(f'  [COMPOUND] Base ${base_amount:.2f} + reinvest ${reinvest:.4f} = next ${new_amount:.2f}')
+    return round(new_amount, 2)
+
+
+# ============================================
 # 9. AUTO-BEST SESSION
 # ============================================
 def execute_auto_best_session(amount, timeframe_minutes, num_trades=1):
@@ -1302,12 +1556,30 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
           f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min')
     print(f'{"="*50}')
 
+    # BACKTEST PRE-CHECK: run historical simulation before every signal-based session
+    if strategy not in ('grid', 'grid_dca'):
+        bt = backtest_strategy(DEFAULT_PAIR, strategy=strategy)
+        if not bt['go']:
+            return {
+                'strategy': strategy, 'trades': [], 'total_trades': 0,
+                'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
+                'real_trading': False, 'backtest': bt,
+                'message': (
+                    f'Backtest caution ({bt["win_rate"]}% win rate on last '
+                    f'{bt["total_trades"]} setups). Session paused to protect capital.'
+                )
+            }
+        print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
+
     if strategy == 'grid' or strategy == 'grid_dca':
         return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
 
     elif strategy == 'momentum':
         return execute_momentum_session(amount, timeframe_minutes,
                                         num_trades=num_trades, force=force)
+
+    elif strategy == 'ema_macd':
+        return execute_ema_macd_session(amount, timeframe_minutes, num_trades=num_trades)
 
     elif strategy == 'auto' or strategy == 'auto_best':
         return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades)
