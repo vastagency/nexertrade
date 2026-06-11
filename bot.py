@@ -806,8 +806,8 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
 
     # RSI gate: if price is overbought (RSI > 62), market is likely to keep falling
     # A BUY grid in overbought conditions means we buy at the top and price just drops
-    if current_rsi > 62:
-        print(f'  ⚠ RSI {current_rsi:.1f} > 62 — market overbought, skipping grid to avoid buying into drop')
+    if current_rsi > 68:
+        print(f'  ⚠ RSI {current_rsi:.1f} > 68 — market overbought, skipping grid to avoid buying into drop')
         results['message'] = (
             f'RSI is {current_rsi:.1f} — market may be overbought. '
             f'Grid skipped to protect capital. Try again in a few minutes or use Auto-Best.'
@@ -850,8 +850,8 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
             if idx == 0:
                 # Level 1 strategy depends on RSI:
                 # RSI < 48 (oversold/neutral): market order — price is low, likely to bounce
-                # RSI 48-62: tight limit just below entry — let price dip slightly before entering
-                # RSI > 62: already handled above (return early)
+                # RSI 48-68: tight limit just below entry — let price dip slightly before entering
+                # RSI > 68: already handled above (return early)
                 qty = (usdt_per_level * leverage) / entry_price
                 if qty < min_qty:
                     print(f'  Level 1: too small ({qty:.6f} < {min_qty})')
@@ -876,7 +876,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
                         except Exception as tp_err:
                             print(f'  Level 1 TP order failed: {tp_err}')
                     else:
-                        # RSI 48-62: limit order just below entry — safer entry
+                        # RSI 48-68: limit order just below entry — safer entry
                         level1_price = entry_price * (1 - dynamic_spacing * 0.5)
                         tp_p_1 = level1_price * (1 + dynamic_tp)
                         order  = exchange.create_limit_order(trade_symbol, 'buy', qty, level1_price)
