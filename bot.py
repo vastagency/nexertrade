@@ -182,11 +182,52 @@ def get_bybit_positions():
 # ============================================
 def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     """
-    Fetch real OHLCV candles from Bybit, falls back to Binance.
-    Returns None if both fail — callers must handle None.
+    Fetch real OHLCV candles from Bybit public market API.
+    Uses direct requests call through proxy session — more reliable
+    than CCXT for geo-restricted environments.
+    Falls back to CCXT bybit_futures if direct call fails.
+    Returns None if all methods fail — callers must handle None.
     """
+    # Map symbol to Bybit format
+    bybit_symbol = symbol.replace('/', '').replace(':USDT', '')  # XRP/USDT → XRPUSDT
+
+    # Map timeframe to Bybit interval format
+    tf_map = {'1m': '1', '5m': '5', '15m': '15', '30m': '30',
+              '1h': '60', '4h': '240', '1d': 'D'}
+    interval = tf_map.get(timeframe, '5')
+
+    # Method 1: Direct Bybit public kline API via proxy session
     try:
-        ohlcv = bybit.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        url = 'https://api.bybit.com/v5/market/kline'
+        params = {
+            'symbol':   bybit_symbol,
+            'interval': interval,
+            'limit':    limit,
+            'category': 'linear'  # futures market data — less restricted
+        }
+        # Use the proxied session from bybit_futures if available
+        session = getattr(bybit_futures, 'session', None) or requests.Session()
+        resp = session.get(url, params=params, timeout=10)
+        data = resp.json()
+        if data.get('retCode') == 0:
+            candles = data['result']['list']
+            if len(candles) >= 10:
+                # Bybit returns newest first — reverse for chronological order
+                candles = list(reversed(candles))
+                return {
+                    'open':   [float(c[1]) for c in candles],
+                    'high':   [float(c[2]) for c in candles],
+                    'low':    [float(c[3]) for c in candles],
+                    'close':  [float(c[4]) for c in candles],
+                    'volume': [float(c[5]) for c in candles],
+                }
+    except Exception as e:
+        print(f'Bybit OHLCV failed for {symbol}/{timeframe}: {e}')
+
+    # Method 2: CCXT bybit_futures fallback
+    try:
+        futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
+        ohlcv = bybit_futures.fetch_ohlcv(futures_symbol, timeframe=timeframe, limit=limit)
         if ohlcv and len(ohlcv) >= 10:
             return {
                 'open':   [float(c[1]) for c in ohlcv],
@@ -196,8 +237,9 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
                 'volume': [float(c[5]) for c in ohlcv],
             }
     except Exception as e:
-        print(f'Bybit OHLCV failed for {symbol}/{timeframe}: {e}')
+        print(f'Bybit futures OHLCV also failed for {symbol}/{timeframe}: {e}')
 
+    # Method 3: Binance fallback via proxied session
     try:
         ohlcv = binance_data.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         if ohlcv and len(ohlcv) >= 10:
@@ -215,8 +257,22 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
 
 
 def fetch_current_price(symbol='BTC/USDT'):
+    """Fetch current price via proxied direct API call first, then CCXT fallback."""
+    bybit_symbol = symbol.replace('/', '').replace(':USDT', '')
     try:
-        ticker = bybit.fetch_ticker(symbol)
+        url = 'https://api.bybit.com/v5/market/tickers'
+        params = {'symbol': bybit_symbol, 'category': 'linear'}
+        session = getattr(bybit_futures, 'session', None) or requests.Session()
+        resp = session.get(url, params=params, timeout=8)
+        data = resp.json()
+        if data.get('retCode') == 0:
+            items = data['result']['list']
+            if items:
+                return float(items[0]['lastPrice'])
+    except Exception:
+        pass
+    try:
+        ticker = bybit_futures.fetch_ticker(symbol.replace('/USDT', '/USDT:USDT'))
         return float(ticker['last'])
     except Exception:
         pass
