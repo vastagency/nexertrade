@@ -10,6 +10,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
   <link rel="stylesheet" href="/static/css/dashboard.css">
   <link rel="stylesheet" href="/static/css/profile.css">
+  <link rel="stylesheet" href="/static/css/mobile.css">
 </head>
 <body>
 
@@ -56,9 +57,60 @@
             <line x1="21" y1="12" x2="9" y2="12"/>
           </svg>
         </a>
+        <button class="hamburger-btn" id="hamburgerBtn" aria-label="Menu">
+          <span></span><span></span><span></span>
+        </button>
       </div>
     </div>
   </nav>
+
+  <!-- MOBILE NAV DRAWER -->
+  <div class="mobile-nav-overlay" id="mobileNavOverlay"></div>
+  <div class="mobile-nav-drawer" id="mobileNavDrawer">
+    <a href="/dashboard" class="nav-link">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+      </svg>
+      Dashboard
+    </a>
+    <a href="/trading" class="nav-link">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+      </svg>
+      Trading
+    </a>
+    <a href="/deposit" class="nav-link">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12l7-7 7 7"/>
+      </svg>
+      Deposit
+    </a>
+    <a href="/withdraw" class="nav-link">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 19V5M5 12l7 7 7-7"/>
+      </svg>
+      Withdraw
+    </a>
+    <a href="/history" class="nav-link">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+      </svg>
+      History
+    </a>
+    <a href="/profile" class="nav-link active">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/>
+      </svg>
+      Profile
+    </a>
+    <div class="mobile-nav-divider"></div>
+    <a href="/logout" style="color:#ef4444;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+      </svg>
+      Logout
+    </a>
+  </div>
 
   <main class="dash-main">
 
@@ -188,5 +240,31 @@
 
   <script src="/static/js/profile.js"></script>
   <script src="/static/js/realtime.js"></script>
+  <script>
+    // Mobile nav toggle
+    const hamburgerBtn = document.getElementById('hamburgerBtn');
+    const mobileNavDrawer = document.getElementById('mobileNavDrawer');
+    const mobileNavOverlay = document.getElementById('mobileNavOverlay');
+    if (hamburgerBtn && mobileNavDrawer) {
+      hamburgerBtn.addEventListener('click', () => {
+        const isOpen = mobileNavDrawer.classList.toggle('open');
+        hamburgerBtn.classList.toggle('open', isOpen);
+        mobileNavOverlay.classList.toggle('open', isOpen);
+      });
+      mobileNavOverlay.addEventListener('click', () => {
+        mobileNavDrawer.classList.remove('open');
+        hamburgerBtn.classList.remove('open');
+        mobileNavOverlay.classList.remove('open');
+      });
+      // Close drawer when a link is tapped
+      mobileNavDrawer.querySelectorAll('a').forEach(a => {
+        a.addEventListener('click', () => {
+          mobileNavDrawer.classList.remove('open');
+          hamburgerBtn.classList.remove('open');
+          mobileNavOverlay.classList.remove('open');
+        });
+      });
+    }
+  </script>
 </body>
 </html>
