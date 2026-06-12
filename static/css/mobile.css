@@ -113,8 +113,16 @@
    SHOW HAMBURGER ON MOBILE
 ============================================ */
 @media (max-width: 768px) {
-  .hamburger-btn { display: flex; }
+  .hamburger-btn {
+    display: flex !important;
+    visibility: visible !important;
+  }
   .dash-nav-links { display: none !important; }
+  /* Hide desktop-only nav items on mobile */
+  .nav-icon-btn:not(#hamburgerBtn) { display: none; }
+  .dash-nav-right .nav-icon-btn { display: none; }
+  /* Keep logout button visible */
+  .dash-nav-right a.nav-icon-btn[href="/logout"] { display: flex; }
   .dash-nav-inner { padding: 0 14px; }
 
   /* DASHBOARD */

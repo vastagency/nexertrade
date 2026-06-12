@@ -19,13 +19,20 @@ class User(UserMixin, db.Model):
     password_hash    = db.Column(db.String(255), nullable=False)
     is_admin         = db.Column(db.Boolean, default=False)
     is_active        = db.Column(db.Boolean, default=True)
-    balance          = db.Column(db.Float, default=0.0)
+    balance          = db.Column(db.Float, default=0.0)        # kept for legacy
     total_profit     = db.Column(db.Float, default=0.0)
-    total_withdrawn  = db.Column(db.Float, default=0.0)
+    total_withdrawn  = db.Column(db.Float, default=0.0)        # kept for legacy
     total_fees_paid  = db.Column(db.Float, default=0.0)
     sessions_completed = db.Column(db.Integer, default=0)
     invite_code      = db.Column(db.String(20), nullable=False)
     joined_at        = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # ── Bybit API Key Connection (new model) ──────────────────
+    # Users connect their own Bybit account — trades happen on their wallet
+    bybit_api_key    = db.Column(db.String(255), nullable=True)   # stored encrypted
+    bybit_api_secret = db.Column(db.String(255), nullable=True)   # stored encrypted
+    bybit_connected  = db.Column(db.Boolean, default=False)       # confirmed working
+    bybit_connected_at = db.Column(db.DateTime, nullable=True)    # when last verified
 
     deposits       = db.relationship('Deposit',      backref='user', lazy=True)
     withdrawals    = db.relationship('Withdrawal',   backref='user', lazy=True)

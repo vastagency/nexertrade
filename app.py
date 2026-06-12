@@ -270,6 +270,68 @@ def profile():
         return redirect(url_for('admin'))
     return render_template('profile.html', user=current_user)
 
+
+# ============================================
+# API — CONNECT BYBIT ACCOUNT
+# ============================================
+@app.route('/api/connect-bybit', methods=['POST'])
+@login_required
+def api_connect_bybit():
+    """Save and validate a user's Bybit API key credentials."""
+    from bot import validate_user_bybit_keys
+    data       = request.get_json()
+    api_key    = (data.get('api_key', '') or '').strip()
+    api_secret = (data.get('api_secret', '') or '').strip()
+
+    if not api_key or not api_secret:
+        return jsonify({'success': False, 'message': 'Both API key and secret are required.'}), 400
+
+    # Validate by fetching balance
+    ok, result = validate_user_bybit_keys(api_key, api_secret)
+    if not ok:
+        return jsonify({'success': False, 'message': result}), 400
+
+    # Save to DB (in production — encrypt these before storing)
+    current_user.bybit_api_key    = api_key
+    current_user.bybit_api_secret = api_secret
+    current_user.bybit_connected  = True
+    current_user.bybit_connected_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        'success': True,
+        'message': f'Bybit account connected successfully! Balance: ${result:.2f} USDT',
+        'balance': round(result, 2)
+    })
+
+
+@app.route('/api/disconnect-bybit', methods=['POST'])
+@login_required
+def api_disconnect_bybit():
+    """Remove a user's connected Bybit API credentials."""
+    current_user.bybit_api_key    = None
+    current_user.bybit_api_secret = None
+    current_user.bybit_connected  = False
+    current_user.bybit_connected_at = None
+    db.session.commit()
+    return jsonify({'success': True, 'message': 'Bybit account disconnected.'})
+
+
+@app.route('/api/user-balance')
+@login_required
+def api_user_balance():
+    """Fetch user's live Bybit balance if connected, else return platform balance."""
+    if current_user.bybit_connected and current_user.bybit_api_key:
+        from bot import get_user_bybit_balance
+        live_bal = get_user_bybit_balance(
+            current_user.bybit_api_key,
+            current_user.bybit_api_secret
+        )
+        if live_bal is not None:
+            return jsonify({'success': True, 'balance': round(live_bal, 2), 'source': 'bybit_live'})
+    # Fallback to platform balance
+    return jsonify({'success': True, 'balance': round(current_user.balance, 2), 'source': 'platform'})
+
 # ============================================
 # ADMIN ROUTE
 # ============================================
@@ -553,7 +615,8 @@ def api_trade_complete():
 # Frontend polls /api/bot/result/<job_id> every 5 seconds.
 # ============================================
 def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force,
-                   compound_rate=0.0, symbol=None, user_leverage=None):
+                   compound_rate=0.0, symbol=None, user_leverage=None,
+                   user_api_key=None, user_api_secret=None):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
@@ -561,7 +624,9 @@ def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, for
             results = execute_session(
                 amount, timeframe, num_trades,
                 strategy=strategy, force=force,
-                symbol=symbol, user_leverage=user_leverage
+                symbol=symbol, user_leverage=user_leverage,
+                user_api_key=user_api_key,
+                user_api_secret=user_api_secret
             )
             # Apply compounding if enabled
             if compound_rate > 0 and results.get('net_pnl', 0) != 0:
@@ -678,10 +743,14 @@ def api_bot_execute():
                 'user_id': current_user.id,
                 'amount':  amount
             }
+        # Get user's connected Bybit credentials if available
+        u_api_key    = current_user.bybit_api_key    if current_user.bybit_connected else None
+        u_api_secret = current_user.bybit_api_secret if current_user.bybit_connected else None
+
         t = threading.Thread(
             target=_run_trade_job,
             args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force,
-                  compound_rate, selected_symbol, user_leverage),
+                  compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret),
             daemon=True
         )
         t.start()

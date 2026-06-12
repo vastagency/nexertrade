@@ -822,6 +822,79 @@ def select_best_grid_pair(pairs, usdt_per_level, trade_mode, leverage):
     return best_pair
 
 
+# ============================================
+# USER EXCHANGE — Per-user Bybit connection
+# ============================================
+def get_user_exchange(api_key, api_secret, mode='futures'):
+    """
+    Build a CCXT Bybit exchange instance using a user's own API credentials.
+    Each user connects their own Bybit account — trades happen on their wallet.
+    The proxy session is injected so all calls route through the proxy pool.
+
+    mode: 'futures' (default) or 'spot'
+    """
+    exchange = ccxt.bybit({
+        'apiKey': api_key,
+        'secret': api_secret,
+        'enableRateLimit': True,
+        'options': {
+            'defaultType': 'linear' if mode == 'futures' else 'spot',
+            'recvWindow': 20000
+        },
+    })
+    # Inject proxy session so user API calls also route through proxy
+    exchange = _inject_proxy(exchange)
+    return exchange
+
+
+def validate_user_bybit_keys(api_key, api_secret):
+    """
+    Test a user's Bybit API key by fetching their balance.
+    Returns (True, balance_usdt) on success or (False, error_message) on failure.
+    """
+    try:
+        exchange = get_user_exchange(api_key, api_secret, mode='futures')
+        balance_data = exchange.fetch_balance()
+        usdt = float(balance_data.get('USDT', {}).get('free', 0) or 0)
+        return True, usdt
+    except Exception as e:
+        err = str(e)
+        if 'invalid' in err.lower() or '10003' in err or '10004' in err:
+            return False, 'Invalid API key or secret. Please check and try again.'
+        if '403' in err or 'forbidden' in err.lower():
+            return False, 'API key rejected — ensure trade permissions are enabled on Bybit.'
+        return False, f'Connection failed: {err[:120]}'
+
+
+def get_user_bybit_balance(api_key, api_secret):
+    """Fetch a user's live USDT balance from their connected Bybit account."""
+    try:
+        exchange = get_user_exchange(api_key, api_secret, mode='futures')
+        # Direct API call via proxied session for reliability
+        session = getattr(exchange, 'session', None) or requests.Session()
+        resp = session.get(
+            'https://api.bybit.com/v5/account/wallet-balance',
+            params={'accountType': 'UNIFIED'},
+            headers={
+                'X-BAPI-API-KEY':   api_key,
+                'X-BAPI-TIMESTAMP': str(int(time.time() * 1000)),
+            },
+            timeout=10
+        )
+        data = resp.json()
+        if data.get('retCode') == 0:
+            for acc in data['result']['list']:
+                for coin in acc.get('coin', []):
+                    if coin['coin'] == 'USDT':
+                        return float(coin.get('walletBalance', 0))
+        # CCXT fallback
+        bal = exchange.fetch_balance()
+        return float(bal.get('USDT', {}).get('total', 0) or 0)
+    except Exception as e:
+        print(f'  [USER BALANCE] Failed: {e}')
+        return None
+
+
 def execute_grid_session(amount, timeframe_minutes, symbol=None):
     """
     Grid/DCA strategy — RSI-aware version.
@@ -1688,27 +1761,48 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
 # 10. UNIFIED SESSION ENTRY POINT
 # ============================================
 def execute_session(amount, timeframe_minutes, num_trades=1,
-                    strategy='auto', force=False, symbol=None, user_leverage=None):
+                    strategy='auto', force=False, symbol=None,
+                    user_leverage=None, user_api_key=None, user_api_secret=None):
     """
     Main entry point for all trading sessions.
+
+    If user_api_key and user_api_secret are provided, trades execute on the
+    user's own Bybit account using their credentials (new model).
+    Otherwise falls back to admin Bybit account (legacy mode).
 
     strategy options:
         'momentum' — multi-timeframe signal scalper
         'grid'     — grid/DCA ladder strategy
         'auto'     — auto-picks best strategy per market condition
-
-    All strategies:
-    - Connect to Bybit and verify real balance first
-    - Place and monitor real orders only
-    - Report actual PnL after fees
-    - Stop on Bybit errors with a clear message — never fake results
     """
     strategy = strategy.lower().strip()
-    print(f'\n{"="*50}')
-    print(f'NexerTrade session | Strategy: {strategy.upper()} | '
-          f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
-          f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
-    print(f'{"="*50}')
+
+    # Determine which exchange to use — user's own or admin
+    use_user_account = bool(user_api_key and user_api_secret)
+    if use_user_account:
+        print(f'\n{"="*50}')
+        print(f'NexerTrade session | Strategy: {strategy.upper()} | '
+              f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
+              f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
+        print(f'  Mode: USER ACCOUNT (trading on user\'s own Bybit)')
+        print(f'{"="*50}')
+        # Override global exchange instances with user's exchange for this session
+        import bot as _bot_module
+        user_spot    = get_user_exchange(user_api_key, user_api_secret, mode='spot')
+        user_futures = get_user_exchange(user_api_key, user_api_secret, mode='futures')
+        _original_spot    = _bot_module.bybit_spot
+        _original_futures = _bot_module.bybit_futures
+        _bot_module.bybit_spot    = user_spot
+        _bot_module.bybit_futures = user_futures
+    else:
+        print(f'\n{"="*50}')
+        print(f'NexerTrade session | Strategy: {strategy.upper()} | '
+              f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
+              f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
+        print(f'  Mode: ADMIN ACCOUNT (legacy)')
+        print(f'{"="*50}')
+        _original_spot    = None
+        _original_futures = None
 
     # Apply user-selected leverage override globally for this session
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
@@ -1732,21 +1826,32 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
 
     if strategy == 'grid' or strategy == 'grid_dca':
-        return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
+        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol)
 
     elif strategy == 'momentum':
-        return execute_momentum_session(amount, timeframe_minutes,
-                                        num_trades=num_trades, force=force, symbol=symbol)
+        result = execute_momentum_session(amount, timeframe_minutes,
+                                          num_trades=num_trades, force=force, symbol=symbol)
 
     elif strategy == 'ema_macd':
-        return execute_ema_macd_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
+        result = execute_ema_macd_session(amount, timeframe_minutes,
+                                          num_trades=num_trades, symbol=symbol)
 
     elif strategy == 'auto' or strategy == 'auto_best':
-        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
+        result = execute_auto_best_session(amount, timeframe_minutes,
+                                           num_trades=num_trades, symbol=symbol)
 
     else:
         print(f'Unknown strategy "{strategy}" — defaulting to auto')
-        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
+        result = execute_auto_best_session(amount, timeframe_minutes,
+                                           num_trades=num_trades, symbol=symbol)
+
+    # Restore admin exchange after user session completes
+    if use_user_account and _original_futures is not None:
+        import bot as _bot_module
+        _bot_module.bybit_spot    = _original_spot
+        _bot_module.bybit_futures = _original_futures
+
+    return result
 
 
 # ============================================

@@ -236,10 +236,129 @@
       </div>
     </div>
 
+
+    <!-- ── BYBIT ACCOUNT CONNECTION ───────────────────── -->
+    <div class="profile-section" id="bybitConnectSection">
+      <h3 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle; margin-right:6px;">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+        Connect Bybit Account
+      </h3>
+      <p style="color:#9ca3af; font-size:0.875rem; margin-bottom:18px; line-height:1.5;">
+        Connect your own Bybit account so the bot trades directly on your wallet.
+        Your balance, profits and losses all show on your Bybit account — fully transparent.
+        Only your subscription fee comes to NexerTrade.
+      </p>
+
+      {% if user.bybit_connected %}
+      <!-- Connected state -->
+      <div id="bybitConnectedState" style="background:#0D1321; border:1px solid #10b981; border-radius:10px; padding:18px; margin-bottom:16px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+          <div style="width:10px; height:10px; background:#10b981; border-radius:50%;"></div>
+          <span style="color:#10b981; font-weight:600;">Bybit Account Connected</span>
+        </div>
+        <p style="color:#9ca3af; font-size:0.85rem; margin:0;">
+          Connected on {{ user.bybit_connected_at.strftime('%b %d, %Y') if user.bybit_connected_at else 'recently' }}.
+          Your trades run on your own Bybit wallet.
+        </p>
+        <button id="disconnectBybitBtn" style="margin-top:14px; padding:8px 20px; border-radius:8px;
+          border:1px solid #ef4444; background:transparent; color:#ef4444;
+          cursor:pointer; font-size:0.85rem; font-weight:600;">
+          Disconnect Bybit
+        </button>
+      </div>
+      {% else %}
+      <!-- Not connected state -->
+      <div id="bybitNotConnectedState">
+        <div style="background:#1a0a0a; border:1px solid #374151; border-radius:8px; padding:14px; margin-bottom:16px;">
+          <p style="color:#f59e0b; font-size:0.82rem; margin:0; line-height:1.5;">
+            ⚠ <strong>Before connecting:</strong> Create a Bybit API key with <strong>Trade permissions only</strong>.
+            Do NOT enable withdrawal permissions. Go to Bybit → Account → API Management → Create New Key.
+          </p>
+        </div>
+        <div class="profile-form-group">
+          <label class="profile-label">Bybit API Key</label>
+          <input type="text" id="bybitApiKey" placeholder="Enter your Bybit API Key"
+            style="width:100%; padding:12px 14px; background:#0f0f1a; border:1px solid #374151;
+                   border-radius:8px; color:#fff; font-size:0.9rem; outline:none; box-sizing:border-box;">
+        </div>
+        <div class="profile-form-group" style="margin-top:12px;">
+          <label class="profile-label">Bybit API Secret</label>
+          <input type="password" id="bybitApiSecret" placeholder="Enter your Bybit API Secret"
+            style="width:100%; padding:12px 14px; background:#0f0f1a; border:1px solid #374151;
+                   border-radius:8px; color:#fff; font-size:0.9rem; outline:none; box-sizing:border-box;">
+        </div>
+        <button id="connectBybitBtn" style="margin-top:16px; padding:12px 28px; border-radius:8px;
+          border:none; background:#F5C518; color:#000; cursor:pointer;
+          font-size:0.9rem; font-weight:700; width:100%;">
+          Test & Connect Bybit Account
+        </button>
+        <div id="bybitConnectMsg" style="margin-top:10px; font-size:0.85rem; display:none;"></div>
+      </div>
+      {% endif %}
+    </div>
+
   </main>
 
   <script src="/static/js/profile.js"></script>
   <script src="/static/js/realtime.js"></script>
+  <script>
+    // Bybit connect logic
+    const connectBtn = document.getElementById('connectBybitBtn');
+    const disconnectBtn = document.getElementById('disconnectBybitBtn');
+    const connectMsg = document.getElementById('bybitConnectMsg');
+
+    if (connectBtn) {
+      connectBtn.addEventListener('click', async () => {
+        const key    = document.getElementById('bybitApiKey').value.trim();
+        const secret = document.getElementById('bybitApiSecret').value.trim();
+        if (!key || !secret) {
+          showMsg('Please enter both API key and secret.', '#ef4444');
+          return;
+        }
+        connectBtn.textContent = 'Testing connection...';
+        connectBtn.disabled = true;
+        try {
+          const res  = await fetch('/api/connect-bybit', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({api_key: key, api_secret: secret})
+          });
+          const data = await res.json();
+          if (data.success) {
+            showMsg('✓ ' + data.message, '#10b981');
+            setTimeout(() => location.reload(), 1500);
+          } else {
+            showMsg('✗ ' + data.message, '#ef4444');
+            connectBtn.textContent = 'Test & Connect Bybit Account';
+            connectBtn.disabled = false;
+          }
+        } catch (e) {
+          showMsg('Connection error — please try again.', '#ef4444');
+          connectBtn.textContent = 'Test & Connect Bybit Account';
+          connectBtn.disabled = false;
+        }
+      });
+    }
+
+    if (disconnectBtn) {
+      disconnectBtn.addEventListener('click', async () => {
+        if (!confirm('Disconnect your Bybit account? Trades will stop working until reconnected.')) return;
+        const res  = await fetch('/api/disconnect-bybit', {method: 'POST'});
+        const data = await res.json();
+        if (data.success) location.reload();
+      });
+    }
+
+    function showMsg(msg, color) {
+      if (!connectMsg) return;
+      connectMsg.textContent = msg;
+      connectMsg.style.color = color;
+      connectMsg.style.display = 'block';
+    }
+  </script>
   <script>
     // Mobile nav toggle
     const hamburgerBtn = document.getElementById('hamburgerBtn');

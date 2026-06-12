@@ -715,23 +715,24 @@
   gap: 4px;
   padding: 10px 14px;
   border-radius: 10px;
-  border: 1px solid #374151;
+  border: 2px solid #374151;
   background: #0f0f1a;
   cursor: pointer;
   min-width: 64px;
   transition: all 0.2s;
 }
 .pair-btn:hover {
-  border-color: #10b981;
-  background: rgba(16,185,129,0.08);
+  border-color: #F5C518;
+  background: rgba(245,197,24,0.06);
 }
 .pair-btn.active {
-  border-color: #10b981;
-  background: rgba(16,185,129,0.15);
-  box-shadow: 0 0 10px rgba(16,185,129,0.2);
+  border-color: #F5C518;
+  background: rgba(245,197,24,0.12);
+  box-shadow: 0 0 12px rgba(245,197,24,0.25);
 }
 .pair-btn.active span {
-  color: #10b981 !important;
+  color: #F5C518 !important;
+  font-weight: 700;
 }
 
 /* ============================================
@@ -740,7 +741,7 @@
 .lev-btn {
   padding: 8px 18px;
   border-radius: 8px;
-  border: 1px solid #374151;
+  border: 2px solid #374151;
   background: #0f0f1a;
   color: #9ca3af;
   cursor: pointer;
@@ -749,19 +750,24 @@
   transition: all 0.2s;
 }
 .lev-btn:hover {
-  border-color: #f59e0b;
-  color: #f59e0b;
+  border-color: #F5C518;
+  color: #F5C518;
+  background: rgba(245,197,24,0.06);
 }
 .lev-btn.active {
-  border-color: #f59e0b;
-  background: rgba(245,158,11,0.15);
-  color: #f59e0b;
-  box-shadow: 0 0 10px rgba(245,158,11,0.2);
+  border-color: #F5C518;
+  background: rgba(245,197,24,0.15);
+  color: #F5C518;
+  box-shadow: 0 0 12px rgba(245,197,24,0.25);
 }
-/* 10x gets special danger styling */
+/* 10x keeps danger red */
 .lev-btn[data-leverage="10"].active {
   border-color: #ef4444;
   background: rgba(239,68,68,0.15);
   color: #ef4444;
-  box-shadow: 0 0 10px rgba(239,68,68,0.2);
+  box-shadow: 0 0 12px rgba(239,68,68,0.25);
+}
+.lev-btn[data-leverage="10"]:hover {
+  border-color: #ef4444;
+  color: #ef4444;
 }
