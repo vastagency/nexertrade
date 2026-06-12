@@ -1150,6 +1150,26 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
                 print(f'  ⚡ EMA override: SELL (bearish trend {bear_emas}/3)')
             else:
                 trade_direction = signal['direction']
+
+            # RANGING MARKET RSI PROTECTION:
+            # In a ranging (sideways) market, never short when RSI is already low.
+            # Low RSI in a ranging market = price at the bottom of the range = bounce likely.
+            # Shorting here fights the natural direction and fees eat the flat trade.
+            # Rule: ranging + RSI < 50 → force BUY or skip. Never short into a low RSI range.
+            market_cond = signal.get('market_condition', 'ranging')
+            rsi_now     = signal.get('rsi', 50)
+            if market_cond == 'ranging' and rsi_now < 50 and trade_direction == 'SELL':
+                print(f'  🛡 Ranging market protection: RSI {rsi_now:.1f} < 50 in ranging market '
+                      f'— switching SELL → BUY to follow natural bounce direction')
+                trade_direction = 'BUY'
+
+            # Similarly: ranging + RSI > 60 → don't blindly buy at the top of range
+            # price is near range resistance, buying here risks an immediate pullback
+            if market_cond == 'ranging' and rsi_now > 60 and trade_direction == 'BUY':
+                print(f'  🛡 Ranging market protection: RSI {rsi_now:.1f} > 60 in ranging market '
+                      f'— switching BUY → SELL to follow natural resistance rejection')
+                trade_direction = 'SELL'
+
         else:
             trade_direction = 'BUY'
 
@@ -1464,7 +1484,18 @@ def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=Non
         return results
     symbol = best_signal['symbol']
     trade_direction = best_signal['direction']
-    if trade_mode == 'spot': trade_direction = 'BUY'
+    if trade_mode == 'spot':
+        trade_direction = 'BUY'
+    elif trade_mode == 'futures':
+        # Apply ranging market RSI protection here too
+        market_cond = best_signal.get('market_condition', 'unknown')
+        rsi_now     = best_signal.get('rsi', 50)
+        if market_cond == 'ranging' and rsi_now < 50 and trade_direction == 'SELL':
+            print(f'  🛡 EMA/MACD ranging protection: RSI {rsi_now:.1f} < 50 — switching to BUY')
+            trade_direction = 'BUY'
+        if market_cond == 'ranging' and rsi_now > 60 and trade_direction == 'BUY':
+            print(f'  🛡 EMA/MACD ranging protection: RSI {rsi_now:.1f} > 60 — switching to SELL')
+            trade_direction = 'SELL'
     for i in range(num_trades):
         if results['net_pnl'] < -session_loss_limit: break
         entry_order = execute_real_trade(symbol, trade_direction, trade_usdt, trade_mode)
