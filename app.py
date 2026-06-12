@@ -552,12 +552,17 @@ def api_trade_complete():
 # Solution: start session in background thread, return job_id immediately.
 # Frontend polls /api/bot/result/<job_id> every 5 seconds.
 # ============================================
-def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force, compound_rate=0.0):
+def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force,
+                   compound_rate=0.0, symbol=None, user_leverage=None):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
             from bot import execute_session
-            results = execute_session(amount, timeframe, num_trades, strategy=strategy, force=force)
+            results = execute_session(
+                amount, timeframe, num_trades,
+                strategy=strategy, force=force,
+                symbol=symbol, user_leverage=user_leverage
+            )
             # Apply compounding if enabled
             if compound_rate > 0 and results.get('net_pnl', 0) != 0:
                 from bot import apply_compounding
@@ -584,6 +589,17 @@ def api_bot_execute():
         force     = bool(data.get('force', False))
         strategy      = str(data.get('strategy', 'auto')).lower().strip()
         compound_rate = float(data.get('compound_rate', 0.0))
+        # User-selected pair and leverage
+        selected_symbol   = data.get('symbol', None)       # e.g. 'XRP/USDT' or None
+        user_leverage     = data.get('leverage', None)     # e.g. 2, 5, 10 or None
+        if user_leverage:
+            try:
+                user_leverage = int(user_leverage)
+                if user_leverage not in (2, 3, 4, 5, 10):
+                    user_leverage = None
+            except (ValueError, TypeError):
+                user_leverage = None
+
         if strategy not in ('auto', 'grid', 'momentum', 'ema_macd'):
             strategy = 'auto'
 
@@ -615,15 +631,35 @@ def api_bot_execute():
         if not force and strategy in ('momentum', 'auto', 'ema_macd'):
             try:
                 from bot import generate_signal
-                preview_signal = generate_signal('XRP/USDT')
-                if preview_signal and preview_signal['confidence'] < 62:
+                # Use the user's selected pair if provided, otherwise default scan pair
+                check_symbol = selected_symbol if selected_symbol else 'XRP/USDT'
+                preview_signal = generate_signal(check_symbol)
+                if preview_signal and preview_signal['confidence'] < 60:
+                    # Determine reason for warning — more informative than just "weak"
+                    rsi_val = preview_signal.get('rsi', 50)
+                    direction = preview_signal.get('direction', 'BUY')
+                    market_cond = preview_signal.get('market_condition', 'unknown')
+                    ema_trend = preview_signal.get('ema_trend', 'neutral')
+
+                    if rsi_val > 68:
+                        reason = f'Market is overbought (RSI {rsi_val:.0f}) — high risk of reversal.'
+                    elif rsi_val < 32:
+                        reason = f'Market is oversold (RSI {rsi_val:.0f}) — possible falling knife.'
+                    elif market_cond == 'ranging':
+                        reason = f'Market is ranging with low momentum — signals unreliable.'
+                    else:
+                        reason = f'Signal confidence is only {preview_signal["confidence"]:.0f}%. Market conditions are uncertain.'
+
                     return jsonify({
-                        'success':     False,
-                        'weak_signal': True,
-                        'confidence':  round(preview_signal['confidence'], 1),
-                        'rsi':         round(preview_signal.get('rsi', 0), 2),
-                        'direction':   preview_signal.get('direction', 'BUY'),
-                        'message':     f"Signal confidence is only {preview_signal['confidence']:.0f}%. Market conditions are uncertain right now."
+                        'success':          False,
+                        'weak_signal':      True,
+                        'confidence':       round(preview_signal['confidence'], 1),
+                        'rsi':              round(rsi_val, 1),
+                        'direction':        direction,
+                        'market_condition': market_cond,
+                        'ema_trend':        ema_trend,
+                        'pair':             check_symbol,
+                        'message':          reason
                     }), 200
             except Exception as signal_err:
                 print(f'Signal pre-check error (non-fatal): {signal_err}')
@@ -644,7 +680,8 @@ def api_bot_execute():
             }
         t = threading.Thread(
             target=_run_trade_job,
-            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force, compound_rate),
+            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force,
+                  compound_rate, selected_symbol, user_leverage),
             daemon=True
         )
         t.start()

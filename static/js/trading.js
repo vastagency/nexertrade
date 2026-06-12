@@ -18,6 +18,8 @@ let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
 let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
+let selectedPair      = window.SELECTED_PAIR     || 'XRP/USDT';   // default pair
+let selectedLeverage  = window.SELECTED_LEVERAGE || 2;             // default 2x leverage
 let compoundRate      = 0.0;  // 0=off, 0.5=reinvest 50% of profits
 let liveChartData     = [];
 let liveChartCtx      = null;
@@ -58,6 +60,32 @@ document.querySelectorAll('.strategy-btn').forEach(btn => {
     window.SELECTED_STRATEGY = selectedStrategy;
     const hint = document.getElementById('strategyHint');
     if (hint) hint.textContent = strategyHints[selectedStrategy] || '';
+  });
+});
+
+// Pair selector — user picks which crypto pair to trade
+document.querySelectorAll('.pair-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (isTrading) return;
+    document.querySelectorAll('.pair-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedPair = btn.dataset.pair;
+    window.SELECTED_PAIR = selectedPair;
+    const label = document.getElementById('selectedPairLabel');
+    if (label) label.textContent = selectedPair.replace('/USDT', '');
+  });
+});
+
+// Leverage selector — user picks 2x / 3x / 4x / 5x / 10x
+document.querySelectorAll('.lev-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (isTrading) return;
+    document.querySelectorAll('.lev-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedLeverage = parseInt(btn.dataset.leverage);
+    window.SELECTED_LEVERAGE = selectedLeverage;
+    const label = document.getElementById('selectedLevLabel');
+    if (label) label.textContent = selectedLeverage + 'x';
   });
 });
 
@@ -347,12 +375,14 @@ async function startSession(force = false) {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        amount:     selectedAmount,
-        timeframe:  selectedTimeframe,
-        num_trades: 1,
+        amount:        selectedAmount,
+        timeframe:     selectedTimeframe,
+        num_trades:    1,
         strategy:      selectedStrategy,
         compound_rate: compoundRate,
-        force:         force
+        force:         force,
+        symbol:        selectedPair,      // user-selected trading pair
+        leverage:      selectedLeverage   // user-selected leverage (2/3/4/5/10)
       })
     });
 
@@ -632,57 +662,104 @@ function showWeakSignalModal(data) {
   const existing = document.getElementById('weakSignalModal');
   if (existing) existing.remove();
 
+  // Determine warning color based on severity
+  const conf = data.confidence || 0;
+  const warningColor = conf < 45 ? '#ef4444' : '#f59e0b';
+  const warningIcon  = conf < 45 ? '🚨' : '⚠️';
+  const warningTitle = conf < 45 ? 'Dangerous Market Conditions' : 'Weak Signal Detected';
+
+  // Market condition badge
+  const condBadge = data.market_condition
+    ? `<span style="background:#1f2937; color:#9ca3af; padding:2px 8px;
+                    border-radius:4px; font-size:11px;">${data.market_condition.toUpperCase()}</span>`
+    : '';
+
   const modal = document.createElement('div');
   modal.id = 'weakSignalModal';
   modal.style.cssText = `
     position:fixed; top:0; left:0; width:100%; height:100%;
-    background:rgba(0,0,0,0.7); z-index:9999;
+    background:rgba(0,0,0,0.8); z-index:9999;
     display:flex; align-items:center; justify-content:center;
   `;
   modal.innerHTML = `
-    <div style="background:#1a1a2e; border:1px solid #f59e0b; border-radius:12px;
-                padding:32px; max-width:420px; width:90%; text-align:center;">
-      <div style="font-size:2rem; margin-bottom:12px;">⚠️</div>
-      <h3 style="color:#f59e0b; margin-bottom:8px;">Weak Signal Detected</h3>
-      <p style="color:#9ca3af; margin-bottom:20px;">${data.message}</p>
+    <div style="background:#1a1a2e; border:1px solid ${warningColor}; border-radius:12px;
+                padding:32px; max-width:440px; width:90%; text-align:center;">
+      <div style="font-size:2.2rem; margin-bottom:12px;">${warningIcon}</div>
+      <h3 style="color:${warningColor}; margin-bottom:6px;">${warningTitle}</h3>
+      ${condBadge}
+      <p style="color:#9ca3af; margin:14px 0 20px; font-size:14px; line-height:1.5;">${data.message}</p>
       <div style="background:#0f0f1a; border-radius:8px; padding:16px; margin-bottom:24px; text-align:left;">
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-          <span style="color:#6b7280;">Confidence</span>
-          <span style="color:#ef4444; font-weight:600;">${data.confidence}%</span>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+          <span style="color:#6b7280; font-size:13px;">Pair</span>
+          <span style="color:#fff; font-size:13px; font-weight:600;">${data.pair || 'XRP/USDT'}</span>
         </div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-          <span style="color:#6b7280;">RSI</span>
-          <span style="color:#fff;">${data.rsi}</span>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+          <span style="color:#6b7280; font-size:13px;">Confidence</span>
+          <span style="color:${warningColor}; font-size:13px; font-weight:600;">${data.confidence}%</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+          <span style="color:#6b7280; font-size:13px;">RSI</span>
+          <span style="color:#fff; font-size:13px;">${data.rsi}</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
+          <span style="color:#6b7280; font-size:13px;">Signal Direction</span>
+          <span style="color:${data.direction === 'BUY' ? '#10b981' : '#ef4444'}; font-size:13px; font-weight:600;">${data.direction}</span>
         </div>
         <div style="display:flex; justify-content:space-between;">
-          <span style="color:#6b7280;">Direction</span>
-          <span style="color:#fff;">${data.direction}</span>
+          <span style="color:#6b7280; font-size:13px;">EMA Trend</span>
+          <span style="color:#fff; font-size:13px;">${data.ema_trend || 'neutral'}</span>
         </div>
       </div>
+      <p style="color:#6b7280; font-size:12px; margin-bottom:20px;">
+        ⚠ Trading in poor conditions increases risk of loss. Your balance will NOT be affected if you abort.
+      </p>
       <div style="display:flex; gap:12px; justify-content:center;">
         <button id="abortTradeBtn" style="
-          padding:10px 24px; border-radius:8px; border:1px solid #4b5563;
-          background:transparent; color:#9ca3af; cursor:pointer; font-size:14px;">
-          Abort Trade
+          padding:12px 28px; border-radius:8px; border:1px solid #4b5563;
+          background:transparent; color:#9ca3af; cursor:pointer; font-size:14px;
+          transition: all 0.2s;">
+          ✕ Abort Trade
         </button>
         <button id="forceTradeBtn" style="
-          padding:10px 24px; border-radius:8px; border:none;
-          background:#f59e0b; color:#000; cursor:pointer;
-          font-size:14px; font-weight:600;">
-          Continue Anyway
+          padding:12px 28px; border-radius:8px; border:none;
+          background:${warningColor}; color:#000; cursor:pointer;
+          font-size:14px; font-weight:600; transition: all 0.2s;">
+          Continue Anyway →
         </button>
       </div>
     </div>
   `;
   document.body.appendChild(modal);
 
+  // ABORT — clean reset, nothing logged, balance untouched
   document.getElementById('abortTradeBtn').onclick = () => {
     modal.remove();
+    // Reset session UI fully — no trade logged, no balance change
+    isTrading = false;
+    clearInterval(timerInterval);
+    document.getElementById('sessionPanel').style.display = 'none';
+    document.getElementById('sessionSummary').style.display = 'none';
+    const btn = document.getElementById('mainActionBtn');
+    if (btn) {
+      btn.classList.remove('stopping');
+      document.getElementById('actionBtnIcon').innerHTML =
+        '<polygon points="5,3 19,12 5,21"/>';
+      document.getElementById('actionBtnText').textContent = 'START SESSION';
+    }
+    document.querySelectorAll('.tf-btn, .quick-btn, .trade-amount-input')
+      .forEach(el => el.disabled = false);
+    // Show confirmation to user
+    const msg = document.getElementById('sessionStatusTitle');
+    if (msg) {
+      msg.textContent = 'Trade aborted — your balance is safe.';
+      msg.style.color = '#10b981';
+    }
   };
 
+  // CONTINUE ANYWAY — user accepts the risk
   document.getElementById('forceTradeBtn').onclick = async () => {
     modal.remove();
-    await startSession(true);
+    await startSession(true);  // force=true bypasses the pre-check
   };
 }
 

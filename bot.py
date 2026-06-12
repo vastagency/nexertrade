@@ -58,18 +58,18 @@ FUTURES_PAIRS = ['XRP/USDT:USDT', 'SOL/USDT:USDT', 'ETH/USDT:USDT', 'BTC/USDT:US
 # STRATEGY CONSTANTS
 # ============================================
 # Momentum scalper
-MOMENTUM_TP_PCT  = 0.006   # +0.6% take profit
-MOMENTUM_SL_PCT  = 0.004   # -0.4% stop loss  → R:R = 1.5:1
-MIN_CONF         = 72      # minimum confidence to enter a momentum trade
-STRONG_CONF      = 80      # strong signal — enter without hesitation
+MOMENTUM_TP_PCT  = 0.03    # +3% take profit — real directional profit target
+MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss  → R:R = 2:1
+MIN_CONF         = 60      # minimum confidence to enter a momentum trade (60% = more opportunities)
+STRONG_CONF      = 75      # strong signal — enter without hesitation
 
 # Grid/DCA
 GRID_LEVELS      = 5       # number of buy levels in the grid
 GRID_SPACING_PCT = 0.002   # fallback 0.2% (overridden dynamically per session)
 GRID_TP_PCT      = 0.003   # fallback TP (overridden dynamically per session)
 
-# Session risk guard
-MAX_SESSION_LOSS_PCT = 0.15  # stop trading if session loses >15% of starting amount
+# Session risk guard — 5% max loss protects admin Bybit pool from single-user blowout
+MAX_SESSION_LOSS_PCT = 0.05  # stop trading if session loses >5% of starting amount
 
 
 # ============================================
@@ -1060,7 +1060,7 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     return results
 
 
-def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=False):
+def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=False, symbol=None):
     """
     Momentum scalper — multi-timeframe signal with trend-aware direction.
     No simulation. If Bybit is unreachable, session stops and reports the error.
@@ -1101,7 +1101,17 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
             print(f'  ⚠ Session loss limit hit — stopping after {i} trades')
             break
 
-        best_signal = select_best_pair(CRYPTO_PAIRS)
+        best_signal = None
+        # If user selected a specific pair, use it directly — skip auto-scan
+        if symbol:
+            best_signal = generate_signal(symbol)
+            if best_signal:
+                print(f'  Using user-selected pair: {symbol} | Conf: {best_signal["confidence"]}%')
+            else:
+                print(f'  Signal fetch failed for {symbol} — falling back to auto-scan')
+
+        if best_signal is None:
+            best_signal = select_best_pair(CRYPTO_PAIRS)
 
         if best_signal is None:
             if force:
@@ -1152,8 +1162,15 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
                 quantity    = entry_order['quantity']
                 print(f'  ✓ Entry: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
 
+                # Leverage-aware TP/SL:
+                # Higher leverage means a smaller % move = same dollar impact.
+                # At 2x: need 3% move. At 10x: need 0.6% move for equivalent dollar profit.
+                # SL scales the same way — always 2:1 R:R regardless of leverage.
                 tp_pct = MOMENTUM_TP_PCT / leverage
                 sl_pct = MOMENTUM_SL_PCT / leverage
+                # Enforce minimum meaningful targets to avoid crumb trades
+                tp_pct = max(tp_pct, 0.003)   # never less than 0.3%
+                sl_pct = max(sl_pct, 0.0015)  # never less than 0.15%
 
                 if trade_direction == 'BUY':
                     take_profit = entry_price * (1 + tp_pct)
@@ -1408,7 +1425,7 @@ def generate_ema_macd_signal(symbol):
         return None
 
 
-def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1):
+def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None):
     results = {'strategy': 'ema_macd', 'trades': [], 'total_trades': 0,
                'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
                'real_trading': True, 'trade_mode': 'spot'}
@@ -1498,7 +1515,7 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 # ============================================
 # 9. AUTO-BEST SESSION
 # ============================================
-def execute_auto_best_session(amount, timeframe_minutes, num_trades=1):
+def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None):
     """
     Auto-best: scans all pairs, reads market conditions, picks the
     strategy that fits best right now.
@@ -1535,7 +1552,7 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1):
 # 10. UNIFIED SESSION ENTRY POINT
 # ============================================
 def execute_session(amount, timeframe_minutes, num_trades=1,
-                    strategy='auto', force=False, symbol=None):
+                    strategy='auto', force=False, symbol=None, user_leverage=None):
     """
     Main entry point for all trading sessions.
 
@@ -1553,8 +1570,15 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
     strategy = strategy.lower().strip()
     print(f'\n{"="*50}')
     print(f'NexerTrade session | Strategy: {strategy.upper()} | '
-          f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min')
+          f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
+          f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
     print(f'{"="*50}')
+
+    # Apply user-selected leverage override globally for this session
+    if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
+        import bot as _bot_module
+        _bot_module.LEVERAGE = user_leverage
+        print(f'  Leverage set to {user_leverage}x by user selection')
 
     # BACKTEST PRE-CHECK: run historical simulation before every signal-based session
     if strategy not in ('grid', 'grid_dca'):
@@ -1576,17 +1600,17 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
 
     elif strategy == 'momentum':
         return execute_momentum_session(amount, timeframe_minutes,
-                                        num_trades=num_trades, force=force)
+                                        num_trades=num_trades, force=force, symbol=symbol)
 
     elif strategy == 'ema_macd':
-        return execute_ema_macd_session(amount, timeframe_minutes, num_trades=num_trades)
+        return execute_ema_macd_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
 
     elif strategy == 'auto' or strategy == 'auto_best':
-        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades)
+        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
 
     else:
         print(f'Unknown strategy "{strategy}" — defaulting to auto')
-        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades)
+        return execute_auto_best_session(amount, timeframe_minutes, num_trades=num_trades, symbol=symbol)
 
 
 # ============================================

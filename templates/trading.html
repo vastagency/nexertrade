@@ -113,6 +113,54 @@
       </div>
 
 
+      <!-- PAIR SELECTOR -->
+      <div class="setup-section">
+        <label class="setup-label">SELECT TRADING PAIR <span id="selectedPairLabel" style="color:#10b981; margin-left:6px;">XRP</span></label>
+        <div class="pair-selector-row" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+
+          <button class="pair-btn" data-pair="XRP/USDT" title="XRP/USDT" style="display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0f0f1a; cursor:pointer; min-width:64px; transition:all 0.2s;">
+            <img src="https://assets.coingecko.com/coins/images/44/small/xrp-symbol-white-128.png" style="width:28px; height:28px; border-radius:50%;" onerror="this.style.display='none'" alt="XRP">
+            <span style="color:#9ca3af; font-size:11px; font-weight:600;">XRP</span>
+          </button>
+
+          <button class="pair-btn active" data-pair="BTC/USDT" title="BTC/USDT" style="display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0f0f1a; cursor:pointer; min-width:64px; transition:all 0.2s;">
+            <img src="https://assets.coingecko.com/coins/images/1/small/bitcoin.png" style="width:28px; height:28px; border-radius:50%;" onerror="this.style.display='none'" alt="BTC">
+            <span style="color:#9ca3af; font-size:11px; font-weight:600;">BTC</span>
+          </button>
+
+          <button class="pair-btn" data-pair="ETH/USDT" title="ETH/USDT" style="display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0f0f1a; cursor:pointer; min-width:64px; transition:all 0.2s;">
+            <img src="https://assets.coingecko.com/coins/images/279/small/ethereum.png" style="width:28px; height:28px; border-radius:50%;" onerror="this.style.display='none'" alt="ETH">
+            <span style="color:#9ca3af; font-size:11px; font-weight:600;">ETH</span>
+          </button>
+
+          <button class="pair-btn" data-pair="SOL/USDT" title="SOL/USDT" style="display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0f0f1a; cursor:pointer; min-width:64px; transition:all 0.2s;">
+            <img src="https://assets.coingecko.com/coins/images/4128/small/solana.png" style="width:28px; height:28px; border-radius:50%;" onerror="this.style.display='none'" alt="SOL">
+            <span style="color:#9ca3af; font-size:11px; font-weight:600;">SOL</span>
+          </button>
+
+          <button class="pair-btn" data-pair="BNB/USDT" title="BNB/USDT" style="display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 14px; border-radius:10px; border:1px solid #374151; background:#0f0f1a; cursor:pointer; min-width:64px; transition:all 0.2s;">
+            <img src="https://assets.coingecko.com/coins/images/825/small/bnb-icon2_2x.png" style="width:28px; height:28px; border-radius:50%;" onerror="this.style.display='none'" alt="BNB">
+            <span style="color:#9ca3af; font-size:11px; font-weight:600;">BNB</span>
+          </button>
+
+        </div>
+      </div>
+
+
+      <!-- LEVERAGE SELECTOR -->
+      <div class="setup-section">
+        <label class="setup-label">LEVERAGE <span id="selectedLevLabel" style="color:#f59e0b; margin-left:6px;">2x</span></label>
+        <p class="strategy-hint" style="margin-bottom:10px;">Higher leverage = bigger profits AND bigger losses. Max loss is capped at 5% of your capital.</p>
+        <div class="leverage-row" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:6px;">
+          <button class="lev-btn active" data-leverage="2"  style="padding:8px 18px; border-radius:8px; border:1px solid #374151; background:#0f0f1a; color:#9ca3af; cursor:pointer; font-size:13px; font-weight:600; transition:all 0.2s;">2x</button>
+          <button class="lev-btn"        data-leverage="3"  style="padding:8px 18px; border-radius:8px; border:1px solid #374151; background:#0f0f1a; color:#9ca3af; cursor:pointer; font-size:13px; font-weight:600; transition:all 0.2s;">3x</button>
+          <button class="lev-btn"        data-leverage="4"  style="padding:8px 18px; border-radius:8px; border:1px solid #374151; background:#0f0f1a; color:#9ca3af; cursor:pointer; font-size:13px; font-weight:600; transition:all 0.2s;">4x</button>
+          <button class="lev-btn"        data-leverage="5"  style="padding:8px 18px; border-radius:8px; border:1px solid #374151; background:#0f0f1a; color:#9ca3af; cursor:pointer; font-size:13px; font-weight:600; transition:all 0.2s;">5x</button>
+          <button class="lev-btn"        data-leverage="10" style="padding:8px 18px; border-radius:8px; border:1px solid #ef4444; background:#0f0f1a; color:#ef4444; cursor:pointer; font-size:13px; font-weight:600; transition:all 0.2s;">10x ⚡</button>
+        </div>
+      </div>
+
+
       <div class="setup-section compound-section">
         <label class="setup-label">COMPOUNDING</label>
         <div class="compound-row">
