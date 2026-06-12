@@ -22,18 +22,55 @@ USE_TESTNET      = os.getenv('BYBIT_TESTNET', 'false').lower() == 'true'
 DEFAULT_PAIR     = os.getenv('BYBIT_DEFAULT_PAIR', 'XRP/USDT')
 LEVERAGE         = int(os.getenv('BYBIT_LEVERAGE', '2'))
 
+# ── Proxy Configuration ──────────────────────────────────────────
+# Rotates across all available proxies to bypass Railway IP geo-blocks
+import random
+
+PROXY_USER = os.getenv('PROXY_USER', '')
+PROXY_PASS = os.getenv('PROXY_PASS', '')
+PROXY_LIST = os.getenv('PROXY_LIST', '')  # format: host:port,host:port,...
+
+def _get_proxy_url():
+    """Pick a random proxy from the list and return a full proxy URL."""
+    if not PROXY_LIST or not PROXY_USER:
+        return None
+    proxies = [p.strip() for p in PROXY_LIST.split(',') if p.strip()]
+    if not proxies:
+        return None
+    chosen = random.choice(proxies)
+    host, port = chosen.rsplit(':', 1)
+    url = f'http://{PROXY_USER}:{PROXY_PASS}@{host}:{port}'
+    print(f'  [PROXY] Routing via {host}:{port}')
+    return url
+
+def _build_proxy_config():
+    """Build CCXT-compatible proxy dict from a randomly chosen proxy."""
+    proxy_url = _get_proxy_url()
+    if not proxy_url:
+        return {}
+    return {
+        'proxies': {
+            'http':  proxy_url,
+            'https': proxy_url,
+        },
+    }
+
+_proxy = _build_proxy_config()
+
 bybit_spot = ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'spot', 'recvWindow': 20000}
+    'options': {'defaultType': 'spot', 'recvWindow': 20000},
+    **_proxy
 })
 
 bybit_futures = ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'linear', 'recvWindow': 20000}
+    'options': {'defaultType': 'linear', 'recvWindow': 20000},
+    **_proxy
 })
 
 bybit = bybit_spot
@@ -41,7 +78,8 @@ bybit = bybit_spot
 # Binance for market data fallback (read-only, no auth)
 binance_data = ccxt.binance({
     'enableRateLimit': True,
-    'options': {'defaultType': 'spot'}
+    'options': {'defaultType': 'spot'},
+    **_proxy
 })
 
 if USE_TESTNET:
