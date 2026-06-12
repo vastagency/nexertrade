@@ -89,6 +89,26 @@ document.querySelectorAll('.lev-btn').forEach(btn => {
   });
 });
 
+// On page load — sync active state with JS defaults
+// This ensures the highlighted card always matches the actual selected value
+(function initSelectorStates() {
+  // Pair — activate whichever card matches selectedPair
+  document.querySelectorAll('.pair-btn').forEach(btn => {
+    btn.classList.remove('active');
+    if (btn.dataset.pair === selectedPair) btn.classList.add('active');
+  });
+  // Leverage — activate whichever card matches selectedLeverage
+  document.querySelectorAll('.lev-btn').forEach(btn => {
+    btn.classList.remove('active');
+    if (parseInt(btn.dataset.leverage) === selectedLeverage) btn.classList.add('active');
+  });
+  // Update labels
+  const pairLabel = document.getElementById('selectedPairLabel');
+  if (pairLabel) pairLabel.textContent = selectedPair.replace('/USDT', '');
+  const levLabel = document.getElementById('selectedLevLabel');
+  if (levLabel) levLabel.textContent = selectedLeverage + 'x';
+})();
+
 
 // ============================================
 // 3. AMOUNT SELECTOR
@@ -350,16 +370,19 @@ async function startSession(force = false) {
 
   document.querySelectorAll('.tf-btn, .quick-btn, .trade-amount-input').forEach(el => el.disabled = true);
 
-  // Fetch initial price for chart
-  try {
-    const sigRes = await fetch('/api/bot/signal?symbol=BTC%2FUSDT');
-    const sig    = await sigRes.json();
-    initLiveChart(sig.current_price);
-    document.getElementById('liveChartLabel').innerHTML =
-      `<span class="live-dot"></span> Live · BTC/USD`;
-  } catch (err) {
-    initLiveChart(100);
-  }
+    // Fetch initial price for chart — use the user's selected pair
+    try {
+      const chartSymbol = selectedPair || 'BTC/USDT';
+      const chartSymbolEncoded = encodeURIComponent(chartSymbol);
+      const sigRes = await fetch(`/api/bot/signal?symbol=${chartSymbolEncoded}`);
+      const sig    = await sigRes.json();
+      initLiveChart(sig.current_price);
+      const displayName = chartSymbol.replace('/USDT', '/USD');
+      document.getElementById('liveChartLabel').innerHTML =
+        `<span class="live-dot"></span> Live · ${displayName}`;
+    } catch (err) {
+      initLiveChart(100);
+    }
 
   // Start timer immediately
   const sessionSecs = selectedTimeframe * 60;

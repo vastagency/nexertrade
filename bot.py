@@ -565,16 +565,20 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='spot'):
     """
     try:
         if trade_mode == 'futures':
-            futures_symbol = symbol.replace('/USDT', '/USDT:USDT')
+            futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
             exchange       = bybit_futures
+
+            # CRITICAL: Set leverage on Bybit BEFORE calculating quantity or placing order
+            # Without this Bybit uses account default (usually 2x) regardless of what we pass
+            try:
+                exchange.set_leverage(LEVERAGE, futures_symbol)
+                print(f'  [LEVERAGE] Set to {LEVERAGE}x on Bybit for {futures_symbol}')
+            except Exception as lev_err:
+                print(f'  [LEVERAGE] Warning — could not set {LEVERAGE}x: {lev_err}')
+
             ticker         = exchange.fetch_ticker(futures_symbol)
             current_price  = float(ticker['last'])
             quantity       = usdt_amount * LEVERAGE / current_price
-
-            try:
-                exchange.set_leverage(LEVERAGE, futures_symbol)
-            except Exception:
-                pass
 
             markets = exchange.load_markets()
             if futures_symbol in markets:
