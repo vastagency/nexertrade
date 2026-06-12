@@ -574,7 +574,12 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='spot'):
                 exchange.set_leverage(LEVERAGE, futures_symbol)
                 print(f'  [LEVERAGE] Set to {LEVERAGE}x on Bybit for {futures_symbol}')
             except Exception as lev_err:
-                print(f'  [LEVERAGE] Warning — could not set {LEVERAGE}x: {lev_err}')
+                err_str = str(lev_err)
+                if '110043' in err_str or 'leverage not modified' in err_str.lower():
+                    # Bybit 110043 = leverage already set to this value — not an error
+                    print(f'  [LEVERAGE] Already at {LEVERAGE}x on Bybit — confirmed ✓')
+                else:
+                    print(f'  [LEVERAGE] Could not set {LEVERAGE}x: {lev_err}')
 
             ticker         = exchange.fetch_ticker(futures_symbol)
             current_price  = float(ticker['last'])

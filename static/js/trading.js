@@ -493,7 +493,9 @@ async function startSession(force = false) {
 
     // Show trade mode
     if (botData.trade_mode) {
-      const modeLabel = botData.trade_mode === 'futures' ? '⚡ FUTURES 2x' : '📦 SPOT';
+      const modeLabel = botData.trade_mode === 'futures'
+        ? `⚡ FUTURES ${selectedLeverage}x`
+        : '📦 SPOT';
       document.getElementById('sessionStatusSub').textContent =
         `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
     }
