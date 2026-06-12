@@ -9,6 +9,8 @@ import os
 import ccxt
 import time
 import math
+import random
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,15 +25,14 @@ DEFAULT_PAIR     = os.getenv('BYBIT_DEFAULT_PAIR', 'XRP/USDT')
 LEVERAGE         = int(os.getenv('BYBIT_LEVERAGE', '2'))
 
 # ── Proxy Configuration ──────────────────────────────────────────
-# Rotates across all available proxies to bypass Railway IP geo-blocks
-import random
-
+# Injects proxy directly into CCXT's requests session
+# This is the most reliable method — intercepts ALL API calls
 PROXY_USER = os.getenv('PROXY_USER', '')
 PROXY_PASS = os.getenv('PROXY_PASS', '')
-PROXY_LIST = os.getenv('PROXY_LIST', '')  # format: host:port,host:port,...
+PROXY_LIST = os.getenv('PROXY_LIST', '')
 
-def _get_proxy_url():
-    """Pick a random proxy from the list and return a full proxy URL."""
+def _get_random_proxy_url():
+    """Pick a random proxy and return full URL string."""
     if not PROXY_LIST or not PROXY_USER:
         return None
     proxies = [p.strip() for p in PROXY_LIST.split(',') if p.strip()]
@@ -43,44 +44,45 @@ def _get_proxy_url():
     print(f'  [PROXY] Routing via {host}:{port}')
     return url
 
-def _build_proxy_config():
-    """Build CCXT-compatible proxy dict from a randomly chosen proxy."""
-    proxy_url = _get_proxy_url()
+def _inject_proxy(exchange):
+    """
+    Inject proxy into CCXT exchange's underlying requests session.
+    This method intercepts ALL HTTP requests including OHLCV, balance,
+    order placement — not just the initial connection check.
+    """
+    proxy_url = _get_random_proxy_url()
     if not proxy_url:
-        return {}
-    return {
-        'proxies': {
-            'http':  proxy_url,
-            'https': proxy_url,
-        },
-    }
+        return exchange
+    try:
+        session = requests.Session()
+        session.proxies = {'http': proxy_url, 'https': proxy_url}
+        session.trust_env = False  # don't use system proxy env vars
+        exchange.session = session
+    except Exception as e:
+        print(f'  [PROXY] Session injection failed: {e}')
+    return exchange
 
-_proxy = _build_proxy_config()
-
-bybit_spot = ccxt.bybit({
+bybit_spot = _inject_proxy(ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
     'options': {'defaultType': 'spot', 'recvWindow': 20000},
-    **_proxy
-})
+}))
 
-bybit_futures = ccxt.bybit({
+bybit_futures = _inject_proxy(ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
     'options': {'defaultType': 'linear', 'recvWindow': 20000},
-    **_proxy
-})
+}))
 
 bybit = bybit_spot
 
-# Binance for market data fallback (read-only, no auth)
-binance_data = ccxt.binance({
+# Binance for market data fallback — also proxied to bypass country blocks
+binance_data = _inject_proxy(ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'},
-    **_proxy
-})
+}))
 
 if USE_TESTNET:
     bybit_spot.set_sandbox_mode(True)
