@@ -856,7 +856,7 @@ def validate_user_bybit_keys(api_key, api_secret):
         import hmac, hashlib
         ts = str(int(time.time() * 1000))
         params_str = 'accountType=UNIFIED'
-        sign = hmac.new(api_secret.encode(), f'{ts}5000{params_str}'.encode(), hashlib.sha256).hexdigest()
+        sign = hmac.new(api_secret.encode('utf-8'), (ts + '5000' + params_str).encode('utf-8'), hashlib.sha256).hexdigest()
         session = requests.Session()
         session.trust_env = False
         resp = session.get(
