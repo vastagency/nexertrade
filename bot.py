@@ -854,9 +854,11 @@ def validate_user_bybit_keys(api_key, api_secret):
     """
     try:
         import hmac, hashlib
-        ts = str(int(time.time() * 1000))
+        timestamp = str(int(time.time() * 1000))
         params_str = 'accountType=UNIFIED'
-        sign = hmac.new(api_secret.encode('utf-8'), (ts + '5000' + params_str).encode('utf-8'), hashlib.sha256).hexdigest()
+        recv_win = '5000'
+        raw_sign = timestamp + recv_win + params_str
+        sign = hmac.new(api_secret.encode('utf-8'), raw_sign.encode('utf-8'), hashlib.sha256).hexdigest()
         session = requests.Session()
         session.trust_env = False
         resp = session.get(
@@ -864,7 +866,7 @@ def validate_user_bybit_keys(api_key, api_secret):
             params={'accountType': 'UNIFIED'},
             headers={
                 'X-BAPI-API-KEY': api_key,
-                'X-BAPI-TIMESTAMP': ts,
+                'X-BAPI-TIMESTAMP': timestamp,
                 'X-BAPI-RECV-WINDOW': '5000',
                 'X-BAPI-SIGN': sign,
             },
