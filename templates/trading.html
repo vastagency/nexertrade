@@ -28,8 +28,6 @@
         <ul class="dash-nav-links">
           <li><a href="/dashboard" class="nav-link">Dashboard</a></li>
           <li><a href="/trading"   class="nav-link active">Trading</a></li>
-          <li><a href="/deposit"   class="nav-link">Deposit</a></li>
-          <li><a href="/withdraw"  class="nav-link">Withdraw</a></li>
           <li><a href="/history"   class="nav-link">History</a></li>
         </ul>
       </div>
@@ -78,18 +76,6 @@
         <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
       </svg>
       Trading
-    </a>
-    <a href="/deposit" class="nav-link">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 5v14M5 12l7-7 7 7"/>
-      </svg>
-      Deposit
-    </a>
-    <a href="/withdraw" class="nav-link">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 19V5M5 12l7 7 7-7"/>
-      </svg>
-      Withdraw
     </a>
     <a href="/history" class="nav-link">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -358,7 +344,7 @@
         </div>
         <div class="summary-actions">
           <button class="btn-new-session" id="newSessionBtn">Start New Session</button>
-          <a href="/withdraw" class="btn-withdraw-profit">Withdraw Profit</a>
+          <a href="/history" class="btn-withdraw-profit">View History</a>
         </div>
       </div>
 
@@ -367,7 +353,8 @@
   </main>
 
   <script>
-    window.USER_BALANCE = {{ user.balance }};
+    window.USER_BALANCE = 0; // overridden immediately by /api/user-balance fetch below
+    window.BYBIT_CONNECTED = {{ "true" if user.bybit_connected else "false" }};
     function toggleCompound(cb) {
       const label = document.getElementById("compoundLabel");
       const hint  = document.getElementById("compoundHint");

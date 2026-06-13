@@ -684,12 +684,12 @@ def api_bot_execute():
         if strategy not in ('auto', 'grid', 'momentum', 'ema_macd'):
             strategy = 'auto'
 
-        # Dynamic trades based on user balance tier
-        if current_user.balance >= 200:
+        # Dynamic trades based on amount being traded (live balance checked later)
+        if amount >= 200:
             num_trades = 10
-        elif current_user.balance >= 100:
+        elif amount >= 100:
             num_trades = 5
-        elif current_user.balance >= 50:
+        elif amount >= 50:
             num_trades = 3
         else:
             num_trades = 1
@@ -699,14 +699,20 @@ def api_bot_execute():
         if amount < min_dep or amount > max_dep:
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
-        # NOTE: User balance in NexerTrade DB is independent from Admin's Bybit.
-        # User balance = what they deposited + trading profits/losses.
-        # Admin's Bybit is the pool that executes trades.
-        # These must NEVER be synced — each user has their own NexerTrade balance.
+        # Gate: user must have Bybit connected to trade
+        if not current_user.bybit_connected or not current_user.bybit_api_key:
+            return jsonify({'success': False, 'message': 'Connect your Bybit account first. Go to Profile to connect Bybit.'}), 400
 
-        # Block trading above user's actual NexerTrade balance
-        if amount > current_user.balance:
-            return jsonify({'success': False, 'message': f'Insufficient balance. Your balance is ${current_user.balance:.2f}'}), 400
+        # Check live Bybit balance, not stale DB balance
+        try:
+            from bot import get_user_bybit_balance
+            live_balance = get_user_bybit_balance(current_user.bybit_api_key, current_user.bybit_api_secret)
+        except Exception:
+            live_balance = None
+        if live_balance is None:
+            return jsonify({'success': False, 'message': 'Could not fetch your Bybit balance. Check your API key is still valid.'}), 400
+        if amount > live_balance:
+            return jsonify({'success': False, 'message': f'Insufficient Bybit balance. Your live balance is ${live_balance:.2f}'}), 400
 
         # Weak signal pre-check — skip for grid (grid uses limit orders not signal confidence)
         if not force and strategy in ('momentum', 'auto', 'ema_macd'):

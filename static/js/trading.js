@@ -629,15 +629,52 @@ document.getElementById('mainActionBtn').addEventListener('click', () => {
   if (isTrading) {
     stopSession(false);
   } else {
+    // Gate: must have Bybit connected
+    if (!window.BYBIT_CONNECTED) {
+      showBybitConnectionBanner();
+      return;
+    }
     const amount = parseInt(tradeAmountInput ? tradeAmountInput.value : selectedAmount);
     if (amount < 9 || amount > 200) {
       alert('Please enter an amount between $9 and $200');
+      return;
+    }
+    if (amount > availableBalance) {
+      alert(`Insufficient Bybit balance. Your live balance is $${availableBalance.toFixed(2)}`);
       return;
     }
     selectedAmount = amount;
     startSession();
   }
 });
+
+function showBybitConnectionBanner() {
+  // Remove existing banner if any
+  const existing = document.getElementById('bybitGateBanner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'bybitGateBanner';
+  banner.style.cssText = `
+    position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+    background: #1a1f35; border: 1px solid #F5C518; border-radius: 12px;
+    padding: 20px 28px; z-index: 9999; text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5); max-width: 380px; width: 90%;
+  `;
+  banner.innerHTML = `
+    <div style="font-size:32px;margin-bottom:10px;">🔗</div>
+    <h3 style="color:#F5C518;margin:0 0 8px;font-size:16px;">Connect Your Bybit Account</h3>
+    <p style="color:#8892a4;margin:0 0 16px;font-size:14px;line-height:1.5;">
+      NexerTrade trades directly on your Bybit account. You need to connect your API keys first.
+    </p>
+    <div style="display:flex;gap:10px;justify-content:center;">
+      <a href="/profile" style="background:#F5C518;color:#0A0E1A;padding:10px 20px;border-radius:8px;font-weight:700;text-decoration:none;font-size:14px;">Go to Profile</a>
+      <button onclick="document.getElementById('bybitGateBanner').remove()" style="background:transparent;border:1px solid #3a4060;color:#8892a4;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;">Cancel</button>
+    </div>
+  `;
+  document.body.appendChild(banner);
+  setTimeout(() => { if (banner.parentNode) banner.remove(); }, 8000);
+}
 
 
 // ============================================
