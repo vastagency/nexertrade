@@ -825,7 +825,7 @@ def api_bot_result(job_id):
             'success':      True,
             'no_trades':    True,
             'message':      msg,
-            'new_balance':  round(current_user.balance, 2),
+            'new_balance':  get_display_balance(current_user),
             'total_profit': round(current_user.total_profit, 2),
             'trades':       []
         }), 200
@@ -849,8 +849,9 @@ def api_bot_result(job_id):
     current_user.sessions_completed += 1
     db.session.commit()
 
+    _live_bal = get_display_balance(current_user)
     socketio.emit('balance_update', {
-        'balance':            round(current_user.balance, 2),
+        'balance':            _live_bal,
         'total_profit':       round(current_user.total_profit, 2),
         'total_withdrawn':    round(current_user.total_withdrawn, 2),
         'sessions_completed': current_user.sessions_completed
@@ -861,7 +862,7 @@ def api_bot_result(job_id):
         'wins':     results['wins'],
         'losses':   results['losses'],
         'win_rate': results['win_rate'],
-        'balance':  round(current_user.balance, 2)
+        'balance':  _live_bal
     }, room=f'user_{current_user.id}')
 
     socketio.emit('session_update', {
@@ -873,7 +874,7 @@ def api_bot_result(job_id):
     return jsonify({
         'status':       'done',
         'success':      True,
-        'new_balance':  round(current_user.balance, 2),
+        'new_balance':  _live_bal,
         'total_profit': round(current_user.total_profit, 2),
         'trades':       results.get('trades', []),
         'net_pnl':      results['net_pnl'],

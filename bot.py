@@ -1301,7 +1301,8 @@ def should_stop(user_id):
 # R:R minimum 2:1 on TP1. Each TP closes 25% of position.
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
-                              force=False, symbol=None, user_id=None):
+                              force=False, symbol=None, user_id=None,
+                              user_balance=None, user_trade_mode='spot'):
     """
     Multi-TP/SL momentum engine. No timeframe expiry.
     Trade runs until: all TPs hit, SL hit, or user requests stop.
@@ -1333,13 +1334,18 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
 
     clear_stop(user_id)
 
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False,
-                'error': 'Bybit unreachable — session aborted.'}
+    # Use injected user balance (user account mode) or fall back to admin account
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+        trade_mode     = user_trade_mode
+    else:
+        balance_info = get_bybit_balance()
+        if not balance_info.get('success'):
+            return {**results, 'real_trading': False,
+                    'error': 'Bybit unreachable - session aborted.'}
+        available_usdt = balance_info['USDT']
+        trade_mode     = balance_info.get('trade_mode', 'spot')
 
-    available_usdt        = balance_info['USDT']
-    trade_mode            = balance_info.get('trade_mode', 'spot')
     leverage              = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: {trade_mode.upper()} | Leverage: {leverage}x')
@@ -1855,7 +1861,9 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     else:
         print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
         results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
-                                            user_id=user_id)
+                                            user_id=user_id,
+                                            user_balance=_user_live_balance,
+                                            user_trade_mode=_user_trade_mode)
         results['strategy'] = 'auto_momentum'
         return results
 
@@ -1898,6 +1906,9 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _original_futures = _bot_module.bybit_futures
         _bot_module.bybit_spot    = user_spot
         _bot_module.bybit_futures = user_futures
+        # Fetch live user balance now so all sub-sessions can use it
+        _user_live_balance = get_user_bybit_balance(user_api_key, user_api_secret)
+        _user_trade_mode   = 'spot'  # default; UTA futures handled inside session
     else:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
@@ -1905,8 +1916,10 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: ADMIN ACCOUNT (legacy)')
         print(f'{"="*50}')
-        _original_spot    = None
-        _original_futures = None
+        _original_spot        = None
+        _original_futures     = None
+        _user_live_balance    = None
+        _user_trade_mode      = 'spot'
 
     # Apply user-selected leverage override globally for this session
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
@@ -1935,7 +1948,9 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
     elif strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
                                           num_trades=num_trades, force=force, symbol=symbol,
-                                          user_id=user_id)
+                                          user_id=user_id,
+                                          user_balance=_user_live_balance,
+                                          user_trade_mode=_user_trade_mode)
 
     elif strategy == 'ema_macd':
         result = execute_ema_macd_session(amount, timeframe_minutes,
