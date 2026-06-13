@@ -485,8 +485,19 @@ async function startSession(force = false) {
     }
 
     if (!botData.success) {
-      document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (botData.message || 'Trade blocked');
-      document.getElementById('sessionStatusTitle').style.color = '#ef4444';
+      showSessionDialog('blocked', botData.message || 'Trade blocked', botData.new_balance);
+      stopSession(false);
+      return;
+    }
+
+    // No trades taken - bot found no good setup
+    if (botData.no_trades) {
+      if (typeof botData.new_balance === 'number') {
+        availableBalance = botData.new_balance;
+        const balEl = document.getElementById('availableBalance');
+        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+      }
+      showSessionDialog('no_trades', botData.message, botData.new_balance);
       stopSession(false);
       return;
     }
@@ -523,9 +534,16 @@ async function startSession(force = false) {
     }
 
     if (isTrading) {
-      availableBalance = botData.new_balance;
-      const balEl = document.getElementById('availableBalance');
-      if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+      if (typeof botData.new_balance === 'number') {
+        availableBalance = botData.new_balance;
+        const balEl = document.getElementById('availableBalance');
+        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+      }
+      window._lastSessionPnl = botData.net_pnl || sessionPnl;
+      const tradeCount = (botData.trades || []).length;
+      const winCount   = botData.wins || 0;
+      const summaryMsg = `${tradeCount} trade${tradeCount!==1?'s':''} executed, ${winCount} won. Win rate: ${botData.win_rate || 0}%.`;
+      showSessionDialog('completed', summaryMsg, botData.new_balance);
       stopSession(true, botData);
     }
 
@@ -834,5 +852,95 @@ if (notifBtn) {
   notifBtn.addEventListener('click', () => {
     const dot = notifBtn.querySelector('.notif-dot');
     if (dot) dot.style.display = 'none';
+  });
+}
+
+// ============================================
+// SESSION RESULT DIALOG
+// Shows a clear summary of what happened in the session
+// ============================================
+function showSessionDialog(type, message, balance) {
+  // Remove any existing dialog
+  const existing = document.getElementById('sessionResultDialog');
+  if (existing) existing.remove();
+
+  let icon, title, titleColor, bodyHtml;
+
+  if (type === 'no_trades') {
+    icon       = '🛡️';
+    title      = 'No Trade Taken';
+    titleColor = '#F5C518';
+    bodyHtml = `
+      <p style="color:#c5ccd6;line-height:1.6;margin:0 0 16px;">
+        The bot scanned all pairs and found no setup that met its strict quality filters.
+        <strong style="color:#00D48B;">Your balance was not touched.</strong>
+      </p>
+      <div style="background:rgba(0,212,139,0.08);border:1px solid rgba(0,212,139,0.25);border-radius:10px;padding:14px;margin-bottom:16px;">
+        <p style="color:#00D48B;font-weight:700;margin:0 0 6px;font-size:13px;">WHY THIS IS GOOD</p>
+        <p style="color:#a8b0bd;margin:0;font-size:13px;line-height:1.5;">
+          A professional bot only trades when conditions are right. Forcing a trade in a flat,
+          choppy market loses money. Waiting for the right setup is how you stay profitable.
+        </p>
+      </div>
+      <p style="color:#8892a4;font-size:13px;margin:0;">${message || ''}</p>
+    `;
+  } else if (type === 'blocked') {
+    icon       = '⚠️';
+    title      = 'Session Blocked';
+    titleColor = '#ef4444';
+    bodyHtml = `
+      <p style="color:#c5ccd6;line-height:1.6;margin:0 0 16px;">${message || 'The session could not start.'}</p>
+      <p style="color:#00D48B;font-size:13px;margin:0;"><strong>Your balance was not touched.</strong></p>
+    `;
+  } else { // completed
+    const pnl     = typeof window._lastSessionPnl === 'number' ? window._lastSessionPnl : 0;
+    const isWin   = pnl >= 0;
+    icon          = isWin ? '🎉' : '📉';
+    title         = isWin ? 'Session Complete — Profit' : 'Session Complete — Loss';
+    titleColor    = isWin ? '#00D48B' : '#ef4444';
+    const sign    = isWin ? '+' : '';
+    bodyHtml = `
+      <div style="text-align:center;margin-bottom:16px;">
+        <div style="font-size:32px;font-weight:800;color:${titleColor};">${sign}$${Math.abs(pnl).toFixed(4)}</div>
+        <div style="color:#8892a4;font-size:13px;margin-top:4px;">Session P&L</div>
+      </div>
+      <p style="color:#c5ccd6;line-height:1.6;margin:0 0 12px;">${message || 'The trade completed.'}</p>
+    `;
+  }
+
+  const balanceHtml = (typeof balance === 'number')
+    ? `<div style="border-top:1px solid #2a3142;margin-top:16px;padding-top:14px;display:flex;justify-content:space-between;align-items:center;">
+         <span style="color:#8892a4;font-size:13px;">Your Bybit Balance</span>
+         <span style="color:#F5C518;font-weight:700;font-size:16px;font-family:monospace;">$${balance.toFixed(2)}</span>
+       </div>`
+    : '';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'sessionResultDialog';
+  overlay.style.cssText = `
+    position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;
+    display:flex;align-items:center;justify-content:center;padding:20px;
+    backdrop-filter:blur(4px);
+  `;
+  overlay.innerHTML = `
+    <div style="background:#161b2e;border:1px solid #2a3142;border-radius:16px;
+                max-width:420px;width:100%;padding:28px;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+      <div style="text-align:center;margin-bottom:18px;">
+        <div style="font-size:40px;margin-bottom:8px;">${icon}</div>
+        <h2 style="color:${titleColor};margin:0;font-size:20px;font-weight:700;">${title}</h2>
+      </div>
+      ${bodyHtml}
+      ${balanceHtml}
+      <button onclick="document.getElementById('sessionResultDialog').remove()"
+              style="width:100%;margin-top:20px;background:#F5C518;color:#0A0E1A;
+                     border:none;border-radius:10px;padding:13px;font-weight:700;
+                     font-size:15px;cursor:pointer;">
+        Got it
+      </button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
   });
 }
