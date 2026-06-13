@@ -1133,10 +1133,14 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None,
                 placed_count += 1
             time.sleep(0.3)
         except Exception as e:
-            print(f'  Level {idx+1} order failed: {e}')
+            import traceback
+            print(f'  Level {idx+1} order FAILED: {e}')
+            print(traceback.format_exc())
 
     if placed_count == 0:
-        results['message'] = f'Balance ${amount:.2f} too small for {symbol} minimum order sizes.'
+        err_msg = f'Grid: no orders placed for {symbol}. Check API permissions (Trade must be enabled on Bybit key).'
+        print(f'  ERROR: {err_msg}')
+        results['message'] = err_msg
         return results
 
     # Monitor: check limit order fills and TP completions
@@ -1857,11 +1861,13 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     best_signal = select_best_pair(CRYPTO_PAIRS)
 
     if best_signal is None:
-        # No signal cleared minimum confidence — use grid on best pair by volume
-        print('  No strong momentum signal — defaulting to Grid/DCA on XRP/USDT')
-        return execute_grid_session(amount, timeframe_minutes, symbol='XRP/USDT',
-                                   user_balance=user_balance,
-                                   user_trade_mode=user_trade_mode)
+        print('  No strong signal - running Momentum on XRP/USDT with force=True')
+        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
+                                            user_id=user_id, force=True, symbol='XRP/USDT',
+                                            user_balance=user_balance,
+                                            user_trade_mode=user_trade_mode)
+        results['strategy'] = 'auto_momentum'
+        return results
 
     market_condition = best_signal.get('market_condition', 'ranging')
     symbol           = best_signal['symbol']
@@ -1869,19 +1875,13 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     print(f'  Auto-best decision: {symbol} | Condition: {market_condition} | '
           f'Signal: {best_signal["direction"]} {best_signal["confidence"]:.0f}%')
 
-    if market_condition == 'ranging':
-        print('  → Ranging market detected — launching Grid/DCA')
-        return execute_grid_session(amount, timeframe_minutes, symbol=symbol,
-                                   user_balance=user_balance,
-                                   user_trade_mode=user_trade_mode)
-    else:
-        print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
-        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
-                                            user_id=user_id,
-                                            user_balance=user_balance,
-                                            user_trade_mode=user_trade_mode)
-        results['strategy'] = 'auto_momentum'
-        return results
+    print(f'  Market: {market_condition} - using Momentum Scalper (4 TPs + SL)')
+    results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
+                                        user_id=user_id,
+                                        user_balance=user_balance,
+                                        user_trade_mode=user_trade_mode)
+    results['strategy'] = 'auto_momentum'
+    return results
 
 
 # ============================================
