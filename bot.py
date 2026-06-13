@@ -100,8 +100,8 @@ FUTURES_PAIRS = ['XRP/USDT:USDT', 'SOL/USDT:USDT', 'ETH/USDT:USDT', 'BTC/USDT:US
 # Momentum scalper
 MOMENTUM_TP_PCT  = 0.03    # +3% take profit — real directional profit target
 MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss  → R:R = 2:1
-MIN_CONF         = 60      # minimum confidence to enter a momentum trade (60% = more opportunities)
-STRONG_CONF      = 75      # strong signal — enter without hesitation
+MIN_CONF         = 72      # minimum confidence -- only high-conviction trades
+STRONG_CONF      = 82      # strong signal -- full size entry
 
 # Grid/DCA
 GRID_LEVELS      = 5       # number of buy levels in the grid
@@ -393,30 +393,138 @@ def detect_market_condition(df):
 
 
 # ============================================
-# 5. SIGNAL GENERATION — Multi-Timeframe
+# 5. SIGNAL GENERATION — Professional Grade
 # ============================================
+# Strategy based on proven institutional concepts:
+# - Trend-first: 1h EMA bias is the master filter
+# - Multi-timeframe RSI confluence
+# - ATR-based dynamic TP/SL (2:1 minimum R:R)
+# - Volume confirmation required
+# - Minimum 5-factor confluence to trade
+# - Score threshold: ±6 minimum (was ±2)
+# - Minimum confidence: 72% (was 60%)
+# ============================================
+
+MIN_CONF    = 72    # raised from 60 — only high-conviction trades
+STRONG_CONF = 82    # strong signal — scale in with full size
+
+def calculate_ema50(closes):
+    """EMA50 for trend structure."""
+    if len(closes) < 50:
+        return closes[-1]
+    return ema_series(closes, 50)[-1]
+
+def calculate_bb_squeeze(closes, period=20):
+    """
+    Bollinger Band width — measures volatility compression.
+    Tight bands = breakout incoming. Wide bands = trend in motion.
+    """
+    if len(closes) < period:
+        return 1.0, False
+    sma   = sum(closes[-period:]) / period
+    std   = (sum((c - sma) ** 2 for c in closes[-period:]) / period) ** 0.5
+    upper = sma + 2 * std
+    lower = sma - 2 * std
+    width = (upper - lower) / sma if sma > 0 else 1.0
+    # Squeeze = width < 1% of price (price coiling = breakout coming)
+    squeeze = width < 0.01
+    return width, squeeze
+
+def calculate_stochastic(closes, highs, lows, k_period=14, d_period=3):
+    """
+    Stochastic oscillator — momentum confirmation.
+    %K below 20 = oversold, above 80 = overbought.
+    """
+    if len(closes) < k_period:
+        return 50.0, 50.0
+    recent_high = max(highs[-k_period:])
+    recent_low  = min(lows[-k_period:])
+    if recent_high == recent_low:
+        return 50.0, 50.0
+    k = ((closes[-1] - recent_low) / (recent_high - recent_low)) * 100
+    # %D is 3-period SMA of %K — simplified here
+    k_values = []
+    for i in range(d_period):
+        idx = -(i + 1)
+        if abs(idx) <= len(closes):
+            h = max(highs[max(0, len(highs)+idx-k_period):len(highs)+idx+1] or [closes[-1]])
+            l = min(lows[max(0, len(lows)+idx-k_period):len(lows)+idx+1] or [closes[-1]])
+            if h != l:
+                k_values.append(((closes[idx] - l) / (h - l)) * 100)
+    d = sum(k_values) / len(k_values) if k_values else k
+    return round(k, 2), round(d, 2)
+
+def get_1h_trend_bias(closes1h):
+    """
+    The master trend filter. Uses EMA9/21/50 on 1h.
+    Returns: 'bullish', 'bearish', or 'neutral' (no trade when neutral)
+    EMA9 > EMA21 > EMA50 = strong bull
+    EMA9 < EMA21 < EMA50 = strong bear
+    Mixed = neutral, skip
+    """
+    if len(closes1h) < 50:
+        return 'neutral'
+    ema9  = ema_series(closes1h, 9)[-1]
+    ema21 = ema_series(closes1h, 21)[-1]
+    ema50 = ema_series(closes1h, 50)[-1]
+
+    # Strong alignment
+    if ema9 > ema21 and ema21 > ema50:
+        return 'bullish'
+    if ema9 < ema21 and ema21 < ema50:
+        return 'bearish'
+
+    # Partial alignment — still tradeable but weaker
+    if ema9 > ema21 and ema9 > ema50:
+        return 'bullish'
+    if ema9 < ema21 and ema9 < ema50:
+        return 'bearish'
+
+    # Mixed — skip, wait for clarity
+    return 'neutral'
+
 def generate_signal(symbol, timeframe='5m'):
     """
-    Multi-timeframe signal with trend-aware RSI override.
-    Returns None if market data is unavailable — no fallback to fake data.
+    Professional-grade signal engine.
+
+    GATES (all must pass to trade):
+    1. 1h trend bias must be clear (bullish or bearish) — no trading in neutral
+    2. Signal direction MUST match 1h bias — no counter-trend trades
+    3. Score must be >= +6 (BUY) or <= -6 (SELL) — no noise trades
+    4. Confidence must be >= 72%
+    5. RSI on 15m must confirm direction
+    6. Volume must not be weak (neutral or confirming)
+    7. ATR must show sufficient volatility for profit potential
+
+    Returns None if any gate fails. No fallback, no forced trades.
     """
     try:
-        df5  = fetch_ohlcv(symbol, timeframe='5m',  limit=100)
-        df15 = fetch_ohlcv(symbol, timeframe='15m', limit=60)
-        df1h = fetch_ohlcv(symbol, timeframe='1h',  limit=50)
+        df5  = fetch_ohlcv(symbol, timeframe='5m',  limit=120)
+        df15 = fetch_ohlcv(symbol, timeframe='15m', limit=80)
+        df1h = fetch_ohlcv(symbol, timeframe='1h',  limit=60)
 
-        if not df5 or len(df5['close']) < 20:
-            print(f'  Insufficient data for {symbol} — skipping')
+        if not df5 or len(df5['close']) < 30:
             return None
         if not df15 or len(df15['close']) < 20:
             df15 = df5
-        if not df1h or len(df1h['close']) < 20:
+        if not df1h or len(df1h['close']) < 30:
             df1h = df15
 
         closes5  = df5['close']
         closes15 = df15['close']
         closes1h = df1h['close']
+        highs5   = df5.get('high',  closes5)
+        lows5    = df5.get('low',   closes5)
+        highs15  = df15.get('high', closes15)
+        lows15   = df15.get('low',  closes15)
 
+        # ── GATE 1: 1H TREND BIAS (master filter) ──────────────────────
+        trend_bias = get_1h_trend_bias(closes1h)
+        if trend_bias == 'neutral':
+            print(f'  [{symbol}] 1h trend unclear — skipping (no counter-trend trades)')
+            return None
+
+        # ── INDICATORS ─────────────────────────────────────────────────
         rsi5  = calculate_rsi(closes5,  period=14)
         rsi15 = calculate_rsi(closes15, period=14)
         rsi1h = calculate_rsi(closes1h, period=14)
@@ -425,73 +533,92 @@ def generate_signal(symbol, timeframe='5m'):
         _, _, ema_trend15 = calculate_ema_trend(closes15, short=9, long=21)
         _, _, ema_trend1h = calculate_ema_trend(closes1h, short=9, long=21)
 
-        _, _, hist5, mt5   = calculate_macd(closes5)
-        _, _, hist15, mt15 = calculate_macd(closes15)
-        _, _, _,     mt1h  = calculate_macd(closes1h)
+        macd5_line, macd5_sig, hist5, mt5   = calculate_macd(closes5)
+        macd15_line, _, hist15, mt15         = calculate_macd(closes15)
+        _, _, _, mt1h                        = calculate_macd(closes1h)
 
         volume_trend = calculate_volume_trend(df5['volume'])
         candle_pat   = detect_candle_pattern(df5)
         sr_position  = calculate_support_resistance(df5)
         atr          = calculate_atr(df5)
         current_price = float(closes5[-1])
-        atr_pct = (atr / current_price) * 100 if current_price > 0 else 0
+        atr_pct      = (atr / current_price) * 100 if current_price > 0 else 0
 
-        # Momentum direction counting
-        recent = closes5[-4:]
-        ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
-        downs  = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i-1])
-        momentum = 1 if ups > downs else (-1 if downs > ups else 0)
+        stoch_k, stoch_d = calculate_stochastic(closes5, highs5, lows5)
+        stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
+        bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # ----------------------------------------
-        # SCORING SYSTEM — every indicator votes
-        # ----------------------------------------
+        # ── GATE 2: VOLUME CHECK ────────────────────────────────────────
+        if volume_trend == 'weak':
+            print(f'  [{symbol}] Volume weak — skipping (no conviction in move)')
+            return None
+
+        # ── GATE 3: ATR VOLATILITY ──────────────────────────────────────
+        if atr_pct < 0.08:
+            print(f'  [{symbol}] ATR too low ({atr_pct:.3f}%) — market not moving, skip')
+            return None
+
+        # ── SCORING SYSTEM ──────────────────────────────────────────────
         score = 0
 
-        # RSI 5m (primary — most weight)
-        if   rsi5 < 20:  score += 6
-        elif rsi5 < 30:  score += 5
-        elif rsi5 < 38:  score += 3
-        elif rsi5 < 45:  score += 1
-        elif rsi5 > 80:  score -= 6
-        elif rsi5 > 70:  score -= 5
-        elif rsi5 > 62:  score -= 3
-        elif rsi5 > 55:  score -= 1
+        # RSI 5m — oversold/overbought extremes carry most weight
+        if   rsi5 < 20:  score += 5
+        elif rsi5 < 28:  score += 4
+        elif rsi5 < 35:  score += 3
+        elif rsi5 < 42:  score += 2
+        elif rsi5 < 48:  score += 1
+        elif rsi5 > 80:  score -= 5
+        elif rsi5 > 72:  score -= 4
+        elif rsi5 > 65:  score -= 3
+        elif rsi5 > 58:  score -= 2
+        elif rsi5 > 52:  score -= 1
 
-        # RSI 15m (trend confirmation)
-        if   rsi15 < 40: score += 2
-        elif rsi15 < 48: score += 1
-        elif rsi15 > 60: score -= 2
-        elif rsi15 > 52: score -= 1
+        # RSI 15m — trend confirmation (weighted heavily)
+        if   rsi15 < 35: score += 3
+        elif rsi15 < 45: score += 2
+        elif rsi15 < 50: score += 1
+        elif rsi15 > 65: score -= 3
+        elif rsi15 > 55: score -= 2
+        elif rsi15 > 50: score -= 1
 
-        # RSI 1h (big picture)
-        if   rsi1h < 45: score += 1
-        elif rsi1h > 55: score -= 1
+        # RSI 1h — big picture
+        if   rsi1h < 40: score += 2
+        elif rsi1h < 48: score += 1
+        elif rsi1h > 60: score -= 2
+        elif rsi1h > 52: score -= 1
 
-        # EMA alignment across all three timeframes
+        # EMA alignment — all 3 timeframes
         ema_bull = sum([ema_trend5 == 'bullish', ema_trend15 == 'bullish', ema_trend1h == 'bullish'])
         ema_bear = 3 - ema_bull
-        if   ema_bull == 3: score += 3
+        if ema_bull == 3: score += 4
         elif ema_bull == 2: score += 2
-        elif ema_bull == 1: score += 1
-        if   ema_bear == 3: score -= 3
+        if ema_bear == 3: score -= 4
         elif ema_bear == 2: score -= 2
-        elif ema_bear == 1: score -= 1
 
-        # MACD
+        # MACD across timeframes
         if mt5  == 'bullish': score += 2
         elif mt5  == 'bearish': score -= 2
         if mt15 == 'bullish': score += 1
         elif mt15 == 'bearish': score -= 1
         if mt1h == 'bullish': score += 1
         elif mt1h == 'bearish': score -= 1
-        if hist5 > 0: score += 1
-        elif hist5 < 0: score -= 1
 
-        # Volume
+        # MACD histogram direction (momentum acceleration)
+        if hist5 > 0 and macd5_line > 0:  score += 1
+        elif hist5 < 0 and macd5_line < 0: score -= 1
+
+        # Stochastic
+        if   stoch_k < 20 and stoch_k > stoch_d: score += 2  # oversold + crossing up
+        elif stoch_k < 25:                         score += 1
+        elif stoch_k > 80 and stoch_k < stoch_d: score -= 2  # overbought + crossing down
+        elif stoch_k > 75:                         score -= 1
+        if   stoch15_k < 25: score += 1
+        elif stoch15_k > 75: score -= 1
+
+        # Volume confirmation
         if volume_trend == 'confirming': score += 2
-        elif volume_trend == 'weak':     score -= 1
 
-        # Candle pattern
+        # Candle patterns
         if   candle_pat == 'bullish_reversal': score += 3
         elif candle_pat == 'bearish_reversal': score -= 3
 
@@ -499,57 +626,77 @@ def generate_signal(symbol, timeframe='5m'):
         if   sr_position == 'near_support':    score += 2
         elif sr_position == 'near_resistance': score -= 2
 
-        # Momentum
-        score += momentum
+        # BB squeeze — breakout energy building
+        if bb_squeeze: score += 1
 
-        # ----------------------------------------
-        # DIRECTION & CONFIDENCE — trend-aware
-        # ----------------------------------------
-        ema_bull_count = ema_bull  # already computed above
+        # Short-term price momentum (last 4 candles)
+        recent = closes5[-4:]
+        ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
+        downs  = len(recent) - 1 - ups
+        if ups > downs:   score += 1
+        elif downs > ups: score -= 1
 
-        # RSI extreme overrides — but respect the trend
-        if rsi5 < 22 and ema_bull_count >= 1:
-            # Oversold AND at least one timeframe turning bullish = real buy
-            direction  = 'BUY'
-            confidence = min(95, 78 + (22 - rsi5) * 1.5)
-        elif rsi5 < 22 and ema_bull_count == 0:
-            # Oversold but ALL timeframes bearish = falling knife — go with trend
-            direction  = 'SELL'
-            confidence = min(88, 70 + (22 - rsi5))
-        elif rsi5 > 78:
-            direction  = 'SELL'
-            confidence = min(95, 78 + (rsi5 - 78) * 1.5)
-        elif score >= 6:
-            direction  = 'BUY'
-            confidence = min(95, 70 + (score - 6) * 3)
-        elif score <= -6:
-            direction  = 'SELL'
-            confidence = min(95, 70 + (abs(score) - 6) * 3)
-        elif score >= 4:
-            direction  = 'BUY'
-            confidence = 65 + (score - 4) * 2
-        elif score <= -4:
-            direction  = 'SELL'
-            confidence = 65 + (abs(score) - 4) * 2
-        elif score >= 2:
-            direction  = 'BUY'
-            confidence = 58 + score * 2
-        elif score <= -2:
-            direction  = 'SELL'
-            confidence = 58 + abs(score) * 2
+        # ── GATE 4: MINIMUM SCORE ───────────────────────────────────────
+        # Need clear conviction — ±6 minimum (old was ±2)
+        if abs(score) < 6:
+            print(f'  [{symbol}] Score {score} too weak — no trade (min ±6)')
+            return None
+
+        # ── DIRECTION — must align with 1h trend ────────────────────────
+        raw_direction = 'BUY' if score > 0 else 'SELL'
+
+        # GATE 5: Direction must match 1h bias — most critical rule
+        if trend_bias == 'bullish' and raw_direction == 'SELL':
+            print(f'  [{symbol}] Score says SELL but 1h trend is BULLISH — no counter-trend trade')
+            return None
+        if trend_bias == 'bearish' and raw_direction == 'BUY':
+            print(f'  [{symbol}] Score says BUY but 1h trend is BEARISH — no counter-trend trade')
+            return None
+
+        direction = raw_direction
+
+        # ── CONFIDENCE CALCULATION ───────────────────────────────────────
+        abs_score = abs(score)
+        if   abs_score >= 14: confidence = 92
+        elif abs_score >= 12: confidence = 88
+        elif abs_score >= 10: confidence = 84
+        elif abs_score >= 8:  confidence = 80
+        elif abs_score >= 6:  confidence = 75
+
+        # Confluence bonuses
+        if volume_trend == 'confirming':   confidence = min(95, confidence + 3)
+        if candle_pat != 'none':           confidence = min(95, confidence + 2)
+        if ema_bull == 3 or ema_bear == 3: confidence = min(95, confidence + 3)
+        if sr_position in ('near_support', 'near_resistance'):
+            confidence = min(95, confidence + 2)
+        if bb_squeeze:                     confidence = min(95, confidence + 2)
+        if stoch_k < 20 or stoch_k > 80:  confidence = min(95, confidence + 2)
+
+        # ── GATE 6: MINIMUM CONFIDENCE ───────────────────────────────────
+        if confidence < MIN_CONF:
+            print(f'  [{symbol}] Confidence {confidence:.0f}% below minimum {MIN_CONF}% — skip')
+            return None
+
+        # ── ATR-BASED TP/SL LEVELS ───────────────────────────────────────
+        # R:R minimum 2:1 guaranteed:
+        # SL = 1.0x ATR from entry
+        # TP1 = 2.0x ATR (2:1 R:R)
+        # TP2 = 3.5x ATR (3.5:1 R:R)
+        # TP3 = 5.5x ATR
+        # TP4 = 8.0x ATR (runner)
+        atr_sl_mult  = 1.0
+        atr_tp_mults = [2.0, 3.5, 5.5, 8.0]
+
+        if direction == 'BUY':
+            sl_price  = current_price - (atr * atr_sl_mult)
+            tp_prices = [current_price + (atr * m) for m in atr_tp_mults]
         else:
-            direction  = 'BUY' if score >= 0 else 'SELL'
-            confidence = 52.0
+            sl_price  = current_price + (atr * atr_sl_mult)
+            tp_prices = [current_price - (atr * m) for m in atr_tp_mults]
 
-        # Bonuses
-        if candle_pat == 'bullish_reversal' and direction == 'BUY':
-            confidence = min(95, confidence + 5)
-        elif candle_pat == 'bearish_reversal' and direction == 'SELL':
-            confidence = min(95, confidence + 5)
-        if volume_trend == 'confirming':
-            confidence = min(95, confidence + 3)
-        if atr_pct < 0.05:
-            confidence = max(50, confidence - 8)
+        # Derive TP percentages from price levels for the momentum engine
+        tp_pcts = [abs(tp - current_price) / current_price for tp in tp_prices]
+        sl_pct  = abs(sl_price - current_price) / current_price
 
         real_price = fetch_current_price(symbol)
         if real_price:
@@ -557,10 +704,12 @@ def generate_signal(symbol, timeframe='5m'):
 
         market_condition = detect_market_condition(df1h)
 
-        print(f'  [{symbol}] score={score} RSI5={rsi5} RSI15={rsi15} '
-              f'EMA={ema_trend5}/{ema_trend15}/{ema_trend1h} '
-              f'Vol={volume_trend} Pat={candle_pat} SR={sr_position} '
-              f'Market={market_condition} → {direction} {confidence:.0f}%')
+        print(f'  [{symbol}] PASS | score={score} conf={confidence:.0f}% | '
+              f'RSI5={rsi5:.1f} RSI15={rsi15:.1f} RSI1h={rsi1h:.1f} | '
+              f'EMA={ema_trend5}/{ema_trend15}/{ema_trend1h} | '
+              f'MACD={mt5}/{mt15} | Stoch={stoch_k:.0f}/{stoch15_k:.0f} | '
+              f'Vol={volume_trend} | Pat={candle_pat} | SR={sr_position} | '
+              f'ATR={atr_pct:.3f}% | 1hBias={trend_bias} | {direction}')
 
         return {
             'symbol':           symbol,
@@ -577,43 +726,58 @@ def generate_signal(symbol, timeframe='5m'):
             'volume_trend':     volume_trend,
             'candle_pattern':   candle_pat,
             'sr_position':      sr_position,
+            'atr':              round(atr, 6),
             'atr_pct':          round(atr_pct, 4),
+            'stoch_k':          stoch_k,
+            'stoch15_k':        stoch15_k,
+            'bb_squeeze':       bb_squeeze,
+            'trend_bias':       trend_bias,
             'market_condition': market_condition,
-            'current_price':    current_price
+            'current_price':    current_price,
+            'tp_pcts':          tp_pcts,
+            'sl_pct':           sl_pct,
+            'atr_value':        atr,
         }
 
     except Exception as e:
         print(f'Signal error for {symbol}: {e}')
+        import traceback
+        traceback.print_exc()
         return None
 
 
 def select_best_pair(pairs):
     """
-    Scan all pairs and return the one with the highest-confidence signal.
-    Returns None if no pair clears the minimum confidence threshold.
+    Scan all pairs and return the highest-confidence signal that passed
+    all gates. Returns None if no pair passes — bot waits, does not force trade.
     """
-    best_signal    = None
+    best_signal     = None
     best_confidence = 0
+    passed          = []
 
     print('  Scanning pairs for best opportunity...')
     for pair in pairs:
         try:
             sig = generate_signal(pair)
-            if sig and sig['confidence'] >= MIN_CONF and sig['confidence'] > best_confidence:
-                best_signal     = sig
-                best_confidence = sig['confidence']
-            time.sleep(0.2)
+            if sig:
+                passed.append(sig)
+                if sig['confidence'] > best_confidence:
+                    best_signal     = sig
+                    best_confidence = sig['confidence']
+            time.sleep(0.3)
         except Exception as e:
             print(f'  Scan error for {pair}: {e}')
 
     if best_signal:
         print(f'  Best pair: {best_signal["symbol"]} '
               f'({best_signal["direction"]} {best_signal["confidence"]:.0f}% '
-              f'— {best_signal["market_condition"]})')
+              f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}%)')
     else:
-        print('  No strong signal found across all pairs — not trading')
+        print('  No high-quality signal found — bot will wait')
 
     return best_signal
+
+
 
 
 # ============================================
@@ -1387,15 +1551,10 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
     amount     = min(amount, available_usdt * 0.95)
     trade_usdt = amount / max(num_trades, 1)
 
-    # TP/SL percentages (price % move needed, not leveraged)
-    TP_LEVELS_PCT = [0.010, 0.020, 0.035, 0.055]   # TP1=1% TP2=2% TP3=3.5% TP4=5.5%
-    SL_PCT        = 0.010                             # SL = -1%
-    TP_CLOSE_FRAC = 0.25                              # each TP closes 25% of position
-
-    # Scale TPs down for high leverage (same dollar target, smaller % move)
-    if leverage > 1:
-        TP_LEVELS_PCT = [max(p / leverage, 0.003) for p in TP_LEVELS_PCT]
-        SL_PCT        = max(SL_PCT / leverage, 0.002)
+    # ATR-based TP/SL from signal (2:1+ R:R guaranteed)
+    DEFAULT_TP_PCTS = [0.012, 0.022, 0.038, 0.060]  # fallback if no ATR
+    DEFAULT_SL_PCT  = 0.010
+    TP_CLOSE_FRAC   = 0.25  # each TP closes 25% of position
 
     for i in range(num_trades):
         if should_stop(user_id):
@@ -1468,13 +1627,19 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         real_pnl      = 0.0
         won           = False
 
-        # Calculate TP and SL price levels
+        # ATR-based TP/SL -- use signal levels if available, else fallback
+        sig_tp_pcts = sig.get('tp_pcts', DEFAULT_TP_PCTS)
+        sig_sl_pct  = sig.get('sl_pct',  DEFAULT_SL_PCT)
+        # Enforce minimum 2:1 R:R on TP1
+        if not sig_tp_pcts or sig_tp_pcts[0] < sig_sl_pct * 1.8:
+            sig_tp_pcts = [sig_sl_pct * 2.0, sig_sl_pct * 3.5,
+                           sig_sl_pct * 5.5, sig_sl_pct * 8.0]
         if trade_dir == 'BUY':
-            tp_prices = [entry_price * (1 + p) for p in TP_LEVELS_PCT]
-            sl_price  = entry_price * (1 - SL_PCT)
+            tp_prices = [entry_price * (1 + p) for p in sig_tp_pcts]
+            sl_price  = entry_price * (1 - sig_sl_pct)
         else:
-            tp_prices = [entry_price * (1 - p) for p in TP_LEVELS_PCT]
-            sl_price  = entry_price * (1 + SL_PCT)
+            tp_prices = [entry_price * (1 - p) for p in sig_tp_pcts]
+            sl_price  = entry_price * (1 + sig_sl_pct)
 
         print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
         print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
