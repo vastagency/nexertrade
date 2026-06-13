@@ -1320,7 +1320,8 @@ def should_stop(user_id):
 # R:R minimum 2:1 on TP1. Each TP closes 25% of position.
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
-                              force=False, symbol=None, user_id=None):
+                              force=False, symbol=None, user_id=None,
+                              user_balance=None, user_trade_mode='futures'):
     """
     Multi-TP/SL momentum engine. No timeframe expiry.
     Trade runs until: all TPs hit, SL hit, or user requests stop.
