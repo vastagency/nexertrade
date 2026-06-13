@@ -568,26 +568,12 @@ async function stopSession(natural = false, botData = null) {
     lossesCount      = botData.losses      !== undefined ? botData.losses      : lossesCount;
     sessionPnl       = botData.net_pnl     !== undefined ? botData.net_pnl     : sessionPnl;
   } else if (!botData) {
+    // Fetch live Bybit balance regardless
     try {
-      const winRate = tradesCount > 0 ? Math.round((winsCount / tradesCount) * 100) : 0;
-      const res = await fetch('/api/trade/complete', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          timeframe:    selectedTimeframe,
-          amount:       selectedAmount,
-          total_trades: tradesCount,
-          wins:         winsCount,
-          losses:       lossesCount,
-          net_pnl:      parseFloat(sessionPnl.toFixed(4)),
-          win_rate:     winRate
-        })
-      });
-      const data = await res.json();
-      if (data.success) availableBalance = data.new_balance;
-    } catch (err) {
-      availableBalance = parseFloat((availableBalance + sessionPnl).toFixed(4));
-    }
+      const r = await fetch('/api/user-balance');
+      const d = await r.json();
+      if (d.success) availableBalance = d.balance;
+    } catch (_) {}
   }
 
   const balEl = document.getElementById('availableBalance');

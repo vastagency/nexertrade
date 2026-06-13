@@ -690,7 +690,17 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
 
     try:
         current_price = _get_price(symbol, 'futures')
-        quantity      = round(usdt_amount * LEVERAGE / current_price, 6)
+        QTY_STEP = {'XRPUSDT': 1, 'BTCUSDT': 0.001, 'ETHUSDT': 0.01,
+                    'SOLUSDT': 0.1, 'BNBUSDT': 0.01}
+        import math
+        step     = QTY_STEP.get(bybit_sym, 1)
+        raw_qty  = usdt_amount * LEVERAGE / current_price
+        quantity = math.floor(raw_qty / step) * step
+        print(f'  [QTY] raw={raw_qty:.4f} step={step} final={quantity}')
+        if quantity <= 0:
+            return {'success': False,
+                    'error': f'Qty too small ({raw_qty:.6f}). Increase trade amount.',
+                    'price': current_price}
 
         # Set leverage via direct API
         try:
