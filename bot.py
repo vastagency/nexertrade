@@ -619,6 +619,64 @@ def select_best_pair(pairs):
 # ============================================
 # 6. REAL ORDER EXECUTION
 # ============================================
+def _bybit_signed_request(method, endpoint, params, exchange_obj):
+    """
+    Make a signed Bybit V5 REST request directly, bypassing CCXT pre-flights.
+    Avoids CCXT calling /v5/asset/coin/query-info which 403s on Railway.
+    """
+    import hmac, hashlib, json as _json
+    api_key    = exchange_obj.apiKey
+    api_secret = exchange_obj.secret
+    timestamp  = str(int(time.time() * 1000))
+    recv_win   = '5000'
+
+    if method == 'GET':
+        query    = '&'.join(f'{k}={v}' for k, v in sorted(params.items()))
+        raw_sign = timestamp + api_key + recv_win + query
+        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
+        url  = f'https://api.bybit.com{endpoint}?{query}'
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get(url, headers={
+            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign
+        }, timeout=15)
+    else:
+        body     = _json.dumps(params)
+        raw_sign = timestamp + api_key + recv_win + body
+        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
+        url  = f'https://api.bybit.com{endpoint}'
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.post(url, headers={
+            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign,
+            'Content-Type': 'application/json'
+        }, data=body, timeout=15)
+    return resp.json()
+
+
+def _get_price(symbol, trade_mode='futures'):
+    """Get current price via Bybit public API — no auth, no pre-flight."""
+    bybit_sym = symbol.replace('/', '').replace(':USDT', '')
+    category  = 'linear' if trade_mode == 'futures' else 'spot'
+    try:
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get('https://api.bybit.com/v5/market/tickers',
+                        params={'category': category, 'symbol': bybit_sym}, timeout=10)
+        data = resp.json()
+        if data.get('retCode') == 0 and data['result']['list']:
+            return float(data['result']['list'][0]['lastPrice'])
+    except Exception:
+        pass
+    # Fallback to CCXT fetch_ticker (read-only, no pre-flight)
+    exch = bybit_futures if trade_mode == 'futures' else bybit_spot
+    t = exch.fetch_ticker(symbol)
+    return float(t['last'])
+
+
+
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
     """
     Place a futures market order on Bybit via direct REST API.
