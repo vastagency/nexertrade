@@ -627,6 +627,7 @@ def _bybit_signed_request(method, endpoint, params, exchange_obj):
     import hmac, hashlib, json as _json
     api_key    = exchange_obj.apiKey
     api_secret = exchange_obj.secret
+    print(f'  [SIGN] Using key: {api_key[:8]}...')
     timestamp  = str(int(time.time() * 1000))
     recv_win   = '5000'
 
@@ -1942,6 +1943,17 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _original_futures = _bot_module.bybit_futures
         _bot_module.bybit_spot    = user_spot
         _bot_module.bybit_futures = user_futures
+        print(f'  [KEY] Active key after swap: {_bot_module.bybit_futures.apiKey[:8]}...')
+        print(f'  [KEY] User key:              {user_api_key[:8]}...')
+        # Fetch live balance now using user keys
+        _user_live_bal = get_user_bybit_balance(user_api_key, user_api_secret)
+        if _user_live_bal is None:
+            _bot_module.bybit_spot    = _original_spot
+            _bot_module.bybit_futures = _original_futures
+            return {'strategy': strategy, 'trades': [], 'total_trades': 0,
+                    'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
+                    'real_trading': False,
+                    'message': 'Could not fetch Bybit balance. Check API key is valid.'}
     else:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
@@ -1951,6 +1963,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         print(f'{"="*50}')
         _original_spot    = None
         _original_futures = None
+        _user_live_bal    = None
 
     # Apply user-selected leverage override globally for this session
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
@@ -1979,7 +1992,9 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
     elif strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
                                           num_trades=num_trades, force=force, symbol=symbol,
-                                          user_id=user_id)
+                                          user_id=user_id,
+                                          user_balance=_user_live_bal,
+                                          user_trade_mode='futures')
 
     elif strategy == 'ema_macd':
         result = execute_ema_macd_session(amount, timeframe_minutes,
@@ -1987,12 +2002,18 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
 
     elif strategy == 'auto' or strategy == 'auto_best':
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol)
+                                           num_trades=num_trades, symbol=symbol,
+                                           user_balance=_user_live_bal,
+                                           user_trade_mode='futures',
+                                           user_id=user_id)
 
     else:
         print(f'Unknown strategy "{strategy}" — defaulting to auto')
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol)
+                                           num_trades=num_trades, symbol=symbol,
+                                           user_balance=_user_live_bal,
+                                           user_trade_mode='futures',
+                                           user_id=user_id)
 
     # Restore admin exchange after user session completes
     if use_user_account and _original_futures is not None:
