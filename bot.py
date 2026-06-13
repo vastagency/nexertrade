@@ -857,7 +857,7 @@ def validate_user_bybit_keys(api_key, api_secret):
         timestamp = str(int(time.time() * 1000))
         params_str = 'accountType=UNIFIED'
         recv_win = '5000'
-        raw_sign = timestamp + recv_win + params_str
+        raw_sign = timestamp + api_key + recv_win + params_str
         sign = hmac.new(api_secret.encode('utf-8'), raw_sign.encode('utf-8'), hashlib.sha256).hexdigest()
         session = requests.Session()
         session.trust_env = False
