@@ -512,7 +512,7 @@ async function startSession(force = false) {
         ? `⚡ FUTURES ${selectedLeverage}x`
         : '📦 SPOT';
       document.getElementById('sessionStatusSub').textContent =
-        `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
+        `Amount: $${selectedAmount} | ${modeLabel} | 4 TPs + SL`;
     }
 
     // Animate trades in the UI

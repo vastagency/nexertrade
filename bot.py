@@ -935,7 +935,8 @@ def get_user_bybit_balance(api_key, api_secret):
         return None
 
 
-def execute_grid_session(amount, timeframe_minutes, symbol=None):
+def execute_grid_session(amount, timeframe_minutes, symbol=None,
+                         user_balance=None, user_trade_mode='spot'):
     """
     Grid/DCA strategy — RSI-aware version.
 
@@ -960,13 +961,17 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
         'trade_mode':   'spot'
     }
 
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False,
-                'error': 'Bybit unreachable — grid session aborted.'}
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+        trade_mode     = user_trade_mode
+    else:
+        balance_info = get_bybit_balance()
+        if not balance_info.get('success'):
+            return {**results, 'real_trading': False,
+                    'error': 'Bybit unreachable - grid session aborted.'}
+        available_usdt = balance_info['USDT']
+        trade_mode     = balance_info.get('trade_mode', 'spot')
 
-    available_usdt        = balance_info['USDT']
-    trade_mode            = balance_info.get('trade_mode', 'spot')
     leverage              = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     exchange              = bybit_futures if trade_mode == 'futures' else bybit_spot
@@ -1731,16 +1736,22 @@ def generate_ema_macd_signal(symbol):
         return None
 
 
-def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None):
+def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None,
+                             user_balance=None, user_trade_mode='spot'):
     results = {'strategy': 'ema_macd', 'trades': [], 'total_trades': 0,
                'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
                'real_trading': True, 'trade_mode': 'spot'}
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
-    available_usdt = balance_info['USDT']
-    trade_mode = balance_info.get('trade_mode', 'spot')
-    leverage   = LEVERAGE if trade_mode == 'futures' else 1
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+        trade_mode     = user_trade_mode
+    else:
+        balance_info = get_bybit_balance()
+        if not balance_info.get('success'):
+            return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
+        available_usdt = balance_info['USDT']
+        trade_mode     = balance_info.get('trade_mode', 'spot')
+
+    leverage              = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     amount = min(amount, available_usdt * 0.99)
     trade_usdt = amount / num_trades
@@ -1832,7 +1843,8 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 # ============================================
 # 9. AUTO-BEST SESSION
 # ============================================
-def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None):
+def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None,
+                               user_balance=None, user_trade_mode='spot', user_id=None):
     """
     Auto-best: scans all pairs, reads market conditions, picks the
     strategy that fits best right now.
@@ -1847,7 +1859,9 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     if best_signal is None:
         # No signal cleared minimum confidence — use grid on best pair by volume
         print('  No strong momentum signal — defaulting to Grid/DCA on XRP/USDT')
-        return execute_grid_session(amount, timeframe_minutes, symbol='XRP/USDT')
+        return execute_grid_session(amount, timeframe_minutes, symbol='XRP/USDT',
+                                   user_balance=user_balance,
+                                   user_trade_mode=user_trade_mode)
 
     market_condition = best_signal.get('market_condition', 'ranging')
     symbol           = best_signal['symbol']
@@ -1857,13 +1871,15 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
 
     if market_condition == 'ranging':
         print('  → Ranging market detected — launching Grid/DCA')
-        return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
+        return execute_grid_session(amount, timeframe_minutes, symbol=symbol,
+                                   user_balance=user_balance,
+                                   user_trade_mode=user_trade_mode)
     else:
         print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
         results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
                                             user_id=user_id,
-                                            user_balance=_user_live_balance,
-                                            user_trade_mode=_user_trade_mode)
+                                            user_balance=user_balance,
+                                            user_trade_mode=user_trade_mode)
         results['strategy'] = 'auto_momentum'
         return results
 
@@ -1943,7 +1959,9 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
 
     if strategy == 'grid' or strategy == 'grid_dca':
-        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol)
+        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol,
+                                      user_balance=_user_live_balance,
+                                      user_trade_mode=_user_trade_mode)
 
     elif strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
@@ -1954,16 +1972,24 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
 
     elif strategy == 'ema_macd':
         result = execute_ema_macd_session(amount, timeframe_minutes,
-                                          num_trades=num_trades, symbol=symbol)
+                                          num_trades=num_trades, symbol=symbol,
+                                          user_balance=_user_live_balance,
+                                          user_trade_mode=_user_trade_mode)
 
     elif strategy == 'auto' or strategy == 'auto_best':
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol)
+                                           num_trades=num_trades, symbol=symbol,
+                                           user_balance=_user_live_balance,
+                                           user_trade_mode=_user_trade_mode,
+                                           user_id=user_id)
 
     else:
         print(f'Unknown strategy "{strategy}" — defaulting to auto')
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol)
+                                           num_trades=num_trades, symbol=symbol,
+                                           user_balance=_user_live_balance,
+                                           user_trade_mode=_user_trade_mode,
+                                           user_id=user_id)
 
     # Restore admin exchange after user session completes
     if use_user_account and _original_futures is not None:
