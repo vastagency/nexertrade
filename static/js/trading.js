@@ -17,6 +17,19 @@ let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
+
+// Fetch live Bybit balance if connected
+fetch('/api/user-balance')
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      availableBalance = data.balance;
+      const balEl = document.getElementById('availableBalance');
+      if (balEl) balEl.textContent = '$' + data.balance.toFixed(2);
+    }
+  })
+  .catch(() => {});
+  
 let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
 let selectedPair      = window.SELECTED_PAIR     || 'XRP/USDT';   // default pair
 let selectedLeverage  = window.SELECTED_LEVERAGE || 2;             // default 2x leverage
