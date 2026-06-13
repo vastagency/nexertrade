@@ -778,7 +778,7 @@ def api_bot_execute():
             daemon=True
         )
         t.start()
-        return jsonify({'success': True, 'job_id': job_id, 'async': True}), 202
+        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'num_trades': num_trades}), 202
 
     except Exception as e:
         print(f'Execute error: {e}')

@@ -17,6 +17,7 @@ let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
 let availableBalance  = window.USER_BALANCE || 0;
+let totalTrades       = 1;  // updated from server when session starts
 
 // Fetch live Bybit balance if connected
 fetch('/api/user-balance')
@@ -307,14 +308,17 @@ function addToTradeStream(trade) {
   row.className = 'stream-row';
   row.style.opacity   = '0';
   row.style.transform = 'translateX(-8px)';
+  const dir      = trade.direction === 'BUY' ? 'LONG' : 'SHORT';
+  const dirColor = trade.direction === 'BUY' ? '#00D48B' : '#F5C518';
+  const tpsInfo  = trade.tps_hit !== undefined ? ` | TP${trade.tps_hit}/4` : '';
+  const lev      = trade.leverage && trade.leverage > 1 ? ` ${trade.leverage}x` : '';
   row.innerHTML = `
     <div class="stream-left">
       <span class="stream-dot ${trade.won ? '' : 'loss'}"></span>
       <span class="stream-time">${time}</span>
       <span class="stream-pair">${trade.symbol}</span>
-      <span style="font-size:0.7rem;color:var(--text-secondary);margin-left:6px;">
-        [${trade.direction}${trade.rsi ? ' | RSI:' + trade.rsi : ''}${trade.strategy ? ' | ' + trade.strategy.toUpperCase() : ''}]
-      </span>
+      <span style="font-size:0.7rem;color:${dirColor};margin-left:6px;font-weight:700;">${dir}${lev}</span>
+      <span style="font-size:0.65rem;color:var(--text-secondary);margin-left:4px;">${tpsInfo}${trade.rsi ? ' | RSI:'+trade.rsi : ''}</span>
     </div>
     <span class="stream-pnl ${trade.won ? 'positive' : 'negative'}">${pnlStr}</span>
   `;
@@ -336,7 +340,6 @@ function addToTradeStream(trade) {
 // 7. UPDATE STATS UI
 // ============================================
 function updateStatsUI() {
-  const totalTrades = availableBalance >= 200 ? 10 : availableBalance >= 100 ? 5 : availableBalance >= 50 ? 3 : 1;
   document.getElementById('statTrades').textContent = `${tradesCount}/${totalTrades}`;
   document.getElementById('statWins').textContent   = winsCount;
   document.getElementById('statLosses').textContent = lossesCount;
@@ -359,8 +362,7 @@ async function startSession(force = false) {
   sessionPnl  = 0;
 
   // Reset UI
-  const t = availableBalance >= 200 ? 10 : availableBalance >= 100 ? 5 : availableBalance >= 50 ? 3 : 1;
-  document.getElementById('statTrades').textContent = `0/${t}`;
+  document.getElementById('statTrades').textContent = '0/?';
   document.getElementById('statWins').textContent   = '0';
   document.getElementById('statLosses').textContent = '0';
   document.getElementById('statPnl').textContent    = '+$0.0000';
@@ -436,6 +438,8 @@ async function startSession(force = false) {
 
     // Got job_id — now poll until the session completes on the server
     const jobId = startData.job_id;
+    totalTrades = startData.num_trades || 1;
+    document.getElementById('statTrades').textContent = `0/${totalTrades}`;
     if (startData.backtest) {
       const bt = startData.backtest;
       document.getElementById('sessionStatusSub').textContent =
@@ -493,7 +497,7 @@ async function startSession(force = false) {
         ? `⚡ FUTURES ${selectedLeverage}x`
         : '📦 SPOT';
       document.getElementById('sessionStatusSub').textContent =
-        `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
+        `$${selectedAmount} | ${modeLabel} | 4 TPs + SL`;
     }
 
     // Animate trades in the UI
@@ -545,7 +549,6 @@ async function stopSession(natural = false, botData = null) {
   clearInterval(timerInterval);
   clearInterval(chartInterval);
 
-  document.getElementById('sessionTimer').textContent        = '00:00';
   document.getElementById('sessionProgressBar').style.width  = '100%';
   document.getElementById('sessionStatusTitle').textContent  = 'Session complete';
   document.getElementById('sessionIcon').className           = 'session-icon stopped';
@@ -560,6 +563,7 @@ async function stopSession(natural = false, botData = null) {
   if (botData && botData.success) {
     availableBalance = botData.new_balance || availableBalance;
     tradesCount      = botData.total_trades !== undefined ? botData.total_trades : tradesCount;
+    totalTrades      = botData.total_trades || totalTrades;
     winsCount        = botData.wins        !== undefined ? botData.wins        : winsCount;
     lossesCount      = botData.losses      !== undefined ? botData.losses      : lossesCount;
     sessionPnl       = botData.net_pnl     !== undefined ? botData.net_pnl     : sessionPnl;
