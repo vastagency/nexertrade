@@ -851,24 +851,38 @@ def validate_user_bybit_keys(api_key, api_secret):
     """
     Test a user's Bybit API key by fetching their balance.
     Returns (True, balance_usdt) on success or (False, error_message) on failure.
+
+    FIX: Bybit V5 GET signature must be built from the exact query string that
+    appears in the URL. Using requests' `params={}` lets requests build the
+    query string independently AFTER we've already signed — causing a mismatch.
+    Solution: embed the query string directly in the URL so both the signature
+    and the actual request use the identical string.
     """
     try:
         import hmac, hashlib
-        timestamp = str(int(time.time() * 1000))
-        params_str = 'accountType=UNIFIED'
-        recv_win = '5000'
+        timestamp  = str(int(time.time() * 1000))
+        recv_win   = '5000'
+        params_str = 'accountType=UNIFIED'  # must match URL query exactly
+
         raw_sign = timestamp + api_key + recv_win + params_str
-        sign = hmac.new(api_secret.encode('utf-8'), raw_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+        sign = hmac.new(
+            api_secret.encode('utf-8'),
+            raw_sign.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        # Append query string directly to URL — do NOT use params={} here
+        url = f'https://api.bybit.com/v5/account/wallet-balance?{params_str}'
+
         session = requests.Session()
         session.trust_env = False
         resp = session.get(
-            'https://api.bybit.com/v5/account/wallet-balance',
-            params={'accountType': 'UNIFIED'},
+            url,
             headers={
-                'X-BAPI-API-KEY': api_key,
-                'X-BAPI-TIMESTAMP': timestamp,
-                'X-BAPI-RECV-WINDOW': '5000',
-                'X-BAPI-SIGN': sign,
+                'X-BAPI-API-KEY':     api_key,
+                'X-BAPI-TIMESTAMP':   timestamp,
+                'X-BAPI-RECV-WINDOW': recv_win,
+                'X-BAPI-SIGN':        sign,
             },
             timeout=10
         )
@@ -878,10 +892,10 @@ def validate_user_bybit_keys(api_key, api_secret):
                 for coin in acc.get('coin', []):
                     if coin['coin'] == 'USDT':
                         return True, float(coin.get('walletBalance', 0))
+            # Key valid but no USDT coin found (e.g. empty account)
+            return True, 0.0
         return False, f'Bybit error: {data.get("retMsg", "Unknown error")}'
-        usdt = 0.0
-        return True, usdt
-    
+
     except Exception as e:
         err = str(e)
         if 'invalid' in err.lower() or '10003' in err or '10004' in err:
@@ -892,17 +906,37 @@ def validate_user_bybit_keys(api_key, api_secret):
 
 
 def get_user_bybit_balance(api_key, api_secret):
-    """Fetch a user's live USDT balance from their connected Bybit account."""
+    """
+    Fetch a user's live USDT balance from their connected Bybit account.
+
+    FIX: Previous version was missing RECV-WINDOW and SIGN headers entirely,
+    and used params={} instead of embedding the query string in the URL.
+    Both issues cause Bybit to reject the request with a signature error.
+    """
     try:
-        exchange = get_user_exchange(api_key, api_secret, mode='futures')
-        # Direct API call via proxied session for reliability
-        session = getattr(exchange, 'session', None) or requests.Session()
+        import hmac, hashlib
+        timestamp  = str(int(time.time() * 1000))
+        recv_win   = '5000'
+        params_str = 'accountType=UNIFIED'
+
+        raw_sign = timestamp + api_key + recv_win + params_str
+        sign = hmac.new(
+            api_secret.encode('utf-8'),
+            raw_sign.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        url = f'https://api.bybit.com/v5/account/wallet-balance?{params_str}'
+
+        session = requests.Session()
+        session.trust_env = False
         resp = session.get(
-            'https://api.bybit.com/v5/account/wallet-balance',
-            params={'accountType': 'UNIFIED'},
+            url,
             headers={
-                'X-BAPI-API-KEY':   api_key,
-                'X-BAPI-TIMESTAMP': str(int(time.time() * 1000)),
+                'X-BAPI-API-KEY':     api_key,
+                'X-BAPI-TIMESTAMP':   timestamp,
+                'X-BAPI-RECV-WINDOW': recv_win,
+                'X-BAPI-SIGN':        sign,
             },
             timeout=10
         )
@@ -912,9 +946,9 @@ def get_user_bybit_balance(api_key, api_secret):
                 for coin in acc.get('coin', []):
                     if coin['coin'] == 'USDT':
                         return float(coin.get('walletBalance', 0))
-        # CCXT fallback
-        bal = exchange.fetch_balance()
-        return float(bal.get('USDT', {}).get('total', 0) or 0)
+            return 0.0  # Connected but no USDT balance
+        print(f'  [USER BALANCE] Bybit returned: {data.get("retMsg")}' )
+        return None
     except Exception as e:
         print(f'  [USER BALANCE] Failed: {e}')
         return None
