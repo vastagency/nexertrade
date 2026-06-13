@@ -154,6 +154,22 @@ def check_pending_withdrawal(user_id):
 # ============================================
 # SOCKETIO EVENTS
 # ============================================
+def get_display_balance(user):
+    """
+    Return the balance to show on the frontend.
+    Live Bybit balance if connected, else platform balance.
+    """
+    if user.bybit_connected and user.bybit_api_key:
+        try:
+            from bot import get_user_bybit_balance
+            live_bal = get_user_bybit_balance(user.bybit_api_key, user.bybit_api_secret)
+            if live_bal is not None:
+                return round(live_bal, 2)
+        except Exception:
+            pass
+    return round(user.balance, 2)
+
+
 @socketio.on('connect')
 def on_connect():
     if current_user.is_authenticated:
@@ -163,7 +179,7 @@ def on_connect():
         emit('connected', {
             'status':  'connected',
             'user_id': current_user.id,
-            'balance': round(current_user.balance, 2)
+            'balance': get_display_balance(current_user)
         })
 
 @socketio.on('disconnect')
@@ -177,7 +193,7 @@ def on_join_dashboard():
     if current_user.is_authenticated:
         join_room(f'user_{current_user.id}')
         emit('balance_update', {
-            'balance':            round(current_user.balance, 2),
+            'balance':            get_display_balance(current_user),
             'total_profit':       round(current_user.total_profit, 2),
             'total_withdrawn':    round(current_user.total_withdrawn, 2),
             'sessions_completed': current_user.sessions_completed
