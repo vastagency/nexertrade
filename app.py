@@ -1301,6 +1301,40 @@ def api_bot_stop():
         return jsonify({'success': True, 'message': 'Stop signal sent. Position will close after current trade.'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/bot/kill', methods=['POST'])
+@login_required
+def api_bot_kill():
+    """
+    Force-complete a stuck session. Use when position was closed manually
+    on Bybit but NexerTrade is still showing 'Stopping...'.
+    Marks the job as done immediately and emits session_complete.
+    """
+    try:
+        from bot import request_stop, clear_stop
+        request_stop(current_user.id)
+        # Find any running job for this user and force it to done
+        killed = False
+        for job_id, job in list(_jobs.items()):
+            if job.get('user_id') == current_user.id and job.get('status') == 'running':
+                _jobs[job_id]['status'] = 'done'
+                _jobs[job_id]['result'] = {
+                    'strategy': 'momentum', 'trades': [], 'total_trades': 0,
+                    'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
+                    'message': 'Session killed by user. Position closed manually on Bybit.'
+                }
+                killed = True
+        clear_stop(current_user.id)
+        live_bal = get_display_balance(current_user)
+        socketio.emit('session_complete', {
+            'net_pnl': 0, 'wins': 0, 'losses': 0,
+            'win_rate': 0, 'balance': live_bal
+        }, room=f'user_{current_user.id}')
+        return jsonify({'success': True, 'killed': killed,
+                        'message': 'Session force-completed.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 @app.route('/api/bot/signal')
 @login_required
 def api_bot_signal():

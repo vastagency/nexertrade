@@ -1665,26 +1665,39 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
         fee_rate       = 0.001  # 0.1% per trade (taker)
 
-        # --- Monitor loop: no timeout, runs until all TPs/SL hit or stop ---
+        # --- Monitor loop: runs until all TPs/SL hit, user stops, or position gone ---
         while remaining_qty > 0.0001:
             if should_stop(user_id):
-                print(f'  User stop: closing remaining {remaining_qty:.4f} at market')
-                close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
-                if close_result['success']:
-                    cp = close_result['close_price']
-                    pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
-                    pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
-                    pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
-                    real_pnl  += pnl_chunk
-                    print(f'  Stopped out @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f}')
+                print(f'  User stop: attempting to close {remaining_qty:.4f} at market')
+                try:
+                    close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
+                    if close_result.get('success'):
+                        cp = close_result['close_price']
+                        pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
+                        pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
+                        pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
+                        real_pnl  += pnl_chunk
+                        print(f'  Stopped @ ${cp:.4f} | PnL: ${pnl_chunk:.4f}')
+                    else:
+                        # Position may already be closed (user closed on Bybit manually)
+                        cp = _get_price(monitor_sym, 'futures')
+                        pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
+                        pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
+                        pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
+                        real_pnl  += pnl_chunk
+                        print(f'  Position already closed. Est PnL: ${pnl_chunk:.4f}')
+                except Exception as e:
+                    print(f'  Stop close error (position may be gone): {e}')
                 remaining_qty = 0
-                break
+                break  # always break regardless of close result
 
             time.sleep(8)
             try:
                 ticker     = price_exchange.fetch_ticker(monitor_sym)
                 live_price = float(ticker['last'])
-            except Exception:
+            except Exception as e:
+                # If we can't fetch price 3 times in a row, position may be gone
+                print(f'  Price fetch error: {e} -- continuing')
                 continue
 
             # Check SL first
