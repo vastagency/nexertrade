@@ -729,6 +729,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
             'reduceOnly':  False
         }, exchange)
 
+        print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
         if resp.get('retCode') != 0:
             return {'success': False, 'error': f'Order failed: {resp.get("retMsg")}', 'price': current_price}
 
