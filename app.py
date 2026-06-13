@@ -632,7 +632,7 @@ def api_trade_complete():
 # ============================================
 def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force,
                    compound_rate=0.0, symbol=None, user_leverage=None,
-                   user_api_key=None, user_api_secret=None):
+                   user_api_key=None, user_api_secret=None, trade_user_id=None):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
@@ -642,7 +642,8 @@ def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, for
                 strategy=strategy, force=force,
                 symbol=symbol, user_leverage=user_leverage,
                 user_api_key=user_api_key,
-                user_api_secret=user_api_secret
+                user_api_secret=user_api_secret,
+                user_id=trade_user_id
             )
             # Apply compounding if enabled
             if compound_rate > 0 and results.get('net_pnl', 0) != 0:
@@ -772,7 +773,8 @@ def api_bot_execute():
         t = threading.Thread(
             target=_run_trade_job,
             args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force,
-                  compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret),
+                  compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
+                  current_user.id),
             daemon=True
         )
         t.start()
@@ -1287,6 +1289,18 @@ def api_admin_reports():
 # ============================================
 # BOT API ROUTES
 # ============================================
+
+
+@app.route('/api/bot/stop', methods=['POST'])
+@login_required
+def api_bot_stop():
+    """Request the running trading session to stop after current trade completes."""
+    try:
+        from bot import request_stop
+        request_stop(current_user.id)
+        return jsonify({'success': True, 'message': 'Stop signal sent. Position will close after current trade.'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
 @app.route('/api/bot/signal')
 @login_required
 def api_bot_signal():

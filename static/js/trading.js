@@ -372,7 +372,7 @@ async function startSession(force = false) {
 
   document.getElementById('sessionSummary').style.display   = 'none';
   document.getElementById('sessionStatusTitle').textContent = 'Connecting to market data...';
-  document.getElementById('sessionStatusSub').textContent   = `Timeframe: ${selectedTimeframe} min · Amount: $${selectedAmount} · Checking mode...`;
+  document.getElementById('sessionStatusSub').textContent   = `Amount: $${selectedAmount} | 4 TPs + SL | Waiting for signal...`;
   document.getElementById('sessionIcon').className          = 'session-icon';
   document.getElementById('sessionPanel').style.display     = 'block';
 
@@ -627,7 +627,11 @@ async function stopSession(natural = false, botData = null) {
 // ============================================
 document.getElementById('mainActionBtn').addEventListener('click', () => {
   if (isTrading) {
-    stopSession(false);
+    fetch('/api/bot/stop', { method: 'POST', headers: {'Content-Type': 'application/json'} })
+      .catch(() => {});
+    document.getElementById('actionBtnText').textContent = 'STOPPING...';
+    document.getElementById('sessionStatusTitle').textContent = 'Stop requested - closing position...';
+    return;
   } else {
     // Gate: must have Bybit connected
     if (!window.BYBIT_CONNECTED) {

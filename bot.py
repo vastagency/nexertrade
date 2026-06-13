@@ -196,48 +196,29 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
               '1h': '60', '4h': '240', '1d': 'D'}
     interval = tf_map.get(timeframe, '5')
 
-    # Method 1: Direct Bybit public kline API via proxy session
-    try:
-        url = 'https://api.bybit.com/v5/market/kline'
-        params = {
-            'symbol':   bybit_symbol,
-            'interval': interval,
-            'limit':    limit,
-            'category': 'linear'  # futures market data — less restricted
-        }
-        # Use the proxied session from bybit_futures if available
-        session = getattr(bybit_futures, 'session', None) or requests.Session()
-        resp = session.get(url, params=params, timeout=10)
-        data = resp.json()
-        if data.get('retCode') == 0:
-            candles = data['result']['list']
-            if len(candles) >= 10:
-                # Bybit returns newest first — reverse for chronological order
-                candles = list(reversed(candles))
-                return {
-                    'open':   [float(c[1]) for c in candles],
-                    'high':   [float(c[2]) for c in candles],
-                    'low':    [float(c[3]) for c in candles],
-                    'close':  [float(c[4]) for c in candles],
-                    'volume': [float(c[5]) for c in candles],
-                }
-    except Exception as e:
-        print(f'Bybit OHLCV failed for {symbol}/{timeframe}: {e}')
-
-    # Method 2: CCXT bybit_futures fallback
-    try:
-        futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
-        ohlcv = bybit_futures.fetch_ohlcv(futures_symbol, timeframe=timeframe, limit=limit)
-        if ohlcv and len(ohlcv) >= 10:
-            return {
-                'open':   [float(c[1]) for c in ohlcv],
-                'high':   [float(c[2]) for c in ohlcv],
-                'low':    [float(c[3]) for c in ohlcv],
-                'close':  [float(c[4]) for c in ohlcv],
-                'volume': [float(c[5]) for c in ohlcv],
-            }
-    except Exception as e:
-        print(f'Bybit futures OHLCV also failed for {symbol}/{timeframe}: {e}')
+    # Method 1+2: Direct Bybit public kline API (spot then linear), fresh session
+    for category in (b'spot', b'linear'):
+        try:
+            url = 'https://api.bybit.com/v5/market/kline'
+            params = {'symbol': bybit_symbol, 'interval': interval,
+                      'limit': limit, 'category': category.decode()}
+            sess = requests.Session()
+            sess.trust_env = False
+            resp = sess.get(url, params=params, timeout=10)
+            data = resp.json()
+            if data.get('retCode') == 0:
+                candles = data['result']['list']
+                if len(candles) >= 10:
+                    candles = list(reversed(candles))
+                    return {
+                        'open':   [float(c[1]) for c in candles],
+                        'high':   [float(c[2]) for c in candles],
+                        'low':    [float(c[3]) for c in candles],
+                        'close':  [float(c[4]) for c in candles],
+                        'volume': [float(c[5]) for c in candles],
+                    }
+        except Exception as e:
+            print(f'Bybit OHLCV ({category}) failed for {symbol}/{timeframe}: {e}')
 
     # Method 3: Binance fallback via proxied session
     try:
@@ -1297,10 +1278,46 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
     return results
 
 
-def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=False, symbol=None):
+# ============================================
+# 8. STOP SIGNAL — allows frontend to abort a running session
+# ============================================
+_stop_signals = {}  # user_id -> True when stop requested
+
+def request_stop(user_id):
+    """Frontend calls this to request the bot stops after current trade."""
+    _stop_signals[str(user_id)] = True
+
+def clear_stop(user_id):
+    _stop_signals.pop(str(user_id), None)
+
+def should_stop(user_id):
+    return _stop_signals.get(str(user_id), False)
+
+
+# ============================================
+# 9. MULTI-TP/SL MOMENTUM ENGINE
+# No timeframe — trade runs until all TPs hit, SL hit, or user stops.
+# 4 Take Profit levels (partial closes), 1 Stop Loss.
+# R:R minimum 2:1 on TP1. Each TP closes 25% of position.
+# ============================================
+def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
+                              force=False, symbol=None, user_id=None):
     """
-    Momentum scalper — multi-timeframe signal with trend-aware direction.
-    No simulation. If Bybit is unreachable, session stops and reports the error.
+    Multi-TP/SL momentum engine. No timeframe expiry.
+    Trade runs until: all TPs hit, SL hit, or user requests stop.
+
+    TP levels (% from entry, BUY direction example):
+      TP1 = +1.0%  (25% of position closed)
+      TP2 = +2.0%  (25% closed)
+      TP3 = +3.5%  (25% closed)
+      TP4 = +5.5%  (25% closed — only if trade stays open this long)
+    SL  = -1.0%  (100% closed immediately)
+
+    For SELL (short futures): levels are mirrored.
+    For SPOT (can only BUY): always BUY direction.
+
+    On Bybit spot: TPs are monitored and closed by market sell.
+    On Bybit futures: TPs use reduceOnly market orders.
     """
     results = {
         'strategy':     'momentum',
@@ -1314,13 +1331,12 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
         'trade_mode':   'spot'
     }
 
+    clear_stop(user_id)
+
     balance_info = get_bybit_balance()
     if not balance_info['success']:
-        return {
-            **results,
-            'real_trading': False,
-            'error': 'Bybit unreachable — momentum session aborted.'
-        }
+        return {**results, 'real_trading': False,
+                'error': 'Bybit unreachable — session aborted.'}
 
     available_usdt        = balance_info['USDT']
     trade_mode            = balance_info.get('trade_mode', 'spot')
@@ -1328,175 +1344,201 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
     results['trade_mode'] = trade_mode
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: {trade_mode.upper()} | Leverage: {leverage}x')
 
-    amount     = min(amount, available_usdt * 0.99)
-    trade_usdt = amount / num_trades
-    session_loss_limit = amount * MAX_SESSION_LOSS_PCT
+    amount     = min(amount, available_usdt * 0.95)
+    trade_usdt = amount / max(num_trades, 1)
+
+    # TP/SL percentages (price % move needed, not leveraged)
+    TP_LEVELS_PCT = [0.010, 0.020, 0.035, 0.055]   # TP1=1% TP2=2% TP3=3.5% TP4=5.5%
+    SL_PCT        = 0.010                             # SL = -1%
+    TP_CLOSE_FRAC = 0.25                              # each TP closes 25% of position
+
+    # Scale TPs down for high leverage (same dollar target, smaller % move)
+    if leverage > 1:
+        TP_LEVELS_PCT = [max(p / leverage, 0.003) for p in TP_LEVELS_PCT]
+        SL_PCT        = max(SL_PCT / leverage, 0.002)
 
     for i in range(num_trades):
-        # Risk guard
-        if results['net_pnl'] < -session_loss_limit:
-            print(f'  ⚠ Session loss limit hit — stopping after {i} trades')
+        if should_stop(user_id):
+            print(f'  Stop requested by user — halting after {i} trades')
             break
 
+        # --- Signal selection ---
         best_signal = None
-        # If user selected a specific pair, use it directly — skip auto-scan
         if symbol:
             best_signal = generate_signal(symbol)
-            if best_signal:
-                print(f'  Using user-selected pair: {symbol} | Conf: {best_signal["confidence"]}%')
-            else:
-                print(f'  Signal fetch failed for {symbol} — falling back to auto-scan')
-
         if best_signal is None:
             best_signal = select_best_pair(CRYPTO_PAIRS)
-
         if best_signal is None:
             if force:
                 best_signal = generate_signal(DEFAULT_PAIR)
-                if best_signal is None:
-                    print(f'  No data for {DEFAULT_PAIR} — skipping')
-                    continue
-                print(f'  Forced trade on {DEFAULT_PAIR}: {best_signal["confidence"]:.0f}%')
-            else:
-                print(f'  No strong signal — skipping trade {i+1}')
+            if best_signal is None:
+                print(f'  No signal available — skipping trade {i+1}')
                 continue
 
-        symbol  = best_signal['symbol']
-        signal  = best_signal
+        sig    = best_signal
+        sym    = sig['symbol']
+        symbol = sym  # lock in for subsequent trades in session
 
-        # Direction: futures uses signal direction + EMA override
-        # Spot always BUYs (can't short on spot)
+        # Direction logic
         if trade_mode == 'futures':
             bull_emas = sum([
-                signal.get('ema_trend')   == 'bullish',
-                signal.get('ema_trend15') == 'bullish',
-                signal.get('ema_trend1h') == 'bullish'
+                sig.get('ema_trend')   == 'bullish',
+                sig.get('ema_trend15') == 'bullish',
+                sig.get('ema_trend1h') == 'bullish',
             ])
-            bear_emas = 3 - bull_emas
-            if signal['direction'] == 'BUY' and bear_emas >= 2:
-                trade_direction = 'SELL'
-                print(f'  ⚡ EMA override: SELL (bearish trend {bear_emas}/3)')
-            else:
-                trade_direction = signal['direction']
+            bear_emas    = 3 - bull_emas
+            trade_dir    = sig['direction']
+            market_cond  = sig.get('market_condition', 'ranging')
+            rsi_now      = sig.get('rsi', 50)
 
-            # RANGING MARKET RSI PROTECTION:
-            # In a ranging (sideways) market, never short when RSI is already low.
-            # Low RSI in a ranging market = price at the bottom of the range = bounce likely.
-            # Shorting here fights the natural direction and fees eat the flat trade.
-            # Rule: ranging + RSI < 50 → force BUY or skip. Never short into a low RSI range.
-            market_cond = signal.get('market_condition', 'ranging')
-            rsi_now     = signal.get('rsi', 50)
-            if market_cond == 'ranging' and rsi_now < 50 and trade_direction == 'SELL':
-                print(f'  🛡 Ranging market protection: RSI {rsi_now:.1f} < 50 in ranging market '
-                      f'— switching SELL → BUY to follow natural bounce direction')
-                trade_direction = 'BUY'
-
-            # Similarly: ranging + RSI > 60 → don't blindly buy at the top of range
-            # price is near range resistance, buying here risks an immediate pullback
-            if market_cond == 'ranging' and rsi_now > 60 and trade_direction == 'BUY':
-                print(f'  🛡 Ranging market protection: RSI {rsi_now:.1f} > 60 in ranging market '
-                      f'— switching BUY → SELL to follow natural resistance rejection')
-                trade_direction = 'SELL'
-
+            if trade_dir == 'BUY' and bear_emas >= 2:
+                trade_dir = 'SELL'
+                print(f'  EMA override: SELL (bearish {bear_emas}/3 EMAs)')
+            if market_cond == 'ranging' and rsi_now < 50 and trade_dir == 'SELL':
+                trade_dir = 'BUY'
+            if market_cond == 'ranging' and rsi_now > 60 and trade_dir == 'BUY':
+                trade_dir = 'SELL'
         else:
-            trade_direction = 'BUY'
+            trade_dir = 'BUY'
 
-        print(f'Trade {i+1}/{num_trades}: {symbol} {trade_direction} | '
-              f'RSI:{signal["rsi"]} | Conf:{signal["confidence"]}% | '
-              f'{trade_mode.upper()} | Market:{signal.get("market_condition","?")}')
+        print(f'\nTrade {i+1}/{num_trades}: {sym} {trade_dir} | '
+              f'RSI:{sig["rsi"]} | Conf:{sig["confidence"]:.0f}% | '
+              f'{trade_mode.upper()} | Market:{sig.get("market_condition","?")}')
 
-        entry_price = signal['current_price']
-        entry_order = None
-        close_order = None
-        real_pnl    = 0.0
-        won         = False
+        # --- Entry ---
+        entry_order = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode)
+        if not entry_order['success']:
+            print(f'  Entry failed: {entry_order.get("error")}')
+            results['trades'].append({
+                'index': i+1, 'symbol': sym, 'direction': trade_dir,
+                'strategy': 'momentum', 'confidence': sig['confidence'],
+                'rsi': sig['rsi'], 'profit': 0, 'won': False,
+                'price': 0, 'real_order': False,
+                'ema_trend': sig.get('ema_trend',''), 'macd_trend': sig.get('macd_trend',''),
+                'volume_trend': sig.get('volume_trend','neutral'),
+                'candle_pattern': sig.get('candle_pattern','none'),
+                'market_condition': sig.get('market_condition','unknown'),
+            })
+            continue
 
-        try:
-            entry_order = execute_real_trade(symbol, trade_direction, trade_usdt, trade_mode)
+        entry_price   = entry_order['price']
+        quantity      = entry_order['quantity']
+        monitor_sym   = entry_order['symbol']
+        remaining_qty = quantity
+        real_pnl      = 0.0
+        won           = False
 
-            if entry_order['success']:
-                entry_price = entry_order['price']
-                quantity    = entry_order['quantity']
-                print(f'  ✓ Entry: {quantity} {symbol.split("/")[0]} @ ${entry_price:.4f}')
+        # Calculate TP and SL price levels
+        if trade_dir == 'BUY':
+            tp_prices = [entry_price * (1 + p) for p in TP_LEVELS_PCT]
+            sl_price  = entry_price * (1 - SL_PCT)
+        else:
+            tp_prices = [entry_price * (1 - p) for p in TP_LEVELS_PCT]
+            sl_price  = entry_price * (1 + SL_PCT)
 
-                # Leverage-aware TP/SL:
-                # Higher leverage means a smaller % move = same dollar impact.
-                # At 2x: need 3% move. At 10x: need 0.6% move for equivalent dollar profit.
-                # SL scales the same way — always 2:1 R:R regardless of leverage.
-                tp_pct = MOMENTUM_TP_PCT / leverage
-                sl_pct = MOMENTUM_SL_PCT / leverage
-                # Enforce minimum meaningful targets to avoid crumb trades
-                tp_pct = max(tp_pct, 0.003)   # never less than 0.3%
-                sl_pct = max(sl_pct, 0.0015)  # never less than 0.15%
+        print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
+        print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
+              f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
 
-                if trade_direction == 'BUY':
-                    take_profit = entry_price * (1 + tp_pct)
-                    stop_loss   = entry_price * (1 - sl_pct)
-                else:
-                    take_profit = entry_price * (1 - tp_pct)
-                    stop_loss   = entry_price * (1 + sl_pct)
+        tps_hit       = 0
+        price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
+        fee_rate       = 0.001  # 0.1% per trade (taker)
 
-                max_wait      = timeframe_minutes * 60
-                elapsed       = 0
-                price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
-                monitor_symbol = entry_order['symbol']
+        # --- Monitor loop: no timeout, runs until all TPs/SL hit or stop ---
+        while remaining_qty > 0.0001:
+            if should_stop(user_id):
+                print(f'  User stop: closing remaining {remaining_qty:.4f} at market')
+                close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
+                if close_result['success']:
+                    cp = close_result['close_price']
+                    pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
+                    pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
+                    pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
+                    real_pnl  += pnl_chunk
+                    print(f'  Stopped out @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f}')
+                remaining_qty = 0
+                break
 
-                print(f'  Monitoring: TP=${take_profit:.4f} SL=${stop_loss:.4f}')
+            time.sleep(8)
+            try:
+                ticker     = price_exchange.fetch_ticker(monitor_sym)
+                live_price = float(ticker['last'])
+            except Exception:
+                continue
 
-                while elapsed < max_wait:
-                    time.sleep(10)
-                    elapsed += 10
-                    try:
-                        ticker     = price_exchange.fetch_ticker(monitor_symbol)
-                        live_price = float(ticker['last'])
-                        print(f'  Price: ${live_price:.4f} | {elapsed}s/{max_wait}s')
-                        if trade_direction == 'BUY'  and live_price >= take_profit:
-                            print(f'  ✓ TP hit @ ${live_price:.4f}'); break
-                        if trade_direction == 'BUY'  and live_price <= stop_loss:
-                            print(f'  ✗ SL hit @ ${live_price:.4f}');  break
-                        if trade_direction == 'SELL' and live_price <= take_profit:
-                            print(f'  ✓ TP hit (short) @ ${live_price:.4f}'); break
-                        if trade_direction == 'SELL' and live_price >= stop_loss:
-                            print(f'  ✗ SL hit (short) @ ${live_price:.4f}');  break
-                    except Exception:
-                        pass
+            # Check SL first
+            sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
+            if sl_hit:
+                print(f'  SL hit @ ${live_price:.4f} — closing full position')
+                close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
+                if close_result['success']:
+                    cp = close_result['close_price']
+                    pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
+                    pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
+                    pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
+                    real_pnl  += pnl_chunk
+                    print(f'  SL closed @ ${cp:.4f} | PnL: ${pnl_chunk:.4f}')
+                remaining_qty = 0
+                won = False
+                break
 
-                close_order = close_trade(monitor_symbol, trade_direction, quantity, trade_mode)
+            # Check TPs in order
+            tp_triggered = False
+            for tp_idx in range(tps_hit, len(tp_prices)):
+                tp_hit = (live_price >= tp_prices[tp_idx]) if trade_dir == 'BUY' \
+                         else (live_price <= tp_prices[tp_idx])
+                if tp_hit:
+                    close_qty = round(quantity * TP_CLOSE_FRAC, 6)
+                    close_qty = min(close_qty, remaining_qty)
+                    if close_qty < 0.0001:
+                        tps_hit += 1
+                        continue
+                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} — closing {close_qty:.4f}')
+                    cr = close_trade(monitor_sym, trade_dir, close_qty, trade_mode)
+                    if cr['success']:
+                        cp        = cr['close_price']
+                        pc        = (cp - entry_price) if trade_dir == 'BUY' \
+                                    else (entry_price - cp)
+                        pnl_chunk = (pc / entry_price) * (close_qty * entry_price) * leverage
+                        pnl_chunk -= close_qty * entry_price * fee_rate * 2
+                        real_pnl  += pnl_chunk
+                        remaining_qty -= close_qty
+                        tps_hit        = tp_idx + 1
+                        won            = True
+                        print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | '
+                              f'Remaining: {remaining_qty:.4f}')
+                        tp_triggered = True
+                        break  # re-check from top with new remaining_qty
 
-                if close_order['success']:
-                    close_price  = close_order['close_price']
-                    price_change = (close_price - entry_price) if trade_direction == 'BUY' \
-                                   else (entry_price - close_price)
-                    bybit_fee    = trade_usdt * 0.002
-                    real_pnl     = round(
-                        (price_change / entry_price) * trade_usdt * leverage - bybit_fee, 4
-                    )
-                    won = real_pnl > 0
-                    print(f'  ✓ Closed @ ${close_price:.4f} | PnL: ${real_pnl:.4f}')
-                else:
-                    print(f'  ⚠ Close failed: {close_order.get("error")}')
-            else:
-                print(f'  ⚠ Entry failed: {entry_order.get("error")}')
+            if not tp_triggered:
+                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
+                      f'Remaining: {remaining_qty:.4f}')
 
-        except Exception as e:
-            print(f'  ⚠ Trade error: {e}')
+            # All TPs hit — position fully closed
+            if tps_hit >= len(tp_prices) or remaining_qty <= 0.0001:
+                print(f'  All TPs hit. Total PnL: ${real_pnl:.4f}')
+                remaining_qty = 0
+                won = True
+                break
 
+        real_pnl = round(real_pnl, 4)
         results['trades'].append({
             'index':          i + 1,
-            'symbol':         symbol,
-            'direction':      trade_direction,
+            'symbol':         sym,
+            'direction':      trade_dir,
             'strategy':       'momentum',
-            'confidence':     signal['confidence'],
-            'rsi':            signal['rsi'],
-            'ema_trend':      signal['ema_trend'],
-            'macd_trend':     signal['macd_trend'],
-            'volume_trend':   signal.get('volume_trend', 'neutral'),
-            'candle_pattern': signal.get('candle_pattern', 'none'),
-            'market_condition': signal.get('market_condition', 'unknown'),
+            'confidence':     sig['confidence'],
+            'rsi':            sig['rsi'],
+            'ema_trend':      sig.get('ema_trend', ''),
+            'macd_trend':     sig.get('macd_trend', ''),
+            'volume_trend':   sig.get('volume_trend', 'neutral'),
+            'candle_pattern': sig.get('candle_pattern', 'none'),
+            'market_condition': sig.get('market_condition', 'unknown'),
             'profit':         real_pnl,
             'won':            won,
             'price':          entry_price,
-            'real_order':     entry_order is not None and entry_order.get('success', False)
+            'tps_hit':        tps_hit,
+            'real_order':     True,
         })
         results['total_trades'] += 1
         results['net_pnl']      += real_pnl
@@ -1505,14 +1547,15 @@ def execute_momentum_session(amount, timeframe_minutes, num_trades=1, force=Fals
         else:
             results['losses'] += 1
 
-        time.sleep(0.5)
+        time.sleep(1)
 
     results['net_pnl']  = round(results['net_pnl'], 4)
     results['win_rate'] = round(
         (results['wins'] / results['total_trades']) * 100, 1
     ) if results['total_trades'] > 0 else 0
-
     return results
+
+
 
 
 # ============================================
@@ -1811,7 +1854,8 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
         return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
     else:
         print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
-        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades)
+        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
+                                            user_id=user_id)
         results['strategy'] = 'auto_momentum'
         return results
 
@@ -1821,7 +1865,8 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
 # ============================================
 def execute_session(amount, timeframe_minutes, num_trades=1,
                     strategy='auto', force=False, symbol=None,
-                    user_leverage=None, user_api_key=None, user_api_secret=None):
+                    user_leverage=None, user_api_key=None, user_api_secret=None,
+                    user_id=None):
     """
     Main entry point for all trading sessions.
 
@@ -1889,7 +1934,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
 
     elif strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
-                                          num_trades=num_trades, force=force, symbol=symbol)
+                                          num_trades=num_trades, force=force, symbol=symbol,
+                                          user_id=user_id)
 
     elif strategy == 'ema_macd':
         result = execute_ema_macd_session(amount, timeframe_minutes,
