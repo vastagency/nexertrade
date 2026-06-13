@@ -864,11 +864,24 @@ def api_bot_result(job_id):
 @app.route('/api/user/data')
 @login_required
 def api_user_data():
+    # Use live Bybit balance if connected, fall back to platform balance
+    display_balance = round(current_user.balance, 2)
+    if current_user.bybit_connected and current_user.bybit_api_key:
+        try:
+            from bot import get_user_bybit_balance
+            live_bal = get_user_bybit_balance(
+                current_user.bybit_api_key,
+                current_user.bybit_api_secret
+            )
+            if live_bal is not None:
+                display_balance = round(live_bal, 2)
+        except Exception:
+            pass
     return jsonify({
         'id':                 current_user.id,
         'name':               current_user.name,
         'email':              current_user.email,
-        'balance':            round(current_user.balance, 2),
+        'balance':            display_balance,
         'total_profit':       round(current_user.total_profit, 2),
         'total_withdrawn':    round(current_user.total_withdrawn, 2),
         'sessions_completed': current_user.sessions_completed,

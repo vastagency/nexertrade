@@ -487,11 +487,13 @@ async function startSession(force = false) {
     if (!botData) {
       document.getElementById('sessionStatusTitle').textContent = 'Session timed out — refreshing balance...';
       try {
-        const dataRes  = await fetch('/api/user/data');
+        const dataRes  = await fetch('/api/user-balance');
         const userData = await dataRes.json();
-        availableBalance = userData.balance;
-        const balEl = document.getElementById('availableBalance');
-        if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+        if (userData.success) {
+          availableBalance = userData.balance;
+          const balEl = document.getElementById('availableBalance');
+          if (balEl) balEl.textContent = '$' + availableBalance.toFixed(2);
+        }
       } catch (_) {}
       stopSession(false);
       return;

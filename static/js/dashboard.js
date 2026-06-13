@@ -14,14 +14,13 @@ const userData = window.USER_DATA || {
   sessions_completed: 0
 };
 
-// Fetch live Bybit balance if connected
-fetch('/api/user-balance')
+// Fetch live Bybit balance — must complete before window.load animation runs
+// Store a promise so the animation waits for the real balance
+window._balanceReady = fetch('/api/user-balance')
   .then(r => r.json())
   .then(data => {
     if (data.success) {
-      userData.balance = data.balance;
-      const balEl = document.getElementById('statBalance');
-      if (balEl) balEl.textContent = '$' + data.balance.toFixed(2);
+      userData.balance = data.balance;  // update before animation reads it
       const subEl = document.getElementById('statBalanceSub');
       if (subEl) subEl.textContent = data.source === 'bybit_live' ? 'Live Bybit Balance' : 'Available to trade';
     }
@@ -202,12 +201,15 @@ function animateValue(elementId, start, end, duration, prefix = '', suffix = '',
 }
 
 window.addEventListener('load', () => {
-  setTimeout(() => {
-    animateValue('statBalance',   0, userData.balance,           1200, '$', '', 2);
-    animateValue('statProfit',    0, userData.total_profit,      1400, '$', '', 2);
-    animateValue('statWithdrawn', 0, userData.total_withdrawn,   1100, '$', '', 2);
-    animateValue('statSessions',  0, userData.sessions_completed, 1000, '', '', 0);
-  }, 200);
+  // Wait for live balance fetch before animating, so we animate to the correct value
+  Promise.resolve(window._balanceReady).then(() => {
+    setTimeout(() => {
+      animateValue('statBalance',   0, userData.balance,           1200, '$', '', 2);
+      animateValue('statProfit',    0, userData.total_profit,      1400, '$', '', 2);
+      animateValue('statWithdrawn', 0, userData.total_withdrawn,   1100, '$', '', 2);
+      animateValue('statSessions',  0, userData.sessions_completed, 1000, '', '', 0);
+    }, 200);
+  });
 });
 
 
