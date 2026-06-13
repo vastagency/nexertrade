@@ -97,6 +97,34 @@ socket.on('session_complete', (data) => {
 });
 
 
+// ── Live trade entry notification ────────────────────────────────
+socket.on('trade_entry', (data) => {
+  const dir   = data.direction === 'BUY' ? 'LONG' : 'SHORT';
+  const color = data.direction === 'BUY' ? '#00D48B' : '#F5C518';
+  showToast(
+    `Trade ${data.trade_num}/${data.total}: ${data.symbol} ${dir} @ $${data.price.toFixed(4)} | ${data.leverage}x | TP1: $${data.tp1.toFixed(4)}`,
+    'info'
+  );
+  // Update trade counter if on trading page
+  const el = document.getElementById('tradeCount');
+  if (el) el.textContent = data.trade_num + '/' + data.total;
+  const titleEl = document.getElementById('sessionStatusTitle');
+  if (titleEl) titleEl.textContent = `${dir} ${data.symbol} @ $${data.price.toFixed(4)} — monitoring TPs...`;
+});
+
+
+// ── TP hit notification ───────────────────────────────────────────
+socket.on('tp_hit', (data) => {
+  const sign = data.pnl >= 0 ? '+' : '';
+  showToast(
+    `TP${data.tp_num} hit @ $${data.price.toFixed(4)} | PnL: ${sign}$${data.pnl.toFixed(4)} | Remaining: ${data.remaining.toFixed(4)}`,
+    'success'
+  );
+  const titleEl = document.getElementById('sessionStatusTitle');
+  if (titleEl) titleEl.textContent = `TP${data.tp_num} hit! +$${data.pnl.toFixed(4)} — waiting for next TP...`;
+});
+
+
 // ============================================
 // 4. DEPOSIT NOTIFICATIONS
 // ============================================

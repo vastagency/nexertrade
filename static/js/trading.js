@@ -273,18 +273,17 @@ function formatTime(seconds) {
   return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 
-function startTimer(durationSeconds) {
-  totalDuration = durationSeconds;
-  timeRemaining = durationSeconds;
-
-  document.getElementById('sessionTimer').textContent = formatTime(timeRemaining);
+function startTimer() {
+  let elapsed = 0;
+  document.getElementById('sessionTimer').textContent = '0:00';
   document.getElementById('sessionProgressBar').style.width = '0%';
-
   timerInterval = setInterval(() => {
-    timeRemaining = Math.max(0, timeRemaining - 1);
-    document.getElementById('sessionTimer').textContent = formatTime(timeRemaining);
-    const pct = ((totalDuration - timeRemaining) / totalDuration) * 100;
-    document.getElementById('sessionProgressBar').style.width = pct + '%';
+    elapsed++;
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    document.getElementById('sessionTimer').textContent = m + ':' + String(s).padStart(2,'0');
+    const pulse = 50 + 50 * Math.sin(elapsed * 0.1);
+    document.getElementById('sessionProgressBar').style.width = pulse + '%';
     tickLiveChart();
   }, 1000);
 }
@@ -397,9 +396,7 @@ async function startSession(force = false) {
       initLiveChart(100);
     }
 
-  // Start timer immediately
-  const sessionSecs = selectedTimeframe * 60;
-  startTimer(sessionSecs);
+  startTimer();
   document.getElementById('sessionStatusTitle').textContent = 'Connected — executing live trade...';
 
   // ASYNC JOB PATTERN — fixes Railway's 30s HTTP timeout
@@ -447,41 +444,25 @@ async function startSession(force = false) {
     document.getElementById('sessionStatusTitle').textContent = 'Bot is running — scanning markets...';
 
     let botData = null;
-    const pollInterval = 5000; // check every 5 seconds
-    const maxPolls     = Math.ceil((sessionSecs + 60) * 1000 / pollInterval);
-
-    for (let poll = 0; poll < maxPolls; poll++) {
-      if (!isTrading) break;
+    const pollInterval = 5000;
+    while (isTrading) {
       await new Promise(r => setTimeout(r, pollInterval));
       if (!isTrading) break;
-
       try {
         const pollRes  = await fetch(`/api/bot/result/${jobId}`);
         const pollData = await pollRes.json();
-
         if (pollData.status === 'running') {
-          // Update status message with elapsed time feel
-          const elapsed = (poll + 1) * 5;
-          document.getElementById('sessionStatusTitle').textContent =
-            `Bot trading live... (${elapsed}s elapsed)`;
+          document.getElementById('sessionStatusTitle').textContent = 'Trading live... waiting for TP/SL';
           continue;
         }
-
         if (pollData.status === 'error') {
-          document.getElementById('sessionStatusTitle').textContent = '⚠ ' + (pollData.message || 'Trade error');
+          document.getElementById('sessionStatusTitle').textContent = '! ' + (pollData.message || 'Trade error');
           document.getElementById('sessionStatusTitle').style.color = '#ef4444';
           stopSession(false);
           return;
         }
-
-        if (pollData.status === 'done') {
-          botData = pollData;
-          break;
-        }
-      } catch (pollErr) {
-        console.warn('Poll attempt failed (retrying):', pollErr);
-        // Don't stop — just retry next poll
-      }
+        if (pollData.status === 'done') { botData = pollData; break; }
+      } catch (pollErr) { console.warn('Poll failed, retrying:', pollErr); }
     }
 
     if (!botData) {
@@ -512,7 +493,7 @@ async function startSession(force = false) {
         ? `⚡ FUTURES ${selectedLeverage}x`
         : '📦 SPOT';
       document.getElementById('sessionStatusSub').textContent =
-        `Amount: $${selectedAmount} | ${modeLabel} | 4 TPs + SL`;
+        `Timeframe: ${selectedTimeframe} min · $${selectedAmount} · ${modeLabel}`;
     }
 
     // Animate trades in the UI

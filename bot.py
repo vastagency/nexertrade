@@ -117,56 +117,41 @@ MAX_SESSION_LOSS_PCT = 0.05  # stop trading if session loses >5% of starting amo
 # ============================================
 def get_bybit_balance():
     """
-    Check both spot and futures (UTA) wallets.
-    Prefers futures when balance >= $5, falls back to spot.
-    Returns error dict if Bybit unreachable — never falls back to simulation.
+    Fetch USDT balance from Bybit Unified account via direct REST.
+    Always returns futures mode - spot trading removed.
     """
-    spot_usdt    = 0.0
-    futures_usdt = 0.0
-
+    import hmac, hashlib
+    api_key    = BYBIT_API_KEY
+    api_secret = BYBIT_API_SECRET
+    timestamp  = str(int(time.time() * 1000))
+    recv_win   = '5000'
+    params_str = 'accountType=UNIFIED'
+    raw_sign   = timestamp + api_key + recv_win + params_str
+    sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
     try:
-        spot_bal  = bybit_spot.fetch_balance()
-        spot_usdt = float(
-            spot_bal.get('USDT', {}).get('total') or
-            spot_bal.get('USDT', {}).get('free') or 0
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get(
+            f'https://api.bybit.com/v5/account/wallet-balance?{params_str}',
+            headers={'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+                     'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign},
+            timeout=10
         )
+        data = resp.json()
+        if data.get('retCode') == 0:
+            for acc in data['result']['list']:
+                for coin in acc.get('coin', []):
+                    if coin['coin'] == 'USDT':
+                        usdt = float(coin.get('walletBalance') or 0)
+                        print(f'Bybit USDT (UNIFIED): ${usdt:.2f} | Mode: FUTURES')
+                        if usdt > 0:
+                            return {'USDT': usdt, 'total': usdt, 'success': True,
+                                    'trade_mode': 'futures', 'futures_usdt': usdt}
+        print(f'Balance API retCode: {data.get("retCode")} {data.get("retMsg")}')
     except Exception as e:
-        print(f'Spot balance error: {e}')
-
-    try:
-        fut_bal      = bybit_futures.fetch_balance()
-        futures_usdt = float(
-            fut_bal.get('USDT', {}).get('total') or
-            fut_bal.get('USDT', {}).get('free') or 0
-        )
-    except Exception as e:
-        print(f'Futures balance error: {e}')
-
-    if futures_usdt >= 5.0:
-        trade_mode = 'futures'
-        usdt       = futures_usdt
-        print(f'Bybit USDT balance (futures/UTA): ${futures_usdt:.2f}')
-    else:
-        trade_mode = 'spot'
-        usdt       = spot_usdt
-        print(f'Bybit USDT balance (spot): ${spot_usdt:.2f}')
-
-    if usdt == 0 and spot_usdt == 0 and futures_usdt == 0:
-        return {
-            'USDT': 0, 'total': 0, 'success': False,
-            'error': 'Could not fetch balance from Bybit. Check API keys and connection.',
-            'trade_mode': 'spot'
-        }
-
-    return {
-        'USDT':         usdt,
-        'spot_usdt':    spot_usdt,
-        'futures_usdt': futures_usdt,
-        'total':        usdt,
-        'trade_mode':   trade_mode,
-        'success':      True
-    }
-
+        print(f'Balance fetch error: {e}')
+    return {'USDT': 0, 'total': 0, 'success': False,
+            'error': 'Cannot fetch Bybit balance.', 'trade_mode': 'futures'}
 
 def get_bybit_positions():
     try:
@@ -634,217 +619,95 @@ def select_best_pair(pairs):
 # ============================================
 # 6. REAL ORDER EXECUTION
 # ============================================
-def _bybit_signed_request(method, endpoint, params, exchange_obj):
+def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
     """
-    Make a signed Bybit V5 REST request directly, bypassing CCXT pre-flights.
-    Avoids CCXT calling /v5/asset/coin/query-info which 403s on Railway.
+    Place a futures market order on Bybit via direct REST API.
+    No CCXT order placement — avoids 403 pre-flight on /v5/asset/coin/query-info.
+    Always futures (linear perpetual). Spot removed.
     """
-    import hmac, hashlib, json as _json
-    api_key    = exchange_obj.apiKey
-    api_secret = exchange_obj.secret
-    timestamp  = str(int(time.time() * 1000))
-    recv_win   = '5000'
+    exchange   = bybit_futures
+    bybit_sym  = symbol.replace('/', '').replace(':USDT', '')
+    if not bybit_sym.endswith('USDT'):
+        bybit_sym = bybit_sym + 'USDT'
 
-    if method == 'GET':
-        query    = '&'.join(f'{k}={v}' for k, v in sorted(params.items()))
-        raw_sign = timestamp + api_key + recv_win + query
-        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
-        url  = f'https://api.bybit.com{endpoint}?{query}'
-        sess = requests.Session()
-        sess.trust_env = False
-        resp = sess.get(url, headers={
-            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
-            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign
-        }, timeout=15)
-    else:
-        body     = _json.dumps(params)
-        raw_sign = timestamp + api_key + recv_win + body
-        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
-        url  = f'https://api.bybit.com{endpoint}'
-        sess = requests.Session()
-        sess.trust_env = False
-        resp = sess.post(url, headers={
-            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
-            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign,
-            'Content-Type': 'application/json'
-        }, data=body, timeout=15)
-    return resp.json()
-
-
-def _get_price(symbol, trade_mode):
-    """Get current price via direct Bybit public API (no auth, no pre-flight)."""
-    bybit_sym = symbol.replace('/', '').replace(':USDT', '')
-    category  = 'linear' if trade_mode == 'futures' else 'spot'
     try:
-        sess = requests.Session()
-        sess.trust_env = False
-        resp = sess.get('https://api.bybit.com/v5/market/tickers',
-                        params={'category': category, 'symbol': bybit_sym}, timeout=10)
-        data = resp.json()
-        if data.get('retCode') == 0 and data['result']['list']:
-            return float(data['result']['list'][0]['lastPrice'])
-    except Exception:
-        pass
-    # fallback to CCXT ticker (just fetch_ticker, no order placement, no pre-flight)
-    exch = bybit_futures if trade_mode == 'futures' else bybit_spot
-    t = exch.fetch_ticker(symbol)
-    return float(t['last'])
+        current_price = _get_price(symbol, 'futures')
+        quantity      = round(usdt_amount * LEVERAGE / current_price, 6)
 
-
-def execute_real_trade(symbol, direction, usdt_amount, trade_mode='spot'):
-    """
-    Place a real market order on Bybit via direct REST API.
-    Bypasses CCXT to avoid the /v5/asset/coin/query-info 403 pre-flight error.
-    """
-    try:
-        bybit_sym = symbol.replace('/', '').replace(':USDT', '')
-
-        if trade_mode == 'futures':
-            exchange      = bybit_futures
-            bybit_sym_fut = bybit_sym if bybit_sym.endswith('USDT') else bybit_sym + 'USDT'
-
-            # Set leverage via direct API
-            try:
-                lev_resp = _bybit_signed_request('POST', '/v5/position/set-leverage', {
-                    'category': 'linear', 'symbol': bybit_sym_fut,
-                    'buyLeverage': str(LEVERAGE), 'sellLeverage': str(LEVERAGE)
-                }, exchange)
-                if lev_resp.get('retCode') not in (0, 110043):
-                    print(f'  [LEVERAGE] Warning: {lev_resp.get("retMsg")}')
-                else:
-                    print(f'  [LEVERAGE] Set to {LEVERAGE}x on {bybit_sym_fut}')
-            except Exception as e:
-                print(f'  [LEVERAGE] Could not set: {e}')
-
-            current_price = _get_price(symbol, 'futures')
-            quantity      = round(usdt_amount * LEVERAGE / current_price, 6)
-            side          = 'Buy' if direction == 'BUY' else 'Sell'
-
-            resp = _bybit_signed_request('POST', '/v5/order/create', {
-                'category':    'linear',
-                'symbol':      bybit_sym_fut,
-                'side':        side,
-                'orderType':   'Market',
-                'qty':         str(quantity),
-                'timeInForce': 'IOC',
-                'reduceOnly':  False
+        # Set leverage via direct API
+        try:
+            lev_resp = _bybit_signed_request('POST', '/v5/position/set-leverage', {
+                'category': 'linear', 'symbol': bybit_sym,
+                'buyLeverage': str(LEVERAGE), 'sellLeverage': str(LEVERAGE)
             }, exchange)
+            code = lev_resp.get('retCode')
+            if code not in (0, 110043):
+                print(f'  [LEVERAGE] Warning: {lev_resp.get("retMsg")}')
+            else:
+                print(f'  [LEVERAGE] {LEVERAGE}x confirmed on {bybit_sym}')
+        except Exception as e:
+            print(f'  [LEVERAGE] Could not set: {e}')
 
-            if resp.get('retCode') != 0:
-                return {'success': False, 'error': resp.get('retMsg', 'Order failed'), 'price': current_price}
+        # Place market order
+        side = 'Buy' if direction == 'BUY' else 'Sell'
+        resp = _bybit_signed_request('POST', '/v5/order/create', {
+            'category':    'linear',
+            'symbol':      bybit_sym,
+            'side':        side,
+            'orderType':   'Market',
+            'qty':         str(quantity),
+            'timeInForce': 'IOC',
+            'reduceOnly':  False
+        }, exchange)
 
-            print(f'  [FUTURES {LEVERAGE}x] {direction} {quantity} contracts @ ${current_price:.4f}')
-            return {
-                'success':    True,
-                'order_id':   resp['result'].get('orderId', 'unknown'),
-                'symbol':     bybit_sym_fut,
-                'direction':  direction,
-                'quantity':   float(quantity),
-                'price':      current_price,
-                'cost':       usdt_amount,
-                'trade_mode': 'futures',
-                'leverage':   LEVERAGE,
-                'status':     'filled'
-            }
+        if resp.get('retCode') != 0:
+            return {'success': False, 'error': f'Order failed: {resp.get("retMsg")}', 'price': current_price}
 
-        else:
-            exchange      = bybit_spot
-            current_price = _get_price(symbol, 'spot')
-            quantity      = round(usdt_amount / current_price, 6)
-            side          = 'Buy' if direction == 'BUY' else 'Sell'
-
-            resp = _bybit_signed_request('POST', '/v5/order/create', {
-                'category':    'spot',
-                'symbol':      bybit_sym,
-                'side':        side,
-                'orderType':   'Market',
-                'qty':         str(quantity),
-                'timeInForce': 'IOC'
-            }, exchange)
-
-            if resp.get('retCode') != 0:
-                return {'success': False, 'error': resp.get('retMsg', 'Order failed'), 'price': current_price}
-
-            print(f'  [SPOT] {direction} {quantity} {symbol.split("/")[0]} @ ${current_price:.4f}')
-            return {
-                'success':    True,
-                'order_id':   resp['result'].get('orderId', 'unknown'),
-                'symbol':     symbol,
-                'direction':  direction,
-                'quantity':   float(quantity),
-                'price':      current_price,
-                'cost':       usdt_amount,
-                'trade_mode': 'spot',
-                'leverage':   1,
-                'status':     'filled'
-            }
-
+        order_id = resp.get('result', {}).get('orderId', 'unknown')
+        print(f'  [FUTURES {LEVERAGE}x] {direction} {quantity} {bybit_sym} @ ${current_price:.4f} | OrderID: {order_id}')
+        return {
+            'success':    True,
+            'order_id':   order_id,
+            'symbol':     bybit_sym,
+            'direction':  direction,
+            'quantity':   float(quantity),
+            'price':      current_price,
+            'cost':       usdt_amount,
+            'trade_mode': 'futures',
+            'leverage':   LEVERAGE,
+            'status':     'filled'
+        }
     except Exception as e:
         return {'success': False, 'error': str(e), 'price': 0}
 
 
-def close_trade(symbol, direction, quantity, trade_mode='spot'):
-    """Close an open position via direct Bybit REST API."""
+def close_trade(symbol, direction, quantity, trade_mode='futures'):
+    """Close a futures position via direct Bybit REST API."""
+    exchange   = bybit_futures
+    bybit_sym  = symbol.replace('/', '').replace(':USDT', '')
+    if not bybit_sym.endswith('USDT'):
+        bybit_sym = bybit_sym + 'USDT'
+
     try:
-        bybit_sym   = symbol.replace('/', '').replace(':USDT', '')
-        close_price = _get_price(symbol, trade_mode)
+        close_price = _get_price(symbol, 'futures')
+        close_side  = 'Sell' if direction == 'BUY' else 'Buy'
 
-        if trade_mode == 'futures':
-            exchange      = bybit_futures
-            bybit_sym_fut = bybit_sym if bybit_sym.endswith('USDT') else bybit_sym + 'USDT'
-            close_side    = 'Sell' if direction == 'BUY' else 'Buy'
+        resp = _bybit_signed_request('POST', '/v5/order/create', {
+            'category':    'linear',
+            'symbol':      bybit_sym,
+            'side':        close_side,
+            'orderType':   'Market',
+            'qty':         str(round(quantity, 6)),
+            'timeInForce': 'IOC',
+            'reduceOnly':  True
+        }, exchange)
 
-            resp = _bybit_signed_request('POST', '/v5/order/create', {
-                'category':    'linear',
-                'symbol':      bybit_sym_fut,
-                'side':        close_side,
-                'orderType':   'Market',
-                'qty':         str(round(quantity, 6)),
-                'timeInForce': 'IOC',
-                'reduceOnly':  True
-            }, exchange)
+        if resp.get('retCode') != 0:
+            return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
 
-            if resp.get('retCode') != 0:
-                return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
-
-            print(f'  [FUTURES] Closed {direction} {quantity} @ ${close_price:.4f}')
-            return {'success': True, 'order_id': resp['result'].get('orderId'), 'close_price': close_price}
-
-        else:
-            exchange      = bybit_spot
-            base_currency = symbol.split('/')[0]
-
-            # Get actual available balance via direct API
-            bal_resp  = _bybit_signed_request('GET', '/v5/account/wallet-balance',
-                                               {'accountType': 'UNIFIED'}, exchange)
-            actual_qty = 0.0
-            if bal_resp.get('retCode') == 0:
-                for acc in bal_resp['result']['list']:
-                    for coin in acc.get('coin', []):
-                        if coin['coin'] == base_currency:
-                            actual_qty = float(
-                                coin.get('availableToWithdraw') or
-                                coin.get('walletBalance') or 0
-                            )
-
-            sell_qty = round(min(actual_qty, quantity) * 0.999, 6)
-            if sell_qty <= 0:
-                return {'success': False, 'error': f'No {base_currency} to sell', 'close_price': close_price}
-
-            resp = _bybit_signed_request('POST', '/v5/order/create', {
-                'category':    'spot',
-                'symbol':      bybit_sym,
-                'side':        'Sell',
-                'orderType':   'Market',
-                'qty':         str(sell_qty),
-                'timeInForce': 'IOC'
-            }, exchange)
-
-            if resp.get('retCode') != 0:
-                return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
-
-            print(f'  [SPOT] SELL {sell_qty} {base_currency} @ ${close_price:.4f}')
-            return {'success': True, 'order_id': resp['result'].get('orderId'), 'close_price': close_price}
+        order_id = resp.get('result', {}).get('orderId', 'unknown')
+        print(f'  [FUTURES] Closed {direction} {quantity} {bybit_sym} @ ${close_price:.4f} | OrderID: {order_id}')
+        return {'success': True, 'order_id': order_id, 'close_price': close_price}
 
     except Exception as e:
         return {'success': False, 'error': str(e), 'close_price': 0}
@@ -1021,8 +884,7 @@ def get_user_bybit_balance(api_key, api_secret):
         return None
 
 
-def execute_grid_session(amount, timeframe_minutes, symbol=None,
-                         user_balance=None, user_trade_mode='spot'):
+def execute_grid_session(amount, timeframe_minutes, symbol=None):
     """
     Grid/DCA strategy — RSI-aware version.
 
@@ -1047,17 +909,13 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None,
         'trade_mode':   'spot'
     }
 
-    if user_balance is not None and user_balance > 0:
-        available_usdt = user_balance
-        trade_mode     = user_trade_mode
-    else:
-        balance_info = get_bybit_balance()
-        if not balance_info.get('success'):
-            return {**results, 'real_trading': False,
-                    'error': 'Bybit unreachable - grid session aborted.'}
-        available_usdt = balance_info['USDT']
-        trade_mode     = balance_info.get('trade_mode', 'spot')
+    balance_info = get_bybit_balance()
+    if not balance_info['success']:
+        return {**results, 'real_trading': False,
+                'error': 'Bybit unreachable — grid session aborted.'}
 
+    available_usdt        = balance_info['USDT']
+    trade_mode            = balance_info.get('trade_mode', 'spot')
     leverage              = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     exchange              = bybit_futures if trade_mode == 'futures' else bybit_spot
@@ -1219,14 +1077,10 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None,
                 placed_count += 1
             time.sleep(0.3)
         except Exception as e:
-            import traceback
-            print(f'  Level {idx+1} order FAILED: {e}')
-            print(traceback.format_exc())
+            print(f'  Level {idx+1} order failed: {e}')
 
     if placed_count == 0:
-        err_msg = f'Grid: no orders placed for {symbol}. Check API permissions (Trade must be enabled on Bybit key).'
-        print(f'  ERROR: {err_msg}')
-        results['message'] = err_msg
+        results['message'] = f'Balance ${amount:.2f} too small for {symbol} minimum order sizes.'
         return results
 
     # Monitor: check limit order fills and TP completions
@@ -1396,8 +1250,7 @@ def should_stop(user_id):
 # R:R minimum 2:1 on TP1. Each TP closes 25% of position.
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
-                              force=False, symbol=None, user_id=None,
-                              user_balance=None, user_trade_mode='spot'):
+                              force=False, symbol=None, user_id=None):
     """
     Multi-TP/SL momentum engine. No timeframe expiry.
     Trade runs until: all TPs hit, SL hit, or user requests stop.
@@ -1429,21 +1282,16 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
 
     clear_stop(user_id)
 
-    # Use injected user balance (user account mode) or fall back to admin account
-    if user_balance is not None and user_balance > 0:
-        available_usdt = user_balance
-        trade_mode     = user_trade_mode
-    else:
-        balance_info = get_bybit_balance()
-        if not balance_info.get('success'):
-            return {**results, 'real_trading': False,
-                    'error': 'Bybit unreachable - session aborted.'}
-        available_usdt = balance_info['USDT']
-        trade_mode     = balance_info.get('trade_mode', 'spot')
+    balance_info = get_bybit_balance()
+    if not balance_info['success']:
+        return {**results, 'real_trading': False,
+                'error': 'Bybit unreachable — session aborted.'}
 
-    leverage              = LEVERAGE if trade_mode == 'futures' else 1
-    results['trade_mode'] = trade_mode
-    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: {trade_mode.upper()} | Leverage: {leverage}x')
+    available_usdt        = balance_info['USDT']
+    trade_mode            = 'futures'  # always futures
+    leverage              = LEVERAGE
+    results['trade_mode'] = 'futures'
+    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {leverage}x')
 
     amount     = min(amount, available_usdt * 0.95)
     trade_usdt = amount / max(num_trades, 1)
@@ -1540,6 +1388,22 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
         print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
               f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
+        # Emit live trade entry to frontend via socket
+        try:
+            from app import socketio
+            socketio.emit('trade_entry', {
+                'trade_num':   i + 1,
+                'total':       num_trades,
+                'symbol':      sym,
+                'direction':   trade_dir,
+                'price':       entry_price,
+                'tp1':         tp_prices[0],
+                'sl':          sl_price,
+                'confidence':  sig['confidence'],
+                'leverage':    leverage
+            }, room=f'user_{user_id}')
+        except Exception:
+            pass
 
         tps_hit       = 0
         price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
@@ -1608,6 +1472,17 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         won            = True
                         print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | '
                               f'Remaining: {remaining_qty:.4f}')
+                        # Emit TP hit to frontend
+                        try:
+                            from app import socketio
+                            socketio.emit('tp_hit', {
+                                'tp_num':    tp_idx + 1,
+                                'price':     cp,
+                                'pnl':       round(pnl_chunk, 4),
+                                'remaining': round(remaining_qty, 4)
+                            }, room=f'user_{user_id}')
+                        except Exception:
+                            pass
                         tp_triggered = True
                         break  # re-check from top with new remaining_qty
 
@@ -1826,22 +1701,16 @@ def generate_ema_macd_signal(symbol):
         return None
 
 
-def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None,
-                             user_balance=None, user_trade_mode='spot'):
+def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None):
     results = {'strategy': 'ema_macd', 'trades': [], 'total_trades': 0,
                'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
                'real_trading': True, 'trade_mode': 'spot'}
-    if user_balance is not None and user_balance > 0:
-        available_usdt = user_balance
-        trade_mode     = user_trade_mode
-    else:
-        balance_info = get_bybit_balance()
-        if not balance_info.get('success'):
-            return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
-        available_usdt = balance_info['USDT']
-        trade_mode     = balance_info.get('trade_mode', 'spot')
-
-    leverage              = LEVERAGE if trade_mode == 'futures' else 1
+    balance_info = get_bybit_balance()
+    if not balance_info['success']:
+        return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
+    available_usdt = balance_info['USDT']
+    trade_mode = balance_info.get('trade_mode', 'spot')
+    leverage   = LEVERAGE if trade_mode == 'futures' else 1
     results['trade_mode'] = trade_mode
     amount = min(amount, available_usdt * 0.99)
     trade_usdt = amount / num_trades
@@ -1933,8 +1802,7 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 # ============================================
 # 9. AUTO-BEST SESSION
 # ============================================
-def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None,
-                               user_balance=None, user_trade_mode='spot', user_id=None):
+def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None):
     """
     Auto-best: scans all pairs, reads market conditions, picks the
     strategy that fits best right now.
@@ -1947,13 +1815,9 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     best_signal = select_best_pair(CRYPTO_PAIRS)
 
     if best_signal is None:
-        print('  No strong signal - running Momentum on XRP/USDT with force=True')
-        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
-                                            user_id=user_id, force=True, symbol='XRP/USDT',
-                                            user_balance=user_balance,
-                                            user_trade_mode=user_trade_mode)
-        results['strategy'] = 'auto_momentum'
-        return results
+        # No signal cleared minimum confidence — use grid on best pair by volume
+        print('  No strong momentum signal — defaulting to Grid/DCA on XRP/USDT')
+        return execute_grid_session(amount, timeframe_minutes, symbol='XRP/USDT')
 
     market_condition = best_signal.get('market_condition', 'ranging')
     symbol           = best_signal['symbol']
@@ -1961,13 +1825,15 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     print(f'  Auto-best decision: {symbol} | Condition: {market_condition} | '
           f'Signal: {best_signal["direction"]} {best_signal["confidence"]:.0f}%')
 
-    print(f'  Market: {market_condition} - using Momentum Scalper (4 TPs + SL)')
-    results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
-                                        user_id=user_id,
-                                        user_balance=user_balance,
-                                        user_trade_mode=user_trade_mode)
-    results['strategy'] = 'auto_momentum'
-    return results
+    if market_condition == 'ranging':
+        print('  → Ranging market detected — launching Grid/DCA')
+        return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
+    else:
+        print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
+        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
+                                            user_id=user_id)
+        results['strategy'] = 'auto_momentum'
+        return results
 
 
 # ============================================
@@ -2008,9 +1874,6 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _original_futures = _bot_module.bybit_futures
         _bot_module.bybit_spot    = user_spot
         _bot_module.bybit_futures = user_futures
-        # Fetch live user balance now so all sub-sessions can use it
-        _user_live_balance = get_user_bybit_balance(user_api_key, user_api_secret)
-        _user_trade_mode   = 'spot'  # default; UTA futures handled inside session
     else:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
@@ -2018,10 +1881,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: ADMIN ACCOUNT (legacy)')
         print(f'{"="*50}')
-        _original_spot        = None
-        _original_futures     = None
-        _user_live_balance    = None
-        _user_trade_mode      = 'spot'
+        _original_spot    = None
+        _original_futures = None
 
     # Apply user-selected leverage override globally for this session
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
@@ -2045,37 +1906,25 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
 
     if strategy == 'grid' or strategy == 'grid_dca':
-        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol,
-                                      user_balance=_user_live_balance,
-                                      user_trade_mode=_user_trade_mode)
+        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol)
 
     elif strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
                                           num_trades=num_trades, force=force, symbol=symbol,
-                                          user_id=user_id,
-                                          user_balance=_user_live_balance,
-                                          user_trade_mode=_user_trade_mode)
+                                          user_id=user_id)
 
     elif strategy == 'ema_macd':
         result = execute_ema_macd_session(amount, timeframe_minutes,
-                                          num_trades=num_trades, symbol=symbol,
-                                          user_balance=_user_live_balance,
-                                          user_trade_mode=_user_trade_mode)
+                                          num_trades=num_trades, symbol=symbol)
 
     elif strategy == 'auto' or strategy == 'auto_best':
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol,
-                                           user_balance=_user_live_balance,
-                                           user_trade_mode=_user_trade_mode,
-                                           user_id=user_id)
+                                           num_trades=num_trades, symbol=symbol)
 
     else:
         print(f'Unknown strategy "{strategy}" — defaulting to auto')
         result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol,
-                                           user_balance=_user_live_balance,
-                                           user_trade_mode=_user_trade_mode,
-                                           user_id=user_id)
+                                           num_trades=num_trades, symbol=symbol)
 
     # Restore admin exchange after user session completes
     if use_user_account and _original_futures is not None:

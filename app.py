@@ -825,7 +825,7 @@ def api_bot_result(job_id):
             'success':      True,
             'no_trades':    True,
             'message':      msg,
-            'new_balance':  get_display_balance(current_user),
+            'new_balance':  round(current_user.balance, 2),
             'total_profit': round(current_user.total_profit, 2),
             'trades':       []
         }), 200
@@ -849,9 +849,8 @@ def api_bot_result(job_id):
     current_user.sessions_completed += 1
     db.session.commit()
 
-    _live_bal = get_display_balance(current_user)
     socketio.emit('balance_update', {
-        'balance':            _live_bal,
+        'balance':            round(current_user.balance, 2),
         'total_profit':       round(current_user.total_profit, 2),
         'total_withdrawn':    round(current_user.total_withdrawn, 2),
         'sessions_completed': current_user.sessions_completed
@@ -862,7 +861,7 @@ def api_bot_result(job_id):
         'wins':     results['wins'],
         'losses':   results['losses'],
         'win_rate': results['win_rate'],
-        'balance':  _live_bal
+        'balance':  round(current_user.balance, 2)
     }, room=f'user_{current_user.id}')
 
     socketio.emit('session_update', {
@@ -874,7 +873,7 @@ def api_bot_result(job_id):
     return jsonify({
         'status':       'done',
         'success':      True,
-        'new_balance':  _live_bal,
+        'new_balance':  round(current_user.balance, 2),
         'total_profit': round(current_user.total_profit, 2),
         'trades':       results.get('trades', []),
         'net_pnl':      results['net_pnl'],
@@ -1073,29 +1072,16 @@ def api_admin_top_users():
 @admin_required
 def api_admin_users():
     users = User.query.filter_by(is_admin=False).all()
-    result = []
-    for u in users:
-        # Fetch live Bybit balance for connected users
-        live_balance = None
-        if u.bybit_connected and u.bybit_api_key:
-            try:
-                from bot import get_user_bybit_balance
-                live_balance = get_user_bybit_balance(u.bybit_api_key, u.bybit_api_secret)
-            except Exception:
-                pass
-        result.append({
-            'id':              u.id,
-            'name':            u.name,
-            'email':           u.email,
-            'balance':         round(live_balance, 2) if live_balance is not None else None,
-            'platform_pnl':    round(u.total_profit, 2),
-            'total_profit':    round(u.total_profit, 2),
-            'bybit_connected': u.bybit_connected,
-            'sessions':        u.sessions_completed,
-            'status':          'active' if u.is_active else 'inactive',
-            'joined':          u.joined_at.strftime('%Y-%m-%d')
-        })
-    return jsonify(result)
+    return jsonify([{
+        'id':           u.id,
+        'name':         u.name,
+        'email':        u.email,
+        'balance':      round(u.balance, 2),
+        'total_profit': round(u.total_profit, 2),
+        'sessions':     u.sessions_completed,
+        'status':       'active' if u.is_active else 'inactive',
+        'joined':       u.joined_at.strftime('%Y-%m-%d')
+    } for u in users])
 
 @app.route('/api/admin/users/<int:user_id>/toggle', methods=['POST'])
 @login_required
