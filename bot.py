@@ -857,11 +857,8 @@ def validate_user_bybit_keys(api_key, api_secret):
         ts = str(int(time.time() * 1000))
         params_str = 'accountType=UNIFIED'
         sign = hmac.new(api_secret.encode(), f'{ts}5000{params_str}'.encode(), hashlib.sha256).hexdigest()
-        proxy_url = _get_random_proxy_url()
         session = requests.Session()
-        if proxy_url:
-            session.proxies = {'http': proxy_url, 'https': proxy_url}
-            session.trust_env = False
+        session.trust_env = False
         resp = session.get(
             'https://api.bybit.com/v5/account/wallet-balance',
             params={'accountType': 'UNIFIED'},
