@@ -634,136 +634,222 @@ def select_best_pair(pairs):
 # ============================================
 # 6. REAL ORDER EXECUTION
 # ============================================
+def _bybit_signed_request(method, endpoint, params, exchange_obj):
+    """
+    Make a signed Bybit V5 REST request directly, bypassing CCXT pre-flights.
+    Avoids CCXT calling /v5/asset/coin/query-info which 403s on Railway.
+    """
+    import hmac, hashlib, json as _json
+    api_key    = exchange_obj.apiKey
+    api_secret = exchange_obj.secret
+    timestamp  = str(int(time.time() * 1000))
+    recv_win   = '5000'
+
+    if method == 'GET':
+        query    = '&'.join(f'{k}={v}' for k, v in sorted(params.items()))
+        raw_sign = timestamp + api_key + recv_win + query
+        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
+        url  = f'https://api.bybit.com{endpoint}?{query}'
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get(url, headers={
+            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign
+        }, timeout=15)
+    else:
+        body     = _json.dumps(params)
+        raw_sign = timestamp + api_key + recv_win + body
+        sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
+        url  = f'https://api.bybit.com{endpoint}'
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.post(url, headers={
+            'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign,
+            'Content-Type': 'application/json'
+        }, data=body, timeout=15)
+    return resp.json()
+
+
+def _get_price(symbol, trade_mode):
+    """Get current price via direct Bybit public API (no auth, no pre-flight)."""
+    bybit_sym = symbol.replace('/', '').replace(':USDT', '')
+    category  = 'linear' if trade_mode == 'futures' else 'spot'
+    try:
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get('https://api.bybit.com/v5/market/tickers',
+                        params={'category': category, 'symbol': bybit_sym}, timeout=10)
+        data = resp.json()
+        if data.get('retCode') == 0 and data['result']['list']:
+            return float(data['result']['list'][0]['lastPrice'])
+    except Exception:
+        pass
+    # fallback to CCXT ticker (just fetch_ticker, no order placement, no pre-flight)
+    exch = bybit_futures if trade_mode == 'futures' else bybit_spot
+    t = exch.fetch_ticker(symbol)
+    return float(t['last'])
+
+
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='spot'):
     """
-    Place a real market order on Bybit.
-    Spot: BUY only (long positions via spot holding).
-    Futures: BUY (long) or SELL (short) — profits in both directions.
+    Place a real market order on Bybit via direct REST API.
+    Bypasses CCXT to avoid the /v5/asset/coin/query-info 403 pre-flight error.
     """
     try:
+        bybit_sym = symbol.replace('/', '').replace(':USDT', '')
+
         if trade_mode == 'futures':
-            futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
-            exchange       = bybit_futures
+            exchange      = bybit_futures
+            bybit_sym_fut = bybit_sym if bybit_sym.endswith('USDT') else bybit_sym + 'USDT'
 
-            # CRITICAL: Set leverage on Bybit BEFORE calculating quantity or placing order
-            # Without this Bybit uses account default (usually 2x) regardless of what we pass
+            # Set leverage via direct API
             try:
-                exchange.set_leverage(LEVERAGE, futures_symbol)
-                print(f'  [LEVERAGE] Set to {LEVERAGE}x on Bybit for {futures_symbol}')
-            except Exception as lev_err:
-                err_str = str(lev_err)
-                if '110043' in err_str or 'leverage not modified' in err_str.lower():
-                    # Bybit 110043 = leverage already set to this value — not an error
-                    print(f'  [LEVERAGE] Already at {LEVERAGE}x on Bybit — confirmed ✓')
+                lev_resp = _bybit_signed_request('POST', '/v5/position/set-leverage', {
+                    'category': 'linear', 'symbol': bybit_sym_fut,
+                    'buyLeverage': str(LEVERAGE), 'sellLeverage': str(LEVERAGE)
+                }, exchange)
+                if lev_resp.get('retCode') not in (0, 110043):
+                    print(f'  [LEVERAGE] Warning: {lev_resp.get("retMsg")}')
                 else:
-                    print(f'  [LEVERAGE] Could not set {LEVERAGE}x: {lev_err}')
+                    print(f'  [LEVERAGE] Set to {LEVERAGE}x on {bybit_sym_fut}')
+            except Exception as e:
+                print(f'  [LEVERAGE] Could not set: {e}')
 
-            ticker         = exchange.fetch_ticker(futures_symbol)
-            current_price  = float(ticker['last'])
-            quantity       = usdt_amount * LEVERAGE / current_price
+            current_price = _get_price(symbol, 'futures')
+            quantity      = round(usdt_amount * LEVERAGE / current_price, 6)
+            side          = 'Buy' if direction == 'BUY' else 'Sell'
 
-            markets = exchange.load_markets()
-            if futures_symbol in markets:
-                min_qty  = markets[futures_symbol].get('limits', {}).get('amount', {}).get('min', 0)
-                if quantity < min_qty:
-                    return {'success': False, 'error': f'Order too small. Min qty: {min_qty}', 'price': current_price}
-                quantity = exchange.amount_to_precision(futures_symbol, quantity)
+            resp = _bybit_signed_request('POST', '/v5/order/create', {
+                'category':    'linear',
+                'symbol':      bybit_sym_fut,
+                'side':        side,
+                'orderType':   'Market',
+                'qty':         str(quantity),
+                'timeInForce': 'IOC',
+                'reduceOnly':  False
+            }, exchange)
 
-            side  = 'buy' if direction == 'BUY' else 'sell'
-            order = exchange.create_market_order(
-                futures_symbol, side, float(quantity),
-                params={'reduceOnly': False}
-            )
+            if resp.get('retCode') != 0:
+                return {'success': False, 'error': resp.get('retMsg', 'Order failed'), 'price': current_price}
+
             print(f'  [FUTURES {LEVERAGE}x] {direction} {quantity} contracts @ ${current_price:.4f}')
             return {
                 'success':    True,
-                'order_id':   order.get('id', 'unknown'),
-                'symbol':     futures_symbol,
+                'order_id':   resp['result'].get('orderId', 'unknown'),
+                'symbol':     bybit_sym_fut,
                 'direction':  direction,
                 'quantity':   float(quantity),
                 'price':      current_price,
                 'cost':       usdt_amount,
                 'trade_mode': 'futures',
                 'leverage':   LEVERAGE,
-                'status':     order.get('status', 'filled')
+                'status':     'filled'
             }
 
         else:
             exchange      = bybit_spot
-            ticker        = exchange.fetch_ticker(symbol)
-            current_price = float(ticker['last'])
-            quantity      = usdt_amount / current_price
+            current_price = _get_price(symbol, 'spot')
+            quantity      = round(usdt_amount / current_price, 6)
+            side          = 'Buy' if direction == 'BUY' else 'Sell'
 
-            markets = exchange.load_markets()
-            if symbol in markets:
-                min_qty = markets[symbol].get('limits', {}).get('amount', {}).get('min', 0)
-                if quantity < min_qty:
-                    return {'success': False, 'error': f'Order too small. Min qty: {min_qty}', 'price': current_price}
-                quantity = exchange.amount_to_precision(symbol, quantity)
+            resp = _bybit_signed_request('POST', '/v5/order/create', {
+                'category':    'spot',
+                'symbol':      bybit_sym,
+                'side':        side,
+                'orderType':   'Market',
+                'qty':         str(quantity),
+                'timeInForce': 'IOC'
+            }, exchange)
 
-            order = exchange.create_market_order(symbol, 'buy', float(quantity))
-            print(f'  [SPOT] BUY {quantity} {symbol.split("/")[0]} @ ${current_price:.4f}')
+            if resp.get('retCode') != 0:
+                return {'success': False, 'error': resp.get('retMsg', 'Order failed'), 'price': current_price}
+
+            print(f'  [SPOT] {direction} {quantity} {symbol.split("/")[0]} @ ${current_price:.4f}')
             return {
                 'success':    True,
-                'order_id':   order.get('id', 'unknown'),
+                'order_id':   resp['result'].get('orderId', 'unknown'),
                 'symbol':     symbol,
-                'direction':  'BUY',
+                'direction':  direction,
                 'quantity':   float(quantity),
                 'price':      current_price,
                 'cost':       usdt_amount,
                 'trade_mode': 'spot',
                 'leverage':   1,
-                'status':     order.get('status', 'filled')
+                'status':     'filled'
             }
 
-    except ccxt.InsufficientFunds as e:
-        return {'success': False, 'error': f'Insufficient funds: {str(e)}', 'price': 0}
-    except ccxt.InvalidOrder as e:
-        return {'success': False, 'error': f'Invalid order: {str(e)}', 'price': 0}
-    except ccxt.NetworkError as e:
-        return {'success': False, 'error': f'Network error: {str(e)}', 'price': 0}
     except Exception as e:
         return {'success': False, 'error': str(e), 'price': 0}
 
 
 def close_trade(symbol, direction, quantity, trade_mode='spot'):
-    """Close an open position cleanly."""
+    """Close an open position via direct Bybit REST API."""
     try:
+        bybit_sym   = symbol.replace('/', '').replace(':USDT', '')
+        close_price = _get_price(symbol, trade_mode)
+
         if trade_mode == 'futures':
-            futures_symbol = symbol if ':USDT' in symbol else symbol.replace('/USDT', '/USDT:USDT')
-            exchange       = bybit_futures
-            close_side     = 'sell' if direction == 'BUY' else 'buy'
-            order = exchange.create_market_order(
-                futures_symbol, close_side, float(quantity),
-                params={'reduceOnly': True}
-            )
-            ticker      = exchange.fetch_ticker(futures_symbol)
-            close_price = float(ticker['last'])
-            print(f'  [FUTURES] Closed {direction} @ ${close_price:.4f}')
-            return {'success': True, 'order_id': order.get('id', 'unknown'), 'close_price': close_price}
+            exchange      = bybit_futures
+            bybit_sym_fut = bybit_sym if bybit_sym.endswith('USDT') else bybit_sym + 'USDT'
+            close_side    = 'Sell' if direction == 'BUY' else 'Buy'
+
+            resp = _bybit_signed_request('POST', '/v5/order/create', {
+                'category':    'linear',
+                'symbol':      bybit_sym_fut,
+                'side':        close_side,
+                'orderType':   'Market',
+                'qty':         str(round(quantity, 6)),
+                'timeInForce': 'IOC',
+                'reduceOnly':  True
+            }, exchange)
+
+            if resp.get('retCode') != 0:
+                return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
+
+            print(f'  [FUTURES] Closed {direction} {quantity} @ ${close_price:.4f}')
+            return {'success': True, 'order_id': resp['result'].get('orderId'), 'close_price': close_price}
 
         else:
             exchange      = bybit_spot
             base_currency = symbol.split('/')[0]
-            actual_qty    = 0
-            for attempt in range(5):
-                balance = exchange.fetch_balance()
-                bal     = balance.get(base_currency, {})
-                actual_qty = float(bal.get('free') or bal.get('total') or 0)
-                print(f'  Settlement check {attempt+1}/5: {base_currency} = {actual_qty}')
-                if actual_qty > 0.1:
-                    break
-                time.sleep(10)
-            if actual_qty < 0.1:
-                return {'success': False, 'error': f'No {base_currency} balance after 5 checks', 'close_price': 0}
-            qty   = exchange.amount_to_precision(symbol, actual_qty * 0.999)
-            order = exchange.create_market_order(symbol, 'sell', float(qty))
-            ticker      = exchange.fetch_ticker(symbol)
-            close_price = float(ticker['last'])
-            return {'success': True, 'order_id': order.get('id', 'unknown'), 'close_price': close_price}
+
+            # Get actual available balance via direct API
+            bal_resp  = _bybit_signed_request('GET', '/v5/account/wallet-balance',
+                                               {'accountType': 'UNIFIED'}, exchange)
+            actual_qty = 0.0
+            if bal_resp.get('retCode') == 0:
+                for acc in bal_resp['result']['list']:
+                    for coin in acc.get('coin', []):
+                        if coin['coin'] == base_currency:
+                            actual_qty = float(
+                                coin.get('availableToWithdraw') or
+                                coin.get('walletBalance') or 0
+                            )
+
+            sell_qty = round(min(actual_qty, quantity) * 0.999, 6)
+            if sell_qty <= 0:
+                return {'success': False, 'error': f'No {base_currency} to sell', 'close_price': close_price}
+
+            resp = _bybit_signed_request('POST', '/v5/order/create', {
+                'category':    'spot',
+                'symbol':      bybit_sym,
+                'side':        'Sell',
+                'orderType':   'Market',
+                'qty':         str(sell_qty),
+                'timeInForce': 'IOC'
+            }, exchange)
+
+            if resp.get('retCode') != 0:
+                return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
+
+            print(f'  [SPOT] SELL {sell_qty} {base_currency} @ ${close_price:.4f}')
+            return {'success': True, 'order_id': resp['result'].get('orderId'), 'close_price': close_price}
 
     except Exception as e:
         return {'success': False, 'error': str(e), 'close_price': 0}
+
+
 
 
 # ============================================
