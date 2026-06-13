@@ -1352,13 +1352,33 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
 
     clear_stop(user_id)
 
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False,
-                'error': 'Bybit unreachable — session aborted.'}
+    # Use injected user balance -- never call get_bybit_balance() which uses admin keys
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+        print(f'  [BALANCE] Using live user balance: ${available_usdt:.2f}')
+    else:
+        # Fallback: fetch via swapped bybit_futures (user keys after swap)
+        try:
+            import bot as _bm
+            bal_resp = _bybit_signed_request('GET', '/v5/account/wallet-balance',
+                                              {'accountType': 'UNIFIED'}, _bm.bybit_futures)
+            available_usdt = 0.0
+            if bal_resp.get('retCode') == 0:
+                for acc in bal_resp['result']['list']:
+                    for coin in acc.get('coin', []):
+                        if coin['coin'] == 'USDT':
+                            available_usdt = float(coin.get('walletBalance') or 0)
+            print(f'  [BALANCE] Fetched from exchange: ${available_usdt:.2f}')
+        except Exception as e:
+            print(f'  [BALANCE] Fetch failed: {e}')
+            return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
 
-    available_usdt        = balance_info['USDT']
-    trade_mode            = 'futures'  # always futures
+    if available_usdt <= 0:
+        print('  [BALANCE] Zero USDT -- transfer USDT to Unified account on Bybit')
+        return {**results, 'real_trading': False,
+                'error': 'No USDT in Unified account. Transfer funds on Bybit first.'}
+
+    trade_mode            = 'futures'
     leverage              = LEVERAGE
     results['trade_mode'] = 'futures'
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {leverage}x')
@@ -1932,7 +1952,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
     if use_user_account:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
-              f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
+              f'Amount: ${amount} | Trades: {num_trades} | 4 TPs + SL'
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: USER ACCOUNT (trading on user\'s own Bybit)')
         print(f'{"="*50}')
@@ -1958,7 +1978,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
     else:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
-              f'Amount: ${amount} | Trades: {num_trades} | Time: {timeframe_minutes}min'
+              f'Amount: ${amount} | Trades: {num_trades} | 4 TPs + SL'
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: ADMIN ACCOUNT (legacy)')
         print(f'{"="*50}')
