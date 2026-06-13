@@ -853,10 +853,36 @@ def validate_user_bybit_keys(api_key, api_secret):
     Returns (True, balance_usdt) on success or (False, error_message) on failure.
     """
     try:
-        exchange = get_user_exchange(api_key, api_secret, mode='futures')
-        balance_data = exchange.fetch_balance()
-        usdt = float(balance_data.get('USDT', {}).get('free', 0) or 0)
+        import hmac, hashlib
+        ts = str(int(time.time() * 1000))
+        params_str = 'accountType=UNIFIED'
+        sign = hmac.new(api_secret.encode(), f'{ts}5000{params_str}'.encode(), hashlib.sha256).hexdigest()
+        proxy_url = _get_random_proxy_url()
+        session = requests.Session()
+        if proxy_url:
+            session.proxies = {'http': proxy_url, 'https': proxy_url}
+            session.trust_env = False
+        resp = session.get(
+            'https://api.bybit.com/v5/account/wallet-balance',
+            params={'accountType': 'UNIFIED'},
+            headers={
+                'X-BAPI-API-KEY': api_key,
+                'X-BAPI-TIMESTAMP': ts,
+                'X-BAPI-RECV-WINDOW': '5000',
+                'X-BAPI-SIGN': sign,
+            },
+            timeout=10
+        )
+        data = resp.json()
+        if data.get('retCode') == 0:
+            for acc in data['result']['list']:
+                for coin in acc.get('coin', []):
+                    if coin['coin'] == 'USDT':
+                        return True, float(coin.get('walletBalance', 0))
+        return False, f'Bybit error: {data.get("retMsg", "Unknown error")}'
+        usdt = 0.0
         return True, usdt
+    
     except Exception as e:
         err = str(e)
         if 'invalid' in err.lower() or '10003' in err or '10004' in err:
