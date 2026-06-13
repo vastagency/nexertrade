@@ -1073,16 +1073,29 @@ def api_admin_top_users():
 @admin_required
 def api_admin_users():
     users = User.query.filter_by(is_admin=False).all()
-    return jsonify([{
-        'id':           u.id,
-        'name':         u.name,
-        'email':        u.email,
-        'balance':      round(u.balance, 2),
-        'total_profit': round(u.total_profit, 2),
-        'sessions':     u.sessions_completed,
-        'status':       'active' if u.is_active else 'inactive',
-        'joined':       u.joined_at.strftime('%Y-%m-%d')
-    } for u in users])
+    result = []
+    for u in users:
+        # Fetch live Bybit balance for connected users
+        live_balance = None
+        if u.bybit_connected and u.bybit_api_key:
+            try:
+                from bot import get_user_bybit_balance
+                live_balance = get_user_bybit_balance(u.bybit_api_key, u.bybit_api_secret)
+            except Exception:
+                pass
+        result.append({
+            'id':              u.id,
+            'name':            u.name,
+            'email':           u.email,
+            'balance':         round(live_balance, 2) if live_balance is not None else None,
+            'platform_pnl':    round(u.total_profit, 2),
+            'total_profit':    round(u.total_profit, 2),
+            'bybit_connected': u.bybit_connected,
+            'sessions':        u.sessions_completed,
+            'status':          'active' if u.is_active else 'inactive',
+            'joined':          u.joined_at.strftime('%Y-%m-%d')
+        })
+    return jsonify(result)
 
 @app.route('/api/admin/users/<int:user_id>/toggle', methods=['POST'])
 @login_required

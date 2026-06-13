@@ -187,28 +187,40 @@ function renderUsersTable(data) {
     return;
   }
 
-  tbody.innerHTML = data.map(u => `
+  tbody.innerHTML = data.map(u => {
+    const bybitBal  = u.balance !== null ? `$${u.balance.toFixed(2)}` : '—';
+    const bybitColor = u.balance !== null ? 'var(--accent-gold)' : 'var(--text-secondary)';
+    const connBadge = u.bybit_connected
+      ? `<span style="background:rgba(0,200,100,0.12);color:#00c864;border:1px solid rgba(0,200,100,0.3);border-radius:5px;padding:2px 8px;font-size:0.7rem;font-weight:700;">CONNECTED</span>`
+      : `<span style="background:rgba(255,80,80,0.1);color:#ff5050;border:1px solid rgba(255,80,80,0.2);border-radius:5px;padding:2px 8px;font-size:0.7rem;font-weight:700;">NOT CONNECTED</span>`;
+    const pnl       = u.platform_pnl >= 0
+      ? `<span style="color:var(--accent-green);">+$${u.platform_pnl.toFixed(2)}</span>`
+      : `<span style="color:#ff5050;">-$${Math.abs(u.platform_pnl).toFixed(2)}</span>`;
+    return `
     <tr>
       <td>
         <div style="display:flex;align-items:center;gap:10px;">
           <div style="width:30px;height:30px;border-radius:50%;background:rgba(245,197,24,0.1);border:1px solid rgba(245,197,24,0.2);display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;color:var(--accent-gold);">${u.name[0].toUpperCase()}</div>
-          <span style="font-weight:600;">${u.name}</span>
+          <div>
+            <div style="font-weight:600;">${u.name}</div>
+            <div style="margin-top:2px;">${connBadge}</div>
+          </div>
         </div>
       </td>
       <td style="color:var(--text-secondary);">${u.email}</td>
-      <td class="mono">$${u.balance.toFixed(2)}</td>
-      <td class="mono" style="color:var(--accent-green);">+$${u.total_profit.toFixed(2)}</td>
+      <td class="mono" style="color:${bybitColor};font-weight:600;">${bybitBal}</td>
+      <td class="mono">${pnl}</td>
       <td class="mono">${u.sessions}</td>
       <td><span class="badge ${u.status}">${u.status}</span></td>
       <td style="color:var(--text-secondary);">${u.joined}</td>
       <td>
         <div class="action-btns">
-          <button class="btn-view" onclick="viewUser(${u.id},'${u.name}','${u.email}',${u.balance},${u.total_profit},${u.sessions},'${u.status}','${u.joined}')">View</button>
+          <button class="btn-view" onclick="viewUser(${u.id},'${u.name}','${u.email}',${u.balance ?? 0},${u.platform_pnl},${u.sessions},'${u.status}','${u.joined}',${u.bybit_connected})">View</button>
           <button class="btn-suspend" onclick="toggleUser(${u.id},'${u.name}','${u.status}')">${u.status === 'active' ? 'Suspend' : 'Restore'}</button>
         </div>
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
 const userSearch = document.getElementById('userSearch');
@@ -225,12 +237,20 @@ if (userSearch) {
   });
 }
 
-function viewUser(id, name, email, balance, profit, sessions, status, joined) {
+function viewUser(id, name, email, balance, profit, sessions, status, joined, bybitConnected) {
+  const balDisplay  = balance > 0 ? `$${balance.toFixed(2)}` : 'Not available';
+  const connDisplay = bybitConnected
+    ? '<span style="color:#00c864;font-weight:700;">Connected</span>'
+    : '<span style="color:#ff5050;font-weight:700;">Not Connected</span>';
+  const pnlDisplay  = profit >= 0
+    ? `<span class="positive">+$${profit.toFixed(2)}</span>`
+    : `<span style="color:#ff5050;">-$${Math.abs(profit).toFixed(2)}</span>`;
   showModal('User Details — ' + name, `
     <div class="modal-info-row"><span class="modal-info-label">Full Name</span><span class="modal-info-value">${name}</span></div>
     <div class="modal-info-row"><span class="modal-info-label">Email</span><span class="modal-info-value">${email}</span></div>
-    <div class="modal-info-row"><span class="modal-info-label">Balance</span><span class="modal-info-value mono">$${balance.toFixed(2)}</span></div>
-    <div class="modal-info-row"><span class="modal-info-label">Total Profit</span><span class="modal-info-value mono positive">+$${profit.toFixed(2)}</span></div>
+    <div class="modal-info-row"><span class="modal-info-label">Bybit Account</span><span class="modal-info-value">${connDisplay}</span></div>
+    <div class="modal-info-row"><span class="modal-info-label">Live Bybit Balance</span><span class="modal-info-value mono" style="color:var(--accent-gold);">${balDisplay}</span></div>
+    <div class="modal-info-row"><span class="modal-info-label">NexerTrade PnL</span><span class="modal-info-value mono">${pnlDisplay}</span></div>
     <div class="modal-info-row"><span class="modal-info-label">Sessions</span><span class="modal-info-value mono">${sessions}</span></div>
     <div class="modal-info-row"><span class="modal-info-label">Status</span><span class="modal-info-value"><span class="badge ${status}">${status}</span></span></div>
     <div class="modal-info-row"><span class="modal-info-label">Joined</span><span class="modal-info-value">${joined}</span></div>
