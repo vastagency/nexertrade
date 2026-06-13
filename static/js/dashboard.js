@@ -14,6 +14,20 @@ const userData = window.USER_DATA || {
   sessions_completed: 0
 };
 
+// Fetch live Bybit balance if connected
+fetch('/api/user-balance')
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      userData.balance = data.balance;
+      const balEl = document.getElementById('statBalance');
+      if (balEl) balEl.textContent = '$' + data.balance.toFixed(2);
+      const subEl = document.getElementById('statBalanceSub');
+      if (subEl) subEl.textContent = data.source === 'bybit_live' ? 'Live Bybit Balance' : 'Available to trade';
+    }
+  })
+  .catch(() => {});
+
 
 // ============================================
 // 2. PROFIT GROWTH CHART
