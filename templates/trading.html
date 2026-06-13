@@ -103,7 +103,7 @@
     <div class="trading-header-row">
       <div>
         <h1 class="page-title">Trading</h1>
-        <p class="page-subtitle">Pick a timeframe, set an amount, hit start. The bot handles the rest.</p>
+        <p class="page-subtitle">Set an amount, pick a strategy, hit start. The bot trades with 4 TPs and a stop loss &mdash; runs until complete or you stop it.</p>
       </div>
       <div class="balance-badge">
         <span class="balance-label">Available balance</span>
@@ -113,14 +113,6 @@
 
     <div class="setup-card" id="setupCard">
 
-      <div class="setup-section">
-        <label class="setup-label">TIMEFRAME</label>
-        <div class="timeframe-buttons">
-          <button class="tf-btn" data-minutes="2">2 min</button>
-          <button class="tf-btn active" data-minutes="5">5 min</button>
-          <button class="tf-btn" data-minutes="10">10 min</button>
-        </div>
-      </div>
 
       <div class="setup-section">
         <label class="setup-label">STRATEGY</label>
@@ -260,7 +252,7 @@
           </div>
           <div class="session-status-text">
             <span class="session-status-title" id="sessionStatusTitle">Waiting for signal...</span>
-            <span class="session-status-sub" id="sessionStatusSub">Timeframe: 5 min · Amount: $50</span>
+            <span class="session-status-sub" id="sessionStatusSub">Amount: $50 | 4 TPs + SL | Waiting for signal...</span>
           </div>
         </div>
         <div class="session-timer mono" id="sessionTimer">05:00</div>
