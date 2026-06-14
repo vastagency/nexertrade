@@ -350,6 +350,8 @@ function updateStatsUI() {
 // ============================================
 async function startSession(force = false) {
   isTrading   = true;
+  const panel = document.getElementById('liveTradePanel');
+  if (panel) panel.style.display = 'block';
   tradesCount = 0;
   winsCount   = 0;
   lossesCount = 0;
@@ -555,6 +557,8 @@ async function startSession(force = false) {
 // ============================================
 // 10. STOP SESSION
 // ============================================
+const panel = document.getElementById('liveTradePanel');
+  if (panel) panel.style.display = 'none';
 async function stopSession(natural = false, botData = null) {
   isTrading = false;
 
