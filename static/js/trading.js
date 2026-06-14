@@ -8,11 +8,22 @@
 // ============================================
 let selectedTimeframe = 5;
 let selectedAmount    = 50;
+
 let isTrading         = false;
-let timerInterval     = null;
-let timeRemaining     = 0;
-let totalDuration     = 0;
 let tradesCount       = 0;
+
+let pollingActive     = false;
+let activeTrade       = null;
+let currentSessionId  = null;
+
+let tradeMonitorState = {
+    status: 'idle',
+    message: 'Waiting to start...',
+    pnl: 0,
+    tpHits: 0,
+    pair: null,
+    side: null
+};
 let winsCount         = 0;
 let lossesCount       = 0;
 let sessionPnl        = 0;
@@ -268,26 +279,9 @@ function tickLiveChart(newPrice) {
 // ============================================
 // 5. TIMER
 // ============================================
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-}
 
-function startTimer() {
-  let elapsed = 0;
-  document.getElementById('sessionTimer').textContent = '0:00';
-  document.getElementById('sessionProgressBar').style.width = '0%';
-  timerInterval = setInterval(() => {
-    elapsed++;
-    const m = Math.floor(elapsed / 60);
-    const s = elapsed % 60;
-    document.getElementById('sessionTimer').textContent = m + ':' + String(s).padStart(2,'0');
-    const pulse = 50 + 50 * Math.sin(elapsed * 0.1);
-    document.getElementById('sessionProgressBar').style.width = pulse + '%';
-    tickLiveChart();
-  }, 1000);
-}
+
+
 
 
 // ============================================
@@ -398,7 +392,7 @@ async function startSession(force = false) {
       initLiveChart(100);
     }
 
-  startTimer();
+  
   document.getElementById('sessionStatusTitle').textContent = 'Connected — executing live trade...';
 
   // ASYNC JOB PATTERN — fixes Railway's 30s HTTP timeout
@@ -564,7 +558,7 @@ async function startSession(force = false) {
 async function stopSession(natural = false, botData = null) {
   isTrading = false;
 
-  clearInterval(timerInterval);
+  
   clearInterval(chartInterval);
 
   document.getElementById('sessionProgressBar').style.width  = '100%';
@@ -816,7 +810,7 @@ function showWeakSignalModal(data) {
     modal.remove();
     // Reset session UI fully — no trade logged, no balance change
     isTrading = false;
-    clearInterval(timerInterval);
+    
     document.getElementById('sessionPanel').style.display = 'none';
     document.getElementById('sessionSummary').style.display = 'none';
     const btn = document.getElementById('mainActionBtn');
