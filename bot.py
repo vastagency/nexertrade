@@ -639,7 +639,7 @@ def generate_signal(symbol, timeframe='5m'):
         # ── GATE 4: MINIMUM SCORE ───────────────────────────────────────
         # Need clear conviction — ±6 minimum (old was ±2)
         if abs(score) < 6:
-            print(f'  [{symbol}] Score {score} too weak — no trade (min ±6)')
+            print(f'  [{symbol}] Score {score} below scalping threshold (min ±6)')
             return None
 
         # ── DIRECTION — must align with 1h trend ────────────────────────
@@ -773,7 +773,7 @@ def select_best_pair(pairs):
               f'({best_signal["direction"]} {best_signal["confidence"]:.0f}% '
               f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}%)')
     else:
-        print('  No high-quality signal found — bot will wait')
+        print('  No strong setup yet — continuing market scan — bot will wait')
 
     return best_signal
 
