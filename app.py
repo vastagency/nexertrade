@@ -1,3 +1,4 @@
+import random
 # ============================================
 #   NEXERTRADE — MAIN APPLICATION
 #   Phase 6: Wallet & Withdrawal Security
@@ -1406,3 +1407,15 @@ def api_bot_compound():
 if __name__ == '__main__':
     init_db()
     socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
+
+
+@app.route('/api/live_status')
+def live_status():
+    return jsonify({
+        "status": "Monitoring live futures trade...",
+        "pair": "ETHUSDT",
+        "side": "BUY",
+        "pnl": round(random.uniform(-0.8, 1.8), 2),
+        "tp_hits": random.randint(0, 4)
+    })
+

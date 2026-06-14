@@ -938,3 +938,45 @@ function showSessionDialog(type, message, balance) {
     if (e.target === overlay) overlay.remove();
   });
 }
+
+
+// ================================
+// NEXERTRADE LIVE UI ENGINE
+// ================================
+
+function updateLiveTradeUI(data) {
+
+    const statusEl = document.getElementById('liveTradeStatus');
+    const pairEl   = document.getElementById('liveTradePair');
+    const sideEl   = document.getElementById('liveTradeSide');
+    const pnlEl    = document.getElementById('liveTradePnl');
+    const tpEl     = document.getElementById('liveTradeTp');
+    const barEl    = document.getElementById('tradeProgressBar');
+
+    if(statusEl) statusEl.innerText = data.status || 'Monitoring active trade...';
+    if(pairEl) pairEl.innerText = data.pair || '-';
+    if(sideEl) sideEl.innerText = data.side || '-';
+    if(pnlEl) pnlEl.innerText = (data.pnl || 0) + '%';
+    if(tpEl) tpEl.innerText = `${data.tp_hits || 0} / 4`;
+
+    if(barEl){
+        const width = ((data.tp_hits || 0) / 4) * 100;
+        barEl.style.width = width + '%';
+    }
+}
+
+setInterval(async () => {
+
+    try {
+
+        const res = await fetch('/api/live_status');
+        const data = await res.json();
+
+        updateLiveTradeUI(data);
+
+    } catch(err) {
+        console.log('Live UI update error', err);
+    }
+
+}, 4000);
+

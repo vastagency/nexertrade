@@ -786,7 +786,7 @@ def select_best_pair(pairs):
 def _bybit_signed_request(method, endpoint, params, exchange_obj):
     """
     Make a signed Bybit V5 REST request directly, bypassing CCXT pre-flights.
-    Avoids CCXT calling /v5/asset/coin/query-info which 403s on Railway.
+    Avoids CCXT calling /v5/market/tickers which 403s on Railway.
     """
     import hmac, hashlib, json as _json
     api_key    = exchange_obj.apiKey
@@ -845,7 +845,7 @@ def _get_price(symbol, trade_mode='futures'):
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
     """
     Place a futures market order on Bybit via direct REST API.
-    No CCXT order placement — avoids 403 pre-flight on /v5/asset/coin/query-info.
+    No CCXT order placement — avoids 403 pre-flight on /v5/market/tickers.
     Always futures (linear perpetual). Spot removed.
     """
     exchange   = bybit_futures
