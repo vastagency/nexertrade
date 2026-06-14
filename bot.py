@@ -113,6 +113,48 @@ MAX_SESSION_LOSS_PCT = 0.05  # stop trading if session loses >5% of starting amo
 
 
 # ============================================
+# ACTIVE TRADE STATE — real-time frontend sync
+# Updated by the momentum engine during live trades.
+# Read by /api/live_status to show real data on UI.
+# ============================================
+_active_trade = {
+    'active':         False,
+    'user_id':        None,
+    'pair':           None,
+    'side':           None,
+    'entry':          0.0,
+    'current_price':  0.0,
+    'pnl':            0.0,
+    'tp_hits':        0,
+    'tp_prices':      [],
+    'sl_price':       0.0,
+    'position_size':  0.0,
+    'leverage':       2,
+    'status':         'idle',   # idle | scanning | monitoring | closing | closed
+    'message':        '',
+}
+
+def get_active_trade():
+    """Return copy of current active trade state. Called by /api/live_status."""
+    return dict(_active_trade)
+
+def _set_active(updates):
+    """Update active trade state fields."""
+    _active_trade.update(updates)
+
+def _clear_active(user_id=None):
+    """Reset active trade state to idle after trade closes."""
+    _active_trade.update({
+        'active': False, 'user_id': user_id,
+        'pair': None, 'side': None,
+        'entry': 0.0, 'current_price': 0.0, 'pnl': 0.0,
+        'tp_hits': 0, 'tp_prices': [], 'sl_price': 0.0,
+        'position_size': 0.0, 'leverage': 2,
+        'status': 'idle', 'message': '',
+    })
+
+
+# ============================================
 # 2. ACCOUNT MANAGEMENT
 # ============================================
 def get_bybit_balance():
@@ -1563,6 +1605,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
 
         # --- Signal selection ---
         best_signal = None
+        _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
+                     'message': f'Scanning market for trade {i+1}/{num_trades}...'})
         if symbol:
             best_signal = generate_signal(symbol)
         if best_signal is None:
@@ -1644,6 +1688,25 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
         print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
               f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
+
+        # Update real active trade state — frontend reads this via /api/live_status
+        _set_active({
+            'active':        True,
+            'user_id':       user_id,
+            'pair':          sym,
+            'side':          trade_dir,
+            'entry':         entry_price,
+            'current_price': entry_price,
+            'pnl':           0.0,
+            'tp_hits':       0,
+            'tp_prices':     [round(p, 6) for p in tp_prices],
+            'sl_price':      round(sl_price, 6),
+            'position_size': quantity,
+            'leverage':      leverage,
+            'status':        'monitoring',
+            'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
+        })
+
         # Emit live trade entry to frontend via socket
         try:
             from app import socketio
@@ -1704,6 +1767,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
             if sl_hit:
                 print(f'  SL hit @ ${live_price:.4f} — closing full position')
+                _set_active({'status': 'closing', 'current_price': live_price,
+                             'message': f'SL hit @ ${live_price:.4f} — closing position'})
                 close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
                 if close_result['success']:
                     cp = close_result['close_price']
@@ -1741,6 +1806,15 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         won            = True
                         print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | '
                               f'Remaining: {remaining_qty:.4f}')
+                        # Update active trade state with new TP count
+                        _set_active({
+                            'tp_hits':      tps_hit,
+                            'pnl':          round(real_pnl, 4),
+                            'current_price': cp,
+                            'position_size': remaining_qty,
+                            'status':       'monitoring',
+                            'message':      f'TP{tps_hit} hit @ ${cp:.4f} | Running PnL: ${real_pnl:.4f}',
+                        })
                         # Emit TP hit to frontend
                         try:
                             from app import socketio
@@ -1756,6 +1830,16 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         break  # re-check from top with new remaining_qty
 
             if not tp_triggered:
+                # Calculate live unrealised PnL for frontend display
+                price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
+                live_pnl_now = round((price_diff / entry_price) * (remaining_qty * entry_price) * leverage, 4)
+                _set_active({
+                    'current_price': live_price,
+                    'pnl':           live_pnl_now,
+                    'tp_hits':       tps_hit,
+                    'status':        'monitoring',
+                    'message':       f'Monitoring {trade_dir} {sym} | Price ${live_price:.4f} | TPs {tps_hit}/4',
+                })
                 print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
                       f'Remaining: {remaining_qty:.4f}')
 
@@ -1767,6 +1851,14 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 break
 
         real_pnl = round(real_pnl, 4)
+        # Trade fully closed — clear active state
+        _set_active({
+            'active':  False,
+            'status':  'closed',
+            'pnl':     real_pnl,
+            'tp_hits': tps_hit,
+            'message': f'Trade closed | PnL: ${real_pnl:.4f} | TPs: {tps_hit}/4',
+        })
         results['trades'].append({
             'index':          i + 1,
             'symbol':         sym,
@@ -1794,6 +1886,7 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
 
         time.sleep(1)
 
+    _clear_active(user_id)
     results['net_pnl']  = round(results['net_pnl'], 4)
     results['win_rate'] = round(
         (results['wins'] / results['total_trades']) * 100, 1

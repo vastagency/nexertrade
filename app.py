@@ -1,4 +1,3 @@
-import random
 # ============================================
 #   NEXERTRADE — MAIN APPLICATION
 #   Phase 6: Wallet & Withdrawal Security
@@ -1319,10 +1318,10 @@ def api_bot_kill():
         request_stop(current_user.id)
         # Find any running job for this user and force it to done
         killed = False
-        for job_id, job in list(_jobs.items()):
+        for job_id, job in list(_trade_jobs.items()):
             if job.get('user_id') == current_user.id and job.get('status') == 'running':
-                _jobs[job_id]['status'] = 'done'
-                _jobs[job_id]['result'] = {
+                _trade_jobs[job_id]['status'] = 'done'
+                _trade_jobs[job_id]['results'] = {
                     'strategy': 'momentum', 'trades': [], 'total_trades': 0,
                     'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
                     'message': 'Session killed by user. Position closed manually on Bybit.'
@@ -1410,12 +1409,36 @@ if __name__ == '__main__':
 
 
 @app.route('/api/live_status')
+@login_required
 def live_status():
-    return jsonify({
-        "status": "Monitoring live futures trade...",
-        "pair": "ETHUSDT",
-        "side": "BUY",
-        "pnl": round(random.uniform(-0.8, 1.8), 2),
-        "tp_hits": random.randint(0, 4)
-    })
+    """
+    Returns REAL active trade state from bot._active_trade.
+    No random values. No placeholders. No hardcoded pairs.
+    Frontend polls this every 4 seconds during a live session.
+    """
+    from bot import get_active_trade
+    trade = get_active_trade()
 
+    # Only return trade data belonging to the current user
+    if trade.get('user_id') != current_user.id:
+        return jsonify({
+            'active':  False,
+            'status':  'idle',
+            'message': 'No active trade',
+        })
+
+    return jsonify({
+        'active':        trade.get('active', False),
+        'pair':          trade.get('pair'),
+        'side':          trade.get('side'),
+        'entry':         trade.get('entry', 0.0),
+        'current_price': trade.get('current_price', 0.0),
+        'pnl':           trade.get('pnl', 0.0),
+        'tp_hits':       trade.get('tp_hits', 0),
+        'tp_prices':     trade.get('tp_prices', []),
+        'sl_price':      trade.get('sl_price', 0.0),
+        'position_size': trade.get('position_size', 0.0),
+        'leverage':      trade.get('leverage', 2),
+        'status':        trade.get('status', 'idle'),
+        'message':       trade.get('message', ''),
+    })

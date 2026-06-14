@@ -557,12 +557,12 @@ async function startSession(force = false) {
 // ============================================
 // 10. STOP SESSION
 // ============================================
-const panel = document.getElementById('liveTradePanel');
-  if (panel) panel.style.display = 'none';
 async function stopSession(natural = false, botData = null) {
   isTrading = false;
 
-  
+  // Hide live trade panel when session ends
+  const panel = document.getElementById('liveTradePanel');
+  if (panel) panel.style.display = 'none';
   clearInterval(chartInterval);
 
   document.getElementById('sessionProgressBar').style.width  = '100%';
@@ -944,12 +944,15 @@ function showSessionDialog(type, message, balance) {
 }
 
 
-// ================================
-// NEXERTRADE LIVE UI ENGINE
-// ================================
+// ============================================
+// REAL LIVE TRADE STATUS POLLING
+// Polls /api/live_status every 4 seconds ONLY when a session is active.
+// Shows real pair, side, PnL, TP progress from backend.
+// Never shows fake values — if no active trade, panel hides.
+// ============================================
 
 function updateLiveTradeUI(data) {
-
+    const panel    = document.getElementById('liveTradePanel');
     const statusEl = document.getElementById('liveTradeStatus');
     const pairEl   = document.getElementById('liveTradePair');
     const sideEl   = document.getElementById('liveTradeSide');
@@ -957,30 +960,54 @@ function updateLiveTradeUI(data) {
     const tpEl     = document.getElementById('liveTradeTp');
     const barEl    = document.getElementById('tradeProgressBar');
 
-    if(statusEl) statusEl.innerText = data.status || 'Monitoring active trade...';
-    if(pairEl) pairEl.innerText = data.pair || '-';
-    if(sideEl) sideEl.innerText = data.side || '-';
-    if(pnlEl) pnlEl.innerText = (data.pnl || 0) + '%';
-    if(tpEl) tpEl.innerText = `${data.tp_hits || 0} / 4`;
+    if (!data || !data.active) {
+        // No active trade — hide panel, do not show stale data
+        if (panel) panel.style.display = 'none';
+        return;
+    }
 
-    if(barEl){
+    // Show panel with REAL data from backend
+    if (panel) panel.style.display = 'block';
+
+    const pnlVal  = typeof data.pnl === 'number' ? data.pnl : 0;
+    const pnlSign = pnlVal >= 0 ? '+' : '';
+    const pnlColor = pnlVal >= 0 ? '#00D48B' : '#ef4444';
+
+    if (statusEl) statusEl.textContent  = data.message || 'Monitoring live futures trade...';
+    if (pairEl)   pairEl.textContent    = data.pair   || '-';
+    if (sideEl)   sideEl.textContent    = data.side   || '-';
+    if (pnlEl) {
+        pnlEl.textContent = `${pnlSign}$${Math.abs(pnlVal).toFixed(4)}`;
+        pnlEl.style.color = pnlColor;
+    }
+    if (tpEl) tpEl.textContent = `${data.tp_hits || 0} / 4`;
+    if (barEl) {
         const width = ((data.tp_hits || 0) / 4) * 100;
         barEl.style.width = width + '%';
     }
+
+    // Also update the session status title if we have a real pair
+    if (data.pair && isTrading) {
+        const titleEl = document.getElementById('sessionStatusTitle');
+        if (titleEl && data.status === 'monitoring') {
+            const sideLabel = data.side === 'BUY' ? 'LONG' : 'SHORT';
+            titleEl.textContent = `${data.pair} ${sideLabel} @ $${(data.current_price || data.entry || 0).toFixed(4)}`;
+        } else if (titleEl && data.status === 'scanning') {
+            titleEl.textContent = 'Scanning market for best setup...';
+        } else if (titleEl && data.status === 'closed') {
+            titleEl.textContent = 'Trade closed — scanning for next setup...';
+        }
+    }
 }
 
+// Poll only when trading is active
 setInterval(async () => {
-
+    if (!isTrading) return;   // do nothing if no session is running
     try {
-
-        const res = await fetch('/api/live_status');
+        const res  = await fetch('/api/live_status');
         const data = await res.json();
-
         updateLiveTradeUI(data);
-
-    } catch(err) {
-        console.log('Live UI update error', err);
+    } catch (err) {
+        // silently skip — network hiccup, don't crash UI
     }
-
 }, 4000);
-
