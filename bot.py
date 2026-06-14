@@ -91,8 +91,14 @@ if USE_TESTNET:
 else:
     print('✓ Connected to Bybit LIVE trading')
 
-CRYPTO_PAIRS  = ['XRP/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT', 'BTC/USDT']
-FUTURES_PAIRS = ['XRP/USDT:USDT', 'SOL/USDT:USDT', 'ETH/USDT:USDT', 'BTC/USDT:USDT']
+CRYPTO_PAIRS  = [
+    'BTC/USDT',   'ETH/USDT',   'SOL/USDT',   'XRP/USDT',   'BNB/USDT',
+    'DOGE/USDT',  'ADA/USDT',   'AVAX/USDT',  'LINK/USDT',  'DOT/USDT',
+    'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
+    'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
+    'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'MATIC/USDT',
+]
+FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
 # ============================================
 # STRATEGY CONSTANTS
