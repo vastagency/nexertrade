@@ -96,7 +96,7 @@ CRYPTO_PAIRS  = [
     'DOGE/USDT',  'ADA/USDT',   'AVAX/USDT',  'LINK/USDT',  'DOT/USDT',
     'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
     'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
-    'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'MATIC/USDT',
+    'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'HBAR/USDT',
 ]
 FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
@@ -253,19 +253,31 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
         except Exception as e:
             print(f'Bybit OHLCV ({category}) failed for {symbol}/{timeframe}: {e}')
 
-    # Method 3: Binance fallback via proxied session
+    # Method 3: Binance direct REST fallback via proxy (bypasses CCXT pre-flight 451)
     try:
-        ohlcv = binance_data.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if ohlcv and len(ohlcv) >= 10:
+        binance_sym = symbol.replace('/', '').replace(':USDT', '')
+        tf_binance  = {'1m': '1m', '5m': '5m', '15m': '15m',
+                       '30m': '30m', '1h': '1h', '4h': '4h', '1d': '1d'}
+        bin_tf  = tf_binance.get(timeframe, '5m')
+        proxy_url = _get_random_proxy_url()
+        sess = requests.Session()
+        sess.trust_env = False
+        if proxy_url:
+            sess.proxies = {'http': proxy_url, 'https': proxy_url}
+        resp = sess.get('https://api.binance.com/api/v3/klines',
+                        params={'symbol': binance_sym, 'interval': bin_tf,
+                                'limit': limit}, timeout=10)
+        data = resp.json()
+        if isinstance(data, list) and len(data) >= 10:
             return {
-                'open':   [float(c[1]) for c in ohlcv],
-                'high':   [float(c[2]) for c in ohlcv],
-                'low':    [float(c[3]) for c in ohlcv],
-                'close':  [float(c[4]) for c in ohlcv],
-                'volume': [float(c[5]) for c in ohlcv],
+                'open':   [float(c[1]) for c in data],
+                'high':   [float(c[2]) for c in data],
+                'low':    [float(c[3]) for c in data],
+                'close':  [float(c[4]) for c in data],
+                'volume': [float(c[5]) for c in data],
             }
     except Exception as e:
-        print(f'Binance OHLCV also failed for {symbol}/{timeframe}: {e}')
+        print(f'Binance direct OHLCV failed for {symbol}/{timeframe}: {e}')
 
     return None
 
@@ -597,13 +609,12 @@ def generate_signal(symbol, timeframe='5m'):
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
         # ── GATE 2: VOLUME CHECK ────────────────────────────────────────
-        if volume_trend == 'weak':
-            print(f'  [{symbol}] Volume weak — skipping (no conviction in move)')
+        if volume_trend == 'weak' and atr_pct < 0.07:
+            print(f'  [{symbol}] Volume weak - skipping (dead market)')
             return None
 
-        # ── GATE 3: ATR VOLATILITY ──────────────────────────────────────
-        if atr_pct < 0.08:
-            print(f'  [{symbol}] ATR too low ({atr_pct:.3f}%) — market not moving, skip')
+        if atr_pct < 0.04:
+            print(f'  [{symbol}] ATR critically low ({atr_pct:.3f}%) - skip')
             return None
 
         # ── SCORING SYSTEM ──────────────────────────────────────────────
