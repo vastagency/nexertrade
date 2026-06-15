@@ -1009,6 +1009,10 @@ function updateLiveTradeUI(data) {
         pnlEl.style.color = pnlColor;
     }
     if (tpEl) tpEl.textContent = `${data.tp_hits || 0} / 4`;
+    const slEl = document.getElementById('liveTradeSL');
+    if (slEl && data.sl_price) {
+        slEl.textContent = '$' + parseFloat(data.sl_price).toFixed(4);
+    }
     if (barEl) {
         const width = ((data.tp_hits || 0) / 4) * 100;
         barEl.style.width = width + '%';

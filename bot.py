@@ -744,8 +744,11 @@ def generate_signal(symbol, timeframe='5m'):
         # TP2 = 3.5x ATR (3.5:1 R:R)
         # TP3 = 5.5x ATR
         # TP4 = 8.0x ATR (runner)
-        atr_sl_mult  = 1.0
-        atr_tp_mults = [2.0, 3.5, 5.5, 8.0]
+        # SL=2x ATR gives trade room to breathe past noise
+        # TP1=1.0x ATR hits quickly (same distance as old SL)
+        # TP2-4 are runners that compound profits
+        atr_sl_mult  = 2.0
+        atr_tp_mults = [1.0, 2.0, 3.5, 5.5]
 
         if direction == 'BUY':
             sl_price  = current_price - (atr * atr_sl_mult)
@@ -1663,8 +1666,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
     trade_usdt = amount / max(num_trades, 1)
 
     # ATR-based TP/SL from signal (2:1+ R:R guaranteed)
-    DEFAULT_TP_PCTS = [0.012, 0.022, 0.038, 0.060]  # fallback if no ATR
-    DEFAULT_SL_PCT  = 0.010
+    DEFAULT_TP_PCTS = [0.008, 0.016, 0.028, 0.045]  # TP1 hits fast
+    DEFAULT_SL_PCT  = 0.018  # wider SL gives trade room
     TP_CLOSE_FRAC   = 0.25  # each TP closes 25% of position
 
     for i in range(num_trades):
