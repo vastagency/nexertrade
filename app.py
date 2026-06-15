@@ -1441,6 +1441,7 @@ def live_status():
         'entry':         trade.get('entry', 0.0),
         'current_price': trade.get('current_price', 0.0),
         'pnl':           trade.get('pnl', 0.0),
+        'pnl_pct':       trade.get('pnl_pct', 0.0),
         'tp_hits':       trade.get('tp_hits', 0),
         'tp_prices':     trade.get('tp_prices', []),
         'sl_price':      trade.get('sl_price', 0.0),

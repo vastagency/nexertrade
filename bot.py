@@ -984,26 +984,46 @@ def close_trade(symbol, direction, quantity, trade_mode='futures'):
 
     try:
         close_price = _get_price(symbol, 'futures')
+        if not close_price:
+            return {'success': False, 'error': 'Cannot fetch price', 'close_price': 0}
         close_side  = 'Sell' if direction == 'BUY' else 'Buy'
+
+        # Round qty to instrument step -- prevents 'Qty invalid' on partial closes
+        instr    = _get_qty_step(bybit_sym)
+        step     = instr['step']
+        min_qty  = instr['min_qty']
+        import math
+        decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+        close_qty = math.floor(quantity / step) * step
+        close_qty = round(close_qty, decimals)
+        print(f'  [CLOSE QTY] raw={quantity} step={step} rounded={close_qty}')
+
+        if close_qty < min_qty:
+            print(f'  [CLOSE] Qty {close_qty} below min {min_qty} -- skipping partial close')
+            return {'success': False, 'error': f'Qty {close_qty} below min {min_qty}',
+                    'close_price': close_price}
 
         resp = _bybit_signed_request('POST', '/v5/order/create', {
             'category':    'linear',
             'symbol':      bybit_sym,
             'side':        close_side,
             'orderType':   'Market',
-            'qty':         str(round(quantity, 6)),
+            'qty':         str(close_qty),
             'timeInForce': 'IOC',
             'reduceOnly':  True
         }, exchange)
 
+        print(f'  [CLOSE RESP] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
         if resp.get('retCode') != 0:
             return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
 
         order_id = resp.get('result', {}).get('orderId', 'unknown')
-        print(f'  [FUTURES] Closed {direction} {quantity} {bybit_sym} @ ${close_price:.4f} | OrderID: {order_id}')
-        return {'success': True, 'order_id': order_id, 'close_price': close_price}
+        print(f'  [CLOSE] {direction} {close_qty} {bybit_sym} @ ${close_price:.4f} | ID: {order_id}')
+        return {'success': True, 'order_id': order_id, 'close_price': close_price,
+                'qty_closed': close_qty}
 
     except Exception as e:
+        print(f'  [CLOSE ERROR] {e}')
         return {'success': False, 'error': str(e), 'close_price': 0}
 
 
@@ -1787,21 +1807,29 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 tp_hit = (live_price >= tp_prices[tp_idx]) if trade_dir == 'BUY' \
                          else (live_price <= tp_prices[tp_idx])
                 if tp_hit:
-                    close_qty = round(quantity * TP_CLOSE_FRAC, 6)
+                    # Round close qty to instrument step -- critical for partial closes
+                    instr_info = _get_qty_step(monitor_sym.replace('/', '').replace(':USDT', '') + ('USDT' if 'USDT' not in monitor_sym else ''))
+                    _step = instr_info['step']
+                    _min  = instr_info['min_qty']
+                    _raw_close = quantity * TP_CLOSE_FRAC
+                    import math as _math
+                    _dec = max(0, len(str(_step).rstrip('0').split('.')[-1])) if '.' in str(_step) else 0
+                    close_qty = round(_math.floor(_raw_close / _step) * _step, _dec)
                     close_qty = min(close_qty, remaining_qty)
-                    if close_qty < 0.0001:
+                    if close_qty < _min or close_qty < 0.0001:
                         tps_hit += 1
                         continue
-                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} — closing {close_qty:.4f}')
+                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} (step={_step})')
                     cr = close_trade(monitor_sym, trade_dir, close_qty, trade_mode)
+                    actual_closed = cr.get('qty_closed', close_qty)
                     if cr['success']:
                         cp        = cr['close_price']
                         pc        = (cp - entry_price) if trade_dir == 'BUY' \
                                     else (entry_price - cp)
-                        pnl_chunk = (pc / entry_price) * (close_qty * entry_price) * leverage
-                        pnl_chunk -= close_qty * entry_price * fee_rate * 2
+                        pnl_chunk = (pc / entry_price) * (actual_closed * entry_price) * leverage
+                        pnl_chunk -= actual_closed * entry_price * fee_rate * 2
                         real_pnl  += pnl_chunk
-                        remaining_qty -= close_qty
+                        remaining_qty -= actual_closed
                         tps_hit        = tp_idx + 1
                         won            = True
                         print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | '
@@ -1830,12 +1858,15 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         break  # re-check from top with new remaining_qty
 
             if not tp_triggered:
-                # Calculate live unrealised PnL for frontend display
-                price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
-                live_pnl_now = round((price_diff / entry_price) * (remaining_qty * entry_price) * leverage, 4)
+                # Live PnL: leveraged dollar amount + leveraged % for display
+                price_diff     = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
+                pct_move       = price_diff / entry_price if entry_price > 0 else 0
+                live_pnl_now   = round(pct_move * (remaining_qty * entry_price) * leverage, 4)
+                live_pnl_pct   = round(pct_move * leverage * 100, 4)  # leveraged % for UI
                 _set_active({
                     'current_price': live_price,
                     'pnl':           live_pnl_now,
+                    'pnl_pct':       live_pnl_pct,
                     'tp_hits':       tps_hit,
                     'status':        'monitoring',
                     'message':       f'Monitoring {trade_dir} {sym} | Price ${live_price:.4f} | TPs {tps_hit}/4',

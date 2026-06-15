@@ -991,15 +991,21 @@ function updateLiveTradeUI(data) {
     // Show panel with REAL data from backend
     if (panel) panel.style.display = 'block';
 
-    const pnlVal  = typeof data.pnl === 'number' ? data.pnl : 0;
-    const pnlSign = pnlVal >= 0 ? '+' : '';
+    const pnlVal   = typeof data.pnl === 'number' ? data.pnl : 0;
+    const pnlPct   = typeof data.pnl_pct === 'number' ? data.pnl_pct : 0;
+    const pnlSign  = pnlVal >= 0 ? '+' : '';
     const pnlColor = pnlVal >= 0 ? '#00D48B' : '#ef4444';
 
     if (statusEl) statusEl.textContent  = data.message || 'Monitoring live futures trade...';
     if (pairEl)   pairEl.textContent    = data.pair   || '-';
-    if (sideEl)   sideEl.textContent    = data.side   || '-';
+    if (sideEl) {
+        sideEl.textContent  = data.side || '-';
+        sideEl.style.color  = data.side === 'BUY' ? '#00D48B' : '#ef4444';
+    }
     if (pnlEl) {
-        pnlEl.textContent = `${pnlSign}$${Math.abs(pnlVal).toFixed(4)}`;
+        // Show leveraged % and dollar amount to match Bybit display
+        const pctStr = pnlPct !== 0 ? ` (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)` : '';
+        pnlEl.textContent = `${pnlSign}$${Math.abs(pnlVal).toFixed(4)}${pctStr}`;
         pnlEl.style.color = pnlColor;
     }
     if (tpEl) tpEl.textContent = `${data.tp_hits || 0} / 4`;
