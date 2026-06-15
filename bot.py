@@ -106,7 +106,7 @@ FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 # Momentum scalper
 MOMENTUM_TP_PCT  = 0.03    # +3% take profit — real directional profit target
 MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss  → R:R = 2:1
-MIN_CONF         = 65      # quality scalps -- trend filter protects direction
+MIN_CONF         = 63      # trend filter is the real protection -- let signals through
 STRONG_CONF      = 82      # strong signal -- full size entry
 
 # Grid/DCA
@@ -465,7 +465,7 @@ def detect_market_condition(df):
 # - Minimum confidence: 72% (was 60%)
 # ============================================
 
-MIN_CONF    = 65    # quality scalps -- trend filter still protects direction
+MIN_CONF    = 63    # trend filter is the real protection -- let signals through
 STRONG_CONF = 82    # strong signal — scale in with full size
 
 def calculate_ema50(closes):
@@ -608,13 +608,10 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # ── GATE 2: VOLUME CHECK ────────────────────────────────────────
-        if volume_trend == 'weak' and atr_pct < 0.07:
-            print(f'  [{symbol}] Volume weak - skipping (dead market)')
-            return None
-
-        if atr_pct < 0.04:
-            print(f'  [{symbol}] ATR critically low ({atr_pct:.3f}%) - skip')
+        # GATE 2: Only skip truly frozen markets (ATR < 0.03%)
+        # Volume on 5m is NOT a gate -- 1h trend bias is the real filter
+        if atr_pct < 0.03:
+            print(f'  [{symbol}] ATR {atr_pct:.3f}% -- price frozen, skip')
             return None
 
         # ── SCORING SYSTEM ──────────────────────────────────────────────
@@ -697,8 +694,8 @@ def generate_signal(symbol, timeframe='5m'):
 
         # ── GATE 4: MINIMUM SCORE ───────────────────────────────────────
         # Need clear conviction — ±6 minimum (old was ±2)
-        if abs(score) < 4:
-            print(f'  [{symbol}] Score {score} too weak (min 4)')
+        if abs(score) < 3:
+            print(f'  [{symbol}] Score {score} too weak (min 3)')
             return None
 
         # ── DIRECTION — must align with 1h trend ────────────────────────
@@ -723,6 +720,7 @@ def generate_signal(symbol, timeframe='5m'):
         elif abs_score >= 6:  confidence = 75
         elif abs_score >= 5:  confidence = 71
         elif abs_score >= 4:  confidence = 67
+        elif abs_score >= 3:  confidence = 65
         else:                 confidence = 60
 
         # Confluence bonuses
