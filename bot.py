@@ -902,6 +902,37 @@ def _get_price(symbol, trade_mode='futures'):
 
 
 
+# Cache for instrument qty precision -- fetched once per pair from Bybit
+_instrument_cache = {}
+
+def _get_qty_step(bybit_sym):
+    """
+    Fetch minimum order qty and step size from Bybit instruments-info.
+    Cached after first call. Works for ANY pair automatically.
+    """
+    if bybit_sym in _instrument_cache:
+        return _instrument_cache[bybit_sym]
+    try:
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get('https://api.bybit.com/v5/market/instruments-info',
+                        params={'category': 'linear', 'symbol': bybit_sym}, timeout=10)
+        data = resp.json()
+        if data.get('retCode') == 0 and data['result']['list']:
+            lot     = data['result']['list'][0].get('lotSizeFilter', {})
+            step    = float(lot.get('qtyStep', 1))
+            min_qty = float(lot.get('minOrderQty', step))
+            result  = {'step': step, 'min_qty': min_qty}
+            _instrument_cache[bybit_sym] = result
+            return result
+    except Exception as e:
+        print(f'  [INSTRUMENT] Could not fetch {bybit_sym} info: {e}')
+    # Safe fallback
+    fallback = {'step': 1, 'min_qty': 1}
+    _instrument_cache[bybit_sym] = fallback
+    return fallback
+
+
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
     """
     Place a futures market order on Bybit via direct REST API.
@@ -1808,7 +1839,9 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                          else (live_price <= tp_prices[tp_idx])
                 if tp_hit:
                     # Round close qty to instrument step -- critical for partial closes
-                    instr_info = _get_qty_step(monitor_sym.replace('/', '').replace(':USDT', '') + ('USDT' if 'USDT' not in monitor_sym else ''))
+                    _tp_sym    = monitor_sym.replace('/', '').replace(':USDT', '')
+                    if not _tp_sym.endswith('USDT'): _tp_sym += 'USDT'
+                    instr_info = _get_qty_step(_tp_sym)
                     _step = instr_info['step']
                     _min  = instr_info['min_qty']
                     _raw_close = quantity * TP_CLOSE_FRAC
