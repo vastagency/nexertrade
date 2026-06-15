@@ -122,24 +122,24 @@
             <span class="strategy-btn-name">Auto-Best</span>
             <span class="strategy-btn-desc">Bot chooses for you</span>
           </button>
-          <button class="strategy-btn active" data-strategy="grid" title="Places a ladder of buy orders and sells each one as price bounces — high win rate in ranging markets">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-            <span class="strategy-btn-name">Grid / DCA</span>
-            <span class="strategy-btn-desc">Ladder buys, high win rate</span>
+          <button class="strategy-btn" data-strategy="pickup" title="Opens BUY + SELL at the same time. Whichever direction price moves, one side profits.">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/></svg>
+            <span class="strategy-btn-name">Pick Up Trade</span>
+            <span class="strategy-btn-desc">Hedge both directions</span>
           </button>
-          <button class="strategy-btn" data-strategy="momentum" title="Multi-timeframe RSI, EMA, MACD signals with trend-aware direction — best in trending markets">
+          <button class="strategy-btn active" data-strategy="momentum" title="Multi-timeframe RSI, EMA, MACD signals with trend-aware direction -- best in trending markets">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
             <span class="strategy-btn-name">Momentum</span>
             <span class="strategy-btn-desc">Signal-based scalping</span>
           </button>
-          <button class="strategy-btn" data-strategy="ema_macd" title="MACD crossover with EMA30/EMA9 candle confirmation. Best for clear trend reversals.">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 2 L22 22M7 17 L12 7 L17 17"/></svg>
-            <span class="strategy-btn-name">EMA / MACD</span>
-            <span class="strategy-btn-desc">Crossover reversal signals</span>
+          <button class="strategy-btn" data-strategy="always_win" title="Averages into position if price moves against you. Max 5 adds. Recovers when price reverses.">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="strategy-btn-name">Always Win</span>
+            <span class="strategy-btn-desc">Position averaging, 5 adds</span>
           </button>
 
         </div>
-        <p class="strategy-hint" id="strategyHint">Places 5 buy orders in a price ladder. Each one sells automatically when price bounces. Very high win rate in sideways markets.</p>
+        <p class="strategy-hint" id="strategyHint">Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.</p>
       </div>
 
 
@@ -361,7 +361,7 @@
       }
     }
 
-    window.SELECTED_STRATEGY = 'grid';
+    window.SELECTED_STRATEGY = 'momentum';
 
   </script>
   <script src="/static/js/trading.js"></script>

@@ -689,8 +689,8 @@ def api_bot_execute():
             except (ValueError, TypeError):
                 user_leverage = None
 
-        if strategy not in ('auto', 'grid', 'momentum', 'ema_macd'):
-            strategy = 'auto'
+        if strategy not in ('auto', 'momentum', 'pickup', 'always_win'):
+            strategy = 'momentum'
 
         # Dynamic trades based on amount being traded (live balance checked later)
         if amount >= 200:
@@ -723,7 +723,7 @@ def api_bot_execute():
             return jsonify({'success': False, 'message': f'Insufficient Bybit balance. Your live balance is ${live_balance:.2f}'}), 400
 
         # Weak signal pre-check — skip for grid (grid uses limit orders not signal confidence)
-        if not force and strategy in ('momentum', 'auto', 'ema_macd'):
+        if not force and strategy in ('momentum', 'auto', 'pickup', 'always_win'):
             try:
                 from bot import generate_signal
                 # Use the user's selected pair if provided, otherwise default scan pair

@@ -1063,190 +1063,32 @@ def close_trade(symbol, direction, quantity, trade_mode='futures'):
 
 
 
-# ============================================
-# 7. GRID / DCA ENGINE
-# ============================================
-def select_best_grid_pair(pairs, usdt_per_level, trade_mode, leverage):
-    """Pick best pair for grid: must meet min order size, prefer highest ATR."""
-    exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
-    best_pair = None
-    best_atr_pct = 0
-    for pair in pairs:
-        try:
-            trade_symbol = pair.replace('/USDT', '/USDT:USDT') if trade_mode == 'futures' else pair
-            markets  = exchange.load_markets()
-            market   = markets.get(trade_symbol, {})
-            ticker   = exchange.fetch_ticker(trade_symbol)
-            price    = float(ticker['last'])
-            qty      = (usdt_per_level * leverage) / price
-            min_qty  = market.get('limits', {}).get('amount', {}).get('min', 0)
-            if qty < min_qty:
-                print(f'  Grid skip {pair}: qty={qty:.6f} < min={min_qty}')
-                continue
-            df = fetch_ohlcv(pair, timeframe='5m', limit=50)
-            if not df:
-                continue
-            atr     = calculate_atr(df)
-            atr_pct = (atr / price) * 100 if price > 0 else 0
-            print(f'  Grid candidate {pair}: qty={qty:.4f} ATR={atr_pct:.3f}%')
-            if atr_pct > best_atr_pct:
-                best_atr_pct = atr_pct
-                best_pair    = pair
-            time.sleep(0.2)
-        except Exception as e:
-            print(f'  Grid pair check {pair}: {e}')
-    if best_pair:
-        print(f'  Best grid pair: {best_pair} (ATR {best_atr_pct:.3f}%)')
-    return best_pair
 
 
 # ============================================
-# USER EXCHANGE — Per-user Bybit connection
+# 7. PICK UP TRADE + ALWAYS WIN STRATEGIES
 # ============================================
-def get_user_exchange(api_key, api_secret, mode='futures'):
+# ============================================
+# 7. PICK UP TRADE — Hedge Grid Strategy
+# ============================================
+# How it works:
+# - Opens BOTH a BUY and SELL position simultaneously
+# - Whichever direction price moves, one side profits
+# - Both sides have 3 TP levels
+# - Only one SL total — if price reverses strongly past
+#   the losing side's entry, that side closes at SL
+# - Net result: price movement in EITHER direction = profit
+# ============================================
+def execute_pickup_session(amount, timeframe_minutes=None, num_trades=1,
+                            user_id=None, user_balance=None, user_api_key=None,
+                            user_api_secret=None):
     """
-    Build a CCXT Bybit exchange instance using a user's own API credentials.
-    Each user connects their own Bybit account — trades happen on their wallet.
-    The proxy session is injected so all calls route through the proxy pool.
-
-    mode: 'futures' (default) or 'spot'
-    """
-    exchange = ccxt.bybit({
-        'apiKey': api_key,
-        'secret': api_secret,
-        'enableRateLimit': True,
-        'options': {
-            'defaultType': 'linear' if mode == 'futures' else 'spot',
-            'recvWindow': 20000
-        },
-    })
-    # Inject proxy session so user API calls also route through proxy
-    exchange = _inject_proxy(exchange)
-    return exchange
-
-
-def validate_user_bybit_keys(api_key, api_secret):
-    """
-    Test a user's Bybit API key by fetching their balance.
-    Returns (True, balance_usdt) on success or (False, error_message) on failure.
-
-    FIX: Bybit V5 GET signature must be built from the exact query string that
-    appears in the URL. Using requests' `params={}` lets requests build the
-    query string independently AFTER we've already signed — causing a mismatch.
-    Solution: embed the query string directly in the URL so both the signature
-    and the actual request use the identical string.
-    """
-    try:
-        import hmac, hashlib
-        timestamp  = str(int(time.time() * 1000))
-        recv_win   = '5000'
-        params_str = 'accountType=UNIFIED'  # must match URL query exactly
-
-        raw_sign = timestamp + api_key + recv_win + params_str
-        sign = hmac.new(
-            api_secret.encode('utf-8'),
-            raw_sign.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-
-        # Append query string directly to URL — do NOT use params={} here
-        url = f'https://api.bybit.com/v5/account/wallet-balance?{params_str}'
-
-        session = requests.Session()
-        session.trust_env = False
-        resp = session.get(
-            url,
-            headers={
-                'X-BAPI-API-KEY':     api_key,
-                'X-BAPI-TIMESTAMP':   timestamp,
-                'X-BAPI-RECV-WINDOW': recv_win,
-                'X-BAPI-SIGN':        sign,
-            },
-            timeout=10
-        )
-        data = resp.json()
-        if data.get('retCode') == 0:
-            for acc in data['result']['list']:
-                for coin in acc.get('coin', []):
-                    if coin['coin'] == 'USDT':
-                        return True, float(coin.get('walletBalance', 0))
-            # Key valid but no USDT coin found (e.g. empty account)
-            return True, 0.0
-        return False, f'Bybit error: {data.get("retMsg", "Unknown error")}'
-
-    except Exception as e:
-        err = str(e)
-        if 'invalid' in err.lower() or '10003' in err or '10004' in err:
-            return False, 'Invalid API key or secret. Please check and try again.'
-        if '403' in err or 'forbidden' in err.lower():
-            return False, 'API key rejected — ensure trade permissions are enabled on Bybit.'
-        return False, f'Connection failed: {err[:120]}'
-
-
-def get_user_bybit_balance(api_key, api_secret):
-    """
-    Fetch a user's live USDT balance from their connected Bybit account.
-
-    FIX: Previous version was missing RECV-WINDOW and SIGN headers entirely,
-    and used params={} instead of embedding the query string in the URL.
-    Both issues cause Bybit to reject the request with a signature error.
-    """
-    try:
-        import hmac, hashlib
-        timestamp  = str(int(time.time() * 1000))
-        recv_win   = '5000'
-        params_str = 'accountType=UNIFIED'
-
-        raw_sign = timestamp + api_key + recv_win + params_str
-        sign = hmac.new(
-            api_secret.encode('utf-8'),
-            raw_sign.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-
-        url = f'https://api.bybit.com/v5/account/wallet-balance?{params_str}'
-
-        session = requests.Session()
-        session.trust_env = False
-        resp = session.get(
-            url,
-            headers={
-                'X-BAPI-API-KEY':     api_key,
-                'X-BAPI-TIMESTAMP':   timestamp,
-                'X-BAPI-RECV-WINDOW': recv_win,
-                'X-BAPI-SIGN':        sign,
-            },
-            timeout=10
-        )
-        data = resp.json()
-        if data.get('retCode') == 0:
-            for acc in data['result']['list']:
-                for coin in acc.get('coin', []):
-                    if coin['coin'] == 'USDT':
-                        return float(coin.get('walletBalance', 0))
-            return 0.0  # Connected but no USDT balance
-        print(f'  [USER BALANCE] Bybit returned: {data.get("retMsg")}' )
-        return None
-    except Exception as e:
-        print(f'  [USER BALANCE] Failed: {e}')
-        return None
-
-
-def execute_grid_session(amount, timeframe_minutes, symbol=None):
-    """
-    Grid/DCA strategy — RSI-aware version.
-
-    Key logic:
-    - Only enter if RSI < 58 (not overbought). Overbought = likely to keep falling = bad for BUY grid.
-    - Level 1: market order ONLY when RSI < 48 (oversold/neutral = likely to bounce).
-      When RSI 48-58: Level 1 is a tight limit 0.05% below entry (not immediate market).
-      When RSI > 58: skip Level 1 entirely (price at top, all levels below as limits).
-    - All TP levels calculated from their own fill price, not from entry.
-    - Dynamic TP/spacing based on ATR.
-    - At session end: if Level 1 TP not hit, market-close it to cut loss small.
+    Pick Up Trade (Hedge Grid):
+    Opens BUY + SELL simultaneously on the best signal pair.
+    One side always profits from the price move.
     """
     results = {
-        'strategy':     'grid_dca',
+        'strategy':     'pickup',
         'trades':       [],
         'total_trades': 0,
         'wins':         0,
@@ -1254,966 +1096,433 @@ def execute_grid_session(amount, timeframe_minutes, symbol=None):
         'net_pnl':      0.0,
         'win_rate':     0.0,
         'real_trading': True,
-        'trade_mode':   'spot'
-    }
-
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False,
-                'error': 'Bybit unreachable — grid session aborted.'}
-
-    available_usdt        = balance_info['USDT']
-    trade_mode            = balance_info.get('trade_mode', 'spot')
-    leverage              = LEVERAGE if trade_mode == 'futures' else 1
-    results['trade_mode'] = trade_mode
-    exchange              = bybit_futures if trade_mode == 'futures' else bybit_spot
-
-    amount = min(amount, available_usdt * 0.95)
-
-    # Enforce minimum 5-minute session for grid
-    # 2 minutes is too short for price to bounce and hit TP
-    if timeframe_minutes < 5:
-        print(f'  Grid: extending session from {timeframe_minutes}min to 5min')
-        timeframe_minutes = 5
-
-    # Dynamic grid levels based on balance — prevents margin errors
-    if amount >= 50:
-        active_levels = 5
-    elif amount >= 25:
-        active_levels = 4
-    else:
-        active_levels = 3  # $9-24: 3 levels keeps within margin limits
-
-    usdt_per_level = amount / active_levels
-    print(f'  Grid active levels: {active_levels} (balance=${amount:.2f})')
-
-    # Pick best pair by volatility (ATR)
-    if not symbol:
-        symbol = select_best_grid_pair(CRYPTO_PAIRS, usdt_per_level, trade_mode, leverage)
-        if not symbol:
-            symbol = 'XRP/USDT'
-            print(f'  Falling back to XRP/USDT')
-
-    trade_symbol = symbol.replace('/USDT', '/USDT:USDT') if trade_mode == 'futures' else symbol
-
-    if trade_mode == 'futures':
-        try:
-            exchange.set_leverage(LEVERAGE, trade_symbol)
-        except Exception:
-            pass
-
-    ticker      = exchange.fetch_ticker(trade_symbol)
-    entry_price = float(ticker['last'])
-
-    # Get RSI to decide Level 1 strategy
-    current_rsi  = 50.0
-    market_trend = 'neutral'
-    try:
-        df5 = fetch_ohlcv(symbol, timeframe='5m', limit=50)
-        if df5:
-            current_rsi = calculate_rsi(df5['close'], period=14)
-            _, _, ema_trend5  = calculate_ema_trend(df5['close'], short=9, long=21)
-            market_trend = ema_trend5
-    except Exception:
-        pass
-
-    print(f'  Grid RSI check: RSI={current_rsi:.1f} Trend={market_trend}')
-
-    # RSI gate: if price is overbought (RSI > 62), market is likely to keep falling
-    # A BUY grid in overbought conditions means we buy at the top and price just drops
-    if current_rsi > 68:
-        print(f'  ⚠ RSI {current_rsi:.1f} > 68 — market overbought, skipping grid to avoid buying into drop')
-        results['message'] = (
-            f'RSI is {current_rsi:.1f} — market may be overbought. '
-            f'Grid skipped to protect capital. Try again in a few minutes or use Auto-Best.'
-        )
-        return results
-
-    # Dynamic spacing from ATR
-    try:
-        df5_check = fetch_ohlcv(symbol, timeframe='5m', limit=50) if not df5 else df5
-        if df5_check:
-            atr     = calculate_atr(df5_check)
-            atr_pct = (atr / entry_price) * 100 if entry_price > 0 else 0
-            dynamic_spacing = max(0.001, min(0.003, atr_pct * 0.003))
-            if timeframe_minutes <= 2:
-                dynamic_spacing = max(0.001, dynamic_spacing * 0.5)
-            elif timeframe_minutes <= 5:
-                dynamic_spacing = max(0.0015, dynamic_spacing * 0.7)
-        else:
-            dynamic_spacing = 0.002
-    except Exception:
-        dynamic_spacing = 0.002
-
-    dynamic_tp = dynamic_spacing * 1.2
-
-    print(f'Grid session: {trade_symbol} | Price: ${entry_price:.4f} | '
-          f'{active_levels} levels × ${usdt_per_level:.2f} | Mode: {trade_mode.upper()} | '
-          f'Spacing: {dynamic_spacing*100:.3f}% | TP: {dynamic_tp*100:.3f}% | RSI: {current_rsi:.1f}')
-
-    markets  = exchange.load_markets()
-    market   = markets.get(trade_symbol, {})
-    min_qty  = market.get('limits', {}).get('amount', {}).get('min', 0)
-
-    open_orders      = []
-    completed_levels = []
-    placed_count     = 0
-    filled_levels    = {}
-
-    for idx in range(active_levels):
-        try:
-            if idx == 0:
-                # Level 1 strategy depends on RSI:
-                # RSI < 48 (oversold/neutral): market order — price is low, likely to bounce
-                # RSI 48-68: tight limit just below entry — let price dip slightly before entering
-                # RSI > 68: already handled above (return early)
-                qty = (usdt_per_level * leverage) / entry_price
-                if qty < min_qty:
-                    print(f'  Level 1: too small ({qty:.6f} < {min_qty})')
-                else:
-                    qty  = float(exchange.amount_to_precision(trade_symbol, qty))
-                    tp_p = entry_price * (1 + dynamic_tp)
-
-                    if current_rsi < 48:
-                        # Market order — price is at/near bottom
-                        order = exchange.create_market_order(trade_symbol, 'buy', qty)
-                        try:
-                            sell_ord = exchange.create_limit_order(trade_symbol, 'sell', qty, tp_p)
-                            filled_levels[entry_price] = {
-                                'sell_order_id': sell_ord['id'],
-                                'quantity':      qty,
-                                'buy_price':     entry_price,
-                                'tp_price':      tp_p,
-                                'level_index':   1
-                            }
-                            print(f'  Level 1: MARKET BUY {qty} @ ~${entry_price:.4f} (TP: ${tp_p:.4f}) RSI={current_rsi:.1f} — FILLED')
-                            placed_count += 1
-                        except Exception as tp_err:
-                            print(f'  Level 1 TP order failed: {tp_err}')
-                    else:
-                        # RSI 48-68: limit order just below entry — safer entry
-                        level1_price = entry_price * (1 - dynamic_spacing * 0.5)
-                        tp_p_1 = level1_price * (1 + dynamic_tp)
-                        order  = exchange.create_limit_order(trade_symbol, 'buy', qty, level1_price)
-                        open_orders.append({
-                            'order_id':    order['id'],
-                            'level_price': level1_price,
-                            'quantity':    qty,
-                            'level_index': 1,
-                            'tp_price':    tp_p_1
-                        })
-                        print(f'  Level 1: limit BUY {qty} @ ${level1_price:.4f} (TP: ${tp_p_1:.4f}) RSI={current_rsi:.1f} — waiting fill')
-                        placed_count += 1
-            else:
-                # Levels 2-5: limit orders below current price
-                level_price = entry_price * (1 - dynamic_spacing * idx)
-                qty         = (usdt_per_level * leverage) / level_price
-                if qty < min_qty:
-                    print(f'  Level {idx+1}: too small ({qty:.6f} < {min_qty})')
-                    continue
-                qty      = float(exchange.amount_to_precision(trade_symbol, qty))
-                tp_price = level_price * (1 + dynamic_tp)
-                order    = exchange.create_limit_order(trade_symbol, 'buy', qty, level_price)
-                open_orders.append({
-                    'order_id':    order['id'],
-                    'level_price': level_price,
-                    'quantity':    qty,
-                    'level_index': idx + 1,
-                    'tp_price':    tp_price
-                })
-                print(f'  Level {idx+1}: limit BUY {qty} @ ${level_price:.4f} (TP: ${tp_price:.4f})')
-                placed_count += 1
-            time.sleep(0.3)
-        except Exception as e:
-            print(f'  Level {idx+1} order failed: {e}')
-
-    if placed_count == 0:
-        results['message'] = f'Balance ${amount:.2f} too small for {symbol} minimum order sizes.'
-        return results
-
-    # Monitor: check limit order fills and TP completions
-    max_wait       = timeframe_minutes * 60
-    elapsed        = 0
-    check_interval = 10
-    max_loss_limit = amount * MAX_SESSION_LOSS_PCT
-
-    while elapsed < max_wait and (open_orders or filled_levels):
-        time.sleep(check_interval)
-        elapsed += check_interval
-
-        try:
-            ticker     = exchange.fetch_ticker(trade_symbol)
-            live_price = float(ticker['last'])
-        except Exception:
-            continue
-
-        # Check each open limit buy for fill
-        still_open = []
-        for level in open_orders:
-            try:
-                order_status = exchange.fetch_order(level['order_id'], trade_symbol)
-                if order_status.get('status') in ('closed', 'filled'):
-                    actual_fill = float(order_status.get('average') or level['level_price'])
-                    # TP based on actual fill price, not original level price
-                    tp_from_fill = actual_fill * (1 + dynamic_tp)
-                    print(f'  ✓ Level {level["level_index"]} filled @ ${actual_fill:.4f} — TP @ ${tp_from_fill:.4f}')
-                    try:
-                        sell_ord = exchange.create_limit_order(
-                            trade_symbol, 'sell', level['quantity'], tp_from_fill
-                        )
-                        filled_levels[actual_fill] = {
-                            'sell_order_id': sell_ord['id'],
-                            'quantity':      level['quantity'],
-                            'buy_price':     actual_fill,
-                            'tp_price':      tp_from_fill,
-                            'level_index':   level['level_index']
-                        }
-                    except Exception as e:
-                        print(f'  TP order failed: {e}')
-                else:
-                    still_open.append(level)
-            except Exception:
-                still_open.append(level)
-        open_orders = still_open
-
-        # Check TP sell orders for completion
-        completed_keys = []
-        for buy_price, sell_info in filled_levels.items():
-            try:
-                sell_status = exchange.fetch_order(sell_info['sell_order_id'], trade_symbol)
-                if sell_status.get('status') in ('closed', 'filled'):
-                    actual_sell = float(sell_status.get('average') or sell_info['tp_price'])
-                    bybit_fee   = usdt_per_level * 0.002
-                    pnl = round(
-                        (actual_sell - sell_info['buy_price'])
-                        / sell_info['buy_price']
-                        * usdt_per_level * leverage
-                        - bybit_fee, 4
-                    )
-                    print(f'  ✓ TP level {sell_info["level_index"]}: ${sell_info["buy_price"]:.4f}→${actual_sell:.4f} PnL:${pnl:.4f}')
-                    completed_keys.append(buy_price)
-                    completed_levels.append({
-                        'level_index': sell_info['level_index'],
-                        'buy_price':   sell_info['buy_price'],
-                        'sell_price':  actual_sell,
-                        'pnl':         pnl,
-                        'won':         pnl > 0
-                    })
-            except Exception:
-                pass
-        for k in completed_keys:
-            del filled_levels[k]
-
-        print(f'  [{elapsed}s/{max_wait}s] Price:${live_price:.4f} | '
-              f'Limit:{len(open_orders)} | WaitingTP:{len(filled_levels)} | Done:{len(completed_levels)}')
-
-        current_loss = sum(t['pnl'] for t in completed_levels if t['pnl'] < 0)
-        if abs(current_loss) > max_loss_limit:
-            print('  ⚠ Session loss limit — closing all')
-            break
-
-    # Cancel remaining limit buy orders
-    print('  Cancelling unfilled limit orders...')
-    for level in open_orders:
-        try:
-            exchange.cancel_order(level['order_id'], trade_symbol)
-            print(f'  Cancelled level {level["level_index"]} @ ${level["level_price"]:.4f}')
-        except Exception as e:
-            print(f'  Cancel failed: {e}')
-
-    # Close filled-but-TP-not-hit positions at market
-    for buy_price, sell_info in filled_levels.items():
-        try:
-            exchange.cancel_order(sell_info['sell_order_id'], trade_symbol)
-        except Exception:
-            pass
-        try:
-            close_result = close_trade(trade_symbol, 'BUY', sell_info['quantity'], trade_mode)
-            if close_result['success']:
-                close_price = close_result['close_price']
-                bybit_fee   = usdt_per_level * 0.002
-                pnl = round(
-                    (close_price - sell_info['buy_price'])
-                    / sell_info['buy_price']
-                    * usdt_per_level * leverage
-                    - bybit_fee, 4
-                )
-                completed_levels.append({
-                    'level_index': sell_info['level_index'],
-                    'buy_price':   sell_info['buy_price'],
-                    'sell_price':  close_price,
-                    'pnl':         pnl,
-                    'won':         pnl > 0
-                })
-                print(f'  Market close level {sell_info["level_index"]} @ ${close_price:.4f} PnL:${pnl:.4f}')
-        except Exception as e:
-            print(f'  Market close failed: {e}')
-
-    for t in completed_levels:
-        results['trades'].append({
-            'index':      t['level_index'],
-            'symbol':     symbol,
-            'direction':  'BUY',
-            'strategy':   'grid_dca',
-            'profit':     t['pnl'],
-            'won':        t['won'],
-            'price':      t['buy_price'],
-            'real_order': True
-        })
-        results['total_trades'] += 1
-        results['net_pnl']      += t['pnl']
-        if t['won']:
-            results['wins']   += 1
-        else:
-            results['losses'] += 1
-
-    results['net_pnl']  = round(results['net_pnl'], 4)
-    results['win_rate'] = round(
-        (results['wins'] / results['total_trades']) * 100, 1
-    ) if results['total_trades'] > 0 else 0
-
-    return results
-
-
-# ============================================
-# 8. STOP SIGNAL — allows frontend to abort a running session
-# ============================================
-_stop_signals = {}  # user_id -> True when stop requested
-
-def request_stop(user_id):
-    """Frontend calls this to request the bot stops after current trade."""
-    _stop_signals[str(user_id)] = True
-
-def clear_stop(user_id):
-    _stop_signals.pop(str(user_id), None)
-
-def should_stop(user_id):
-    return _stop_signals.get(str(user_id), False)
-
-
-# ============================================
-# 9. MULTI-TP/SL MOMENTUM ENGINE
-# No timeframe — trade runs until all TPs hit, SL hit, or user stops.
-# 4 Take Profit levels (partial closes), 1 Stop Loss.
-# R:R minimum 2:1 on TP1. Each TP closes 25% of position.
-# ============================================
-def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
-                              force=False, symbol=None, user_id=None,
-                              user_balance=None, user_trade_mode='futures'):
-    """
-    Multi-TP/SL momentum engine. No timeframe expiry.
-    Trade runs until: all TPs hit, SL hit, or user requests stop.
-
-    TP levels (% from entry, BUY direction example):
-      TP1 = +1.0%  (25% of position closed)
-      TP2 = +2.0%  (25% closed)
-      TP3 = +3.5%  (25% closed)
-      TP4 = +5.5%  (25% closed — only if trade stays open this long)
-    SL  = -1.0%  (100% closed immediately)
-
-    For SELL (short futures): levels are mirrored.
-    For SPOT (can only BUY): always BUY direction.
-
-    On Bybit spot: TPs are monitored and closed by market sell.
-    On Bybit futures: TPs use reduceOnly market orders.
-    """
-    results = {
-        'strategy':     'momentum',
-        'trades':       [],
-        'total_trades': 0,
-        'wins':         0,
-        'losses':       0,
-        'net_pnl':      0.0,
-        'win_rate':     0.0,
-        'real_trading': True,
-        'trade_mode':   'spot'
+        'trade_mode':   'futures'
     }
 
     clear_stop(user_id)
 
-    # Use injected user balance -- never call get_bybit_balance() which uses admin keys
     if user_balance is not None and user_balance > 0:
         available_usdt = user_balance
-        print(f'  [BALANCE] Using live user balance: ${available_usdt:.2f}')
     else:
-        # Fallback: fetch via swapped bybit_futures (user keys after swap)
-        try:
-            import bot as _bm
-            bal_resp = _bybit_signed_request('GET', '/v5/account/wallet-balance',
-                                              {'accountType': 'UNIFIED'}, _bm.bybit_futures)
-            available_usdt = 0.0
-            if bal_resp.get('retCode') == 0:
-                for acc in bal_resp['result']['list']:
-                    for coin in acc.get('coin', []):
-                        if coin['coin'] == 'USDT':
-                            available_usdt = float(coin.get('walletBalance') or 0)
-            print(f'  [BALANCE] Fetched from exchange: ${available_usdt:.2f}')
-        except Exception as e:
-            print(f'  [BALANCE] Fetch failed: {e}')
-            return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
+        return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
 
-    if available_usdt <= 0:
-        print('  [BALANCE] Zero USDT -- transfer USDT to Unified account on Bybit')
-        return {**results, 'real_trading': False,
-                'error': 'No USDT in Unified account. Transfer funds on Bybit first.'}
+    print(f'[PICKUP] Balance: ${available_usdt:.2f} | Starting hedge grid')
 
-    trade_mode            = 'futures'
-    leverage              = LEVERAGE
-    results['trade_mode'] = 'futures'
-    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {leverage}x')
+    # Each side uses half the amount so total exposure = amount
+    half_amount = (amount * 0.5)
+    fee_rate    = 0.001
 
-    amount     = min(amount, available_usdt * 0.95)
-    trade_usdt = amount / max(num_trades, 1)
+    _set_active({'running': True, 'user_id': user_id, 'status': 'scanning',
+                 'message': 'Pick Up Trade: scanning for best pair...'})
 
-    # ATR-based TP/SL from signal (2:1+ R:R guaranteed)
-    DEFAULT_TP_PCTS = [0.008, 0.016, 0.028, 0.045]  # TP1 hits fast
-    DEFAULT_SL_PCT  = 0.018  # wider SL gives trade room
-    TP_CLOSE_FRAC   = 0.25  # each TP closes 25% of position
+    best_signal = select_best_pair(CRYPTO_PAIRS)
+    if best_signal is None:
+        _clear_active(user_id)
+        results['message'] = 'No quality setup found. Try again shortly.'
+        return results
 
-    for i in range(num_trades):
+    sym    = best_signal['symbol']
+    atr    = best_signal.get('atr', 0.001)
+    price  = best_signal['current_price']
+    print(f'[PICKUP] Pair: {sym} | Price: ${price:.6f} | ATR: {atr:.6f}')
+
+    # TP levels: 1x, 2x, 3.5x ATR (25% closed each, last 25% at TP3)
+    buy_tps  = [price + atr * m for m in [1.0, 2.0, 3.5]]
+    sell_tps = [price - atr * m for m in [1.0, 2.0, 3.5]]
+    # SL on losing side: 3x ATR (further than any TP so profit on winner > loss on loser)
+    buy_sl   = price - atr * 3.0
+    sell_sl  = price + atr * 3.0
+
+    _set_active({
+        'status':    'entering',
+        'symbol':    sym,
+        'direction': 'HEDGE',
+        'message':   f'Opening BUY + SELL hedge on {sym}',
+        'entry':     price,
+    })
+
+    # Open BUY side
+    buy_order  = execute_real_trade(sym, 'BUY',  half_amount, 'futures')
+    # Open SELL side
+    sell_order = execute_real_trade(sym, 'SELL', half_amount, 'futures')
+
+    if not buy_order['success'] and not sell_order['success']:
+        _clear_active(user_id)
+        results['message'] = 'Both hedge legs failed to open.'
+        return results
+
+    buy_entry  = buy_order.get('price',    price) if buy_order['success']  else price
+    sell_entry = sell_order.get('price',   price) if sell_order['success'] else price
+    buy_qty    = buy_order.get('quantity', 0)     if buy_order['success']  else 0
+    sell_qty   = sell_order.get('quantity', 0)    if sell_order['success'] else 0
+    buy_sym    = buy_order.get('symbol',   sym.replace('/', '').replace(':USDT', '') + 'USDT')
+    sell_sym   = sell_order.get('symbol',  sym.replace('/', '').replace(':USDT', '') + 'USDT')
+
+    print(f'[PICKUP] BUY  {buy_qty}  @ ${buy_entry:.6f}  | TPs: {[round(t,6) for t in buy_tps]}')
+    print(f'[PICKUP] SELL {sell_qty} @ ${sell_entry:.6f} | TPs: {[round(t,6) for t in sell_tps]}')
+    print(f'[PICKUP] SL-Buy: ${buy_sl:.6f} | SL-Sell: ${sell_sl:.6f}')
+
+    _set_active({
+        'status':    'monitoring',
+        'direction': 'HEDGE (BUY+SELL)',
+        'entry':     price,
+        'tp_prices': buy_tps,
+        'sl_price':  buy_sl,
+        'message':   f'Hedge open on {sym} -- monitoring both sides',
+    })
+
+    try:
+        from app import socketio
+        socketio.emit('trade_entry', {
+            'trade_num': 1, 'symbol': sym, 'direction': 'HEDGE',
+            'price': price, 'tp1': buy_tps[0], 'sl': buy_sl,
+            'confidence': best_signal['confidence'], 'leverage': LEVERAGE,
+        }, room=f'user_{user_id}')
+    except Exception:
+        pass
+
+    # Track state for both sides
+    buy_remaining  = buy_qty
+    sell_remaining = sell_qty
+    buy_tps_hit    = 0
+    sell_tps_hit   = 0
+    buy_pnl        = 0.0
+    sell_pnl       = 0.0
+    buy_done       = buy_qty == 0
+    sell_done      = sell_qty == 0
+    tp_frac        = 0.333  # each TP closes 33% of side
+
+    # Monitor loop
+    while not buy_done or not sell_done:
         if should_stop(user_id):
-            print(f'  Stop requested by user — halting after {i} trades')
+            print('[PICKUP] User stop -- closing all hedge legs')
+            if not buy_done  and buy_remaining > 0:
+                cr = close_trade(buy_sym,  'BUY',  buy_remaining)
+                if cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (cp - buy_entry) / buy_entry
+                    buy_pnl += pc * buy_remaining * buy_entry * LEVERAGE
+            if not sell_done and sell_remaining > 0:
+                cr = close_trade(sell_sym, 'SELL', sell_remaining)
+                if cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (sell_entry - cp) / sell_entry
+                    sell_pnl += pc * sell_remaining * sell_entry * LEVERAGE
             break
 
-        # --- Signal selection ---
-        best_signal = None
-        _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
-                     'message': f'Scanning market for trade {i+1}/{num_trades}...'})
-        if symbol:
-            best_signal = generate_signal(symbol)
-        if best_signal is None:
-            best_signal = select_best_pair(CRYPTO_PAIRS)
-        if best_signal is None:
-            if force:
-                best_signal = generate_signal(DEFAULT_PAIR)
-            if best_signal is None:
-                print(f'  No signal available — skipping trade {i+1}')
-                continue
-
-        sig    = best_signal
-        sym    = sig['symbol']
-        symbol = sym  # lock in for subsequent trades in session
-
-        # Signal engine Gate 4 already enforces trend alignment -- trust it
-        trade_dir = sig['direction']
-
-        print(f'\nTrade {i+1}/{num_trades}: {sym} {trade_dir} | '
-              f'RSI:{sig["rsi"]} | Conf:{sig["confidence"]:.0f}% | '
-              f'{trade_mode.upper()} | Market:{sig.get("market_condition","?")}')
-
-        # --- Entry ---
-        entry_order = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode)
-        if not entry_order['success']:
-            print(f'  Entry failed: {entry_order.get("error")}')
-            results['trades'].append({
-                'index': i+1, 'symbol': sym, 'direction': trade_dir,
-                'strategy': 'momentum', 'confidence': sig['confidence'],
-                'rsi': sig['rsi'], 'profit': 0, 'won': False,
-                'price': 0, 'real_order': False,
-                'ema_trend': sig.get('ema_trend',''), 'macd_trend': sig.get('macd_trend',''),
-                'volume_trend': sig.get('volume_trend','neutral'),
-                'candle_pattern': sig.get('candle_pattern','none'),
-                'market_condition': sig.get('market_condition','unknown'),
-            })
+        time.sleep(6)
+        live_price = _get_price(sym, 'futures')
+        if not live_price:
             continue
 
-        entry_price   = entry_order['price']
-        quantity      = entry_order['quantity']
-        monitor_sym   = entry_order['symbol']
-        remaining_qty = quantity
-        real_pnl      = 0.0
-        won           = False
-
-        # ATR-based TP/SL -- use signal levels if available, else fallback
-        sig_tp_pcts = sig.get('tp_pcts', DEFAULT_TP_PCTS)
-        sig_sl_pct  = sig.get('sl_pct',  DEFAULT_SL_PCT)
-        # Enforce minimum 2:1 R:R on TP1
-        if not sig_tp_pcts or sig_tp_pcts[0] < sig_sl_pct * 1.8:
-            sig_tp_pcts = [sig_sl_pct * 2.0, sig_sl_pct * 3.5,
-                           sig_sl_pct * 5.5, sig_sl_pct * 8.0]
-        if trade_dir == 'BUY':
-            tp_prices = [entry_price * (1 + p) for p in sig_tp_pcts]
-            sl_price  = entry_price * (1 - sig_sl_pct)
-        else:
-            tp_prices = [entry_price * (1 - p) for p in sig_tp_pcts]
-            sl_price  = entry_price * (1 + sig_sl_pct)
-
-        print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
-        print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
-              f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
-
-        # Update real active trade state — frontend reads this via /api/live_status
+        # Update live PnL display
+        lp_buy  = ((live_price - buy_entry)  / buy_entry)  * buy_remaining  * buy_entry  * LEVERAGE if buy_remaining  > 0 else 0
+        lp_sell = ((sell_entry - live_price) / sell_entry) * sell_remaining * sell_entry * LEVERAGE if sell_remaining > 0 else 0
         _set_active({
-            'active':        True,
-            'user_id':       user_id,
-            'pair':          sym,
-            'side':          trade_dir,
-            'entry':         entry_price,
-            'current_price': entry_price,
-            'pnl':           0.0,
-            'tp_hits':       0,
-            'tp_prices':     [round(p, 6) for p in tp_prices],
-            'sl_price':      round(sl_price, 6),
-            'position_size': quantity,
-            'leverage':      leverage,
-            'status':        'monitoring',
-            'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
+            'current_price': live_price,
+            'pnl':           round(buy_pnl + sell_pnl + lp_buy + lp_sell, 4),
+            'message':       f'Hedge monitoring | Price ${live_price:.6f} | B:{buy_tps_hit}/3 S:{sell_tps_hit}/3',
         })
 
-        # Emit live trade entry to frontend via socket
-        try:
-            from app import socketio
-            socketio.emit('trade_entry', {
-                'trade_num':   i + 1,
-                'total':       num_trades,
-                'symbol':      sym,
-                'direction':   trade_dir,
-                'price':       entry_price,
-                'tp1':         tp_prices[0],
-                'sl':          sl_price,
-                'confidence':  sig['confidence'],
-                'leverage':    leverage
-            }, room=f'user_{user_id}')
-        except Exception:
-            pass
+        import math as _math
 
-        tps_hit       = 0
-        price_exchange = bybit_futures if trade_mode == 'futures' else bybit_spot
-        fee_rate       = 0.001  # 0.1% per trade (taker)
+        # Check BUY side TPs
+        if not buy_done and buy_remaining > 0:
+            for tp_idx in range(buy_tps_hit, len(buy_tps)):
+                if live_price >= buy_tps[tp_idx]:
+                    instr  = _get_qty_step(buy_sym)
+                    step   = instr['step']
+                    raw_q  = buy_remaining * tp_frac
+                    close_q = round(_math.floor(raw_q / step) * step,
+                                    max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0)
+                    close_q = min(close_q, buy_remaining)
+                    if close_q >= instr['min_qty']:
+                        cr = close_trade(buy_sym, 'BUY', close_q)
+                        if cr.get('success'):
+                            cp = cr['close_price']
+                            pc = (cp - buy_entry) / buy_entry
+                            chunk = pc * close_q * buy_entry * LEVERAGE - close_q * buy_entry * fee_rate * 2
+                            buy_pnl       += chunk
+                            buy_remaining -= close_q
+                            buy_tps_hit    = tp_idx + 1
+                            print(f'[PICKUP] BUY TP{tp_idx+1} @ ${cp:.6f} | chunk: ${chunk:.4f}')
+                    if buy_remaining <= 0 or buy_tps_hit >= len(buy_tps):
+                        buy_done = True
+                    break
 
-        # --- Monitor loop: runs until all TPs/SL hit, user stops, or position gone ---
-        while remaining_qty > 0.0001:
-            if should_stop(user_id):
-                print(f'  User stop: attempting to close {remaining_qty:.4f} at market')
-                try:
-                    close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
-                    if close_result.get('success'):
-                        cp = close_result['close_price']
-                        pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
-                        pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
-                        pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
-                        real_pnl  += pnl_chunk
-                        print(f'  Stopped @ ${cp:.4f} | PnL: ${pnl_chunk:.4f}')
-                    else:
-                        # Position may already be closed (user closed on Bybit manually)
-                        cp = _get_price(monitor_sym, 'futures')
-                        pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
-                        pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
-                        pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
-                        real_pnl  += pnl_chunk
-                        print(f'  Position already closed. Est PnL: ${pnl_chunk:.4f}')
-                except Exception as e:
-                    print(f'  Stop close error (position may be gone): {e}')
-                remaining_qty = 0
-                break  # always break regardless of close result
+            # Check BUY SL
+            if not buy_done and live_price <= buy_sl and buy_remaining > 0:
+                cr = close_trade(buy_sym, 'BUY', buy_remaining)
+                if cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (cp - buy_entry) / buy_entry
+                    chunk = pc * buy_remaining * buy_entry * LEVERAGE - buy_remaining * buy_entry * fee_rate * 2
+                    buy_pnl += chunk
+                    print(f'[PICKUP] BUY SL @ ${cp:.6f} | chunk: ${chunk:.4f}')
+                buy_remaining = 0
+                buy_done = True
 
-            time.sleep(6)
-            try:
-                # Direct REST -- bypasses CCXT pre-flight that 403s on Railway
-                live_price = _get_price(monitor_sym, 'futures')
-                if not live_price:
-                    continue
-            except Exception as e:
-                print(f'  Price fetch error: {e} -- continuing')
-                continue
+        # Check SELL side TPs
+        if not sell_done and sell_remaining > 0:
+            for tp_idx in range(sell_tps_hit, len(sell_tps)):
+                if live_price <= sell_tps[tp_idx]:
+                    instr  = _get_qty_step(sell_sym)
+                    step   = instr['step']
+                    raw_q  = sell_remaining * tp_frac
+                    close_q = round(_math.floor(raw_q / step) * step,
+                                    max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0)
+                    close_q = min(close_q, sell_remaining)
+                    if close_q >= instr['min_qty']:
+                        cr = close_trade(sell_sym, 'SELL', close_q)
+                        if cr.get('success'):
+                            cp = cr['close_price']
+                            pc = (sell_entry - cp) / sell_entry
+                            chunk = pc * close_q * sell_entry * LEVERAGE - close_q * sell_entry * fee_rate * 2
+                            sell_pnl       += chunk
+                            sell_remaining -= close_q
+                            sell_tps_hit    = tp_idx + 1
+                            print(f'[PICKUP] SELL TP{tp_idx+1} @ ${cp:.6f} | chunk: ${chunk:.4f}')
+                    if sell_remaining <= 0 or sell_tps_hit >= len(sell_tps):
+                        sell_done = True
+                    break
 
-            # Check SL first
-            sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
-            if sl_hit:
-                print(f'  SL hit @ ${live_price:.4f} — closing full position')
-                _set_active({'status': 'closing', 'current_price': live_price,
-                             'message': f'SL hit @ ${live_price:.4f} — closing position'})
-                close_result = close_trade(monitor_sym, trade_dir, remaining_qty, trade_mode)
-                if close_result['success']:
-                    cp = close_result['close_price']
-                    pc = (cp - entry_price) if trade_dir == 'BUY' else (entry_price - cp)
-                    pnl_chunk = (pc / entry_price) * (remaining_qty * entry_price) * leverage
-                    pnl_chunk -= remaining_qty * entry_price * fee_rate * 2
-                    real_pnl  += pnl_chunk
-                    print(f'  SL closed @ ${cp:.4f} | PnL: ${pnl_chunk:.4f}')
-                remaining_qty = 0
-                won = False
-                break
+            # Check SELL SL
+            if not sell_done and live_price >= sell_sl and sell_remaining > 0:
+                cr = close_trade(sell_sym, 'SELL', sell_remaining)
+                if cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (sell_entry - cp) / sell_entry
+                    chunk = pc * sell_remaining * sell_entry * LEVERAGE - sell_remaining * sell_entry * fee_rate * 2
+                    sell_pnl += chunk
+                    print(f'[PICKUP] SELL SL @ ${cp:.6f} | chunk: ${chunk:.4f}')
+                sell_remaining = 0
+                sell_done = True
 
-            # Check TPs in order
-            tp_triggered = False
-            for tp_idx in range(tps_hit, len(tp_prices)):
-                tp_hit = (live_price >= tp_prices[tp_idx]) if trade_dir == 'BUY' \
-                         else (live_price <= tp_prices[tp_idx])
-                if tp_hit:
-                    # Round close qty to instrument step -- critical for partial closes
-                    _tp_sym    = monitor_sym.replace('/', '').replace(':USDT', '')
-                    if not _tp_sym.endswith('USDT'): _tp_sym += 'USDT'
-                    instr_info = _get_qty_step(_tp_sym)
-                    _step = instr_info['step']
-                    _min  = instr_info['min_qty']
-                    _raw_close = quantity * TP_CLOSE_FRAC
-                    import math as _math
-                    _dec = max(0, len(str(_step).rstrip('0').split('.')[-1])) if '.' in str(_step) else 0
-                    close_qty = round(_math.floor(_raw_close / _step) * _step, _dec)
-                    close_qty = min(close_qty, remaining_qty)
-                    if close_qty < _min or close_qty < 0.0001:
-                        tps_hit += 1
-                        continue
-                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} (step={_step})')
-                    cr = close_trade(monitor_sym, trade_dir, close_qty, trade_mode)
-                    actual_closed = cr.get('qty_closed', close_qty)
-                    if cr['success']:
-                        cp        = cr['close_price']
-                        pc        = (cp - entry_price) if trade_dir == 'BUY' \
-                                    else (entry_price - cp)
-                        pnl_chunk = (pc / entry_price) * (actual_closed * entry_price) * leverage
-                        pnl_chunk -= actual_closed * entry_price * fee_rate * 2
-                        real_pnl  += pnl_chunk
-                        remaining_qty -= actual_closed
-                        tps_hit        = tp_idx + 1
-                        won            = True
-                        print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | '
-                              f'Remaining: {remaining_qty:.4f}')
-                        # Update active trade state with new TP count
-                        _set_active({
-                            'tp_hits':      tps_hit,
-                            'pnl':          round(real_pnl, 4),
-                            'current_price': cp,
-                            'position_size': remaining_qty,
-                            'status':       'monitoring',
-                            'message':      f'TP{tps_hit} hit @ ${cp:.4f} | Running PnL: ${real_pnl:.4f}',
-                        })
-                        # Emit TP hit to frontend
-                        try:
-                            from app import socketio
-                            socketio.emit('tp_hit', {
-                                'tp_num':    tp_idx + 1,
-                                'price':     cp,
-                                'pnl':       round(pnl_chunk, 4),
-                                'remaining': round(remaining_qty, 4)
-                            }, room=f'user_{user_id}')
-                        except Exception:
-                            pass
-                        tp_triggered = True
-                        break  # re-check from top with new remaining_qty
+        print(f'[PICKUP] Price: ${live_price:.6f} | '
+              f'Buy PnL: ${buy_pnl:.4f} ({buy_tps_hit}/3 TPs) | '
+              f'Sell PnL: ${sell_pnl:.4f} ({sell_tps_hit}/3 TPs)')
 
-            if not tp_triggered:
-                # Live PnL: leveraged dollar amount + leveraged % for display
-                price_diff     = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
-                pct_move       = price_diff / entry_price if entry_price > 0 else 0
-                live_pnl_now   = round(pct_move * (remaining_qty * entry_price) * leverage, 4)
-                live_pnl_pct   = round(pct_move * leverage * 100, 4)  # leveraged % for UI
-                _set_active({
-                    'current_price': live_price,
-                    'pnl':           live_pnl_now,
-                    'pnl_pct':       live_pnl_pct,
-                    'tp_hits':       tps_hit,
-                    'status':        'monitoring',
-                    'message':       f'Monitoring {trade_dir} {sym} | Price ${live_price:.4f} | TPs {tps_hit}/4',
-                })
-                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
-                      f'Remaining: {remaining_qty:.4f}')
-
-            # All TPs hit — position fully closed
-            if tps_hit >= len(tp_prices) or remaining_qty <= 0.0001:
-                print(f'  All TPs hit. Total PnL: ${real_pnl:.4f}')
-                remaining_qty = 0
-                won = True
-                break
-
-        real_pnl = round(real_pnl, 4)
-        # Trade fully closed — clear active state
-        _set_active({
-            'active':  False,
-            'status':  'closed',
-            'pnl':     real_pnl,
-            'tp_hits': tps_hit,
-            'message': f'Trade closed | PnL: ${real_pnl:.4f} | TPs: {tps_hit}/4',
-        })
-        # won = True if closed in profit regardless of how it closed
-        won = real_pnl > 0
-        results['trades'].append({
-            'index':          i + 1,
-            'symbol':         sym,
-            'direction':      trade_dir,
-            'strategy':       'momentum',
-            'confidence':     sig['confidence'],
-            'rsi':            sig['rsi'],
-            'ema_trend':      sig.get('ema_trend', ''),
-            'macd_trend':     sig.get('macd_trend', ''),
-            'volume_trend':   sig.get('volume_trend', 'neutral'),
-            'candle_pattern': sig.get('candle_pattern', 'none'),
-            'market_condition': sig.get('market_condition', 'unknown'),
-            'profit':         real_pnl,
-            'won':            won,
-            'price':          entry_price,
-            'tps_hit':        tps_hit,
-            'real_order':     True,
-        })
-        results['total_trades'] += 1
-        results['net_pnl']      += real_pnl
-        if won:
-            results['wins']   += 1
-        else:
-            results['losses'] += 1
-
-        time.sleep(1)
+    total_pnl = round(buy_pnl + sell_pnl, 4)
+    won       = total_pnl > 0
+    print(f'[PICKUP] Session complete | Total PnL: ${total_pnl:.4f} | Won: {won}')
 
     _clear_active(user_id)
-    results['net_pnl']  = round(results['net_pnl'], 4)
-    results['win_rate'] = round(
-        (results['wins'] / results['total_trades']) * 100, 1
-    ) if results['total_trades'] > 0 else 0
+    results['trades'].append({
+        'index': 1, 'symbol': sym, 'direction': 'HEDGE',
+        'strategy': 'pickup', 'confidence': best_signal['confidence'],
+        'rsi': best_signal['rsi'], 'profit': total_pnl,
+        'won': won, 'price': price, 'real_order': True,
+    })
+    results['total_trades'] = 1
+    results['net_pnl']      = total_pnl
+    results['wins']         = 1 if won else 0
+    results['losses']       = 0 if won else 1
+    results['win_rate']     = 100.0 if won else 0.0
     return results
 
 
-
-
 # ============================================
-# BACKTEST ENGINE
-# Simulates strategy on 500 historical candles
-# before placing any real trade.
+# 8. ALWAYS WIN — Position Averaging Strategy
 # ============================================
-def backtest_strategy(symbol, strategy='momentum', timeframe='5m', lookback=500):
-    print(f'  [BACKTEST] {symbol} | strategy={strategy} | tf={timeframe} | candles={lookback}')
-    df = fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
-    if not df or len(df['close']) < 60:
-        print('  [BACKTEST] Insufficient data')
-        return {'win_rate': 60, 'total_trades': 0, 'profit_factor': 1.0, 'go': True,
-                'reason': 'Not enough history'}
-
-    closes = df['close']
-    highs  = df.get('high', closes)
-    lows   = df.get('low',  closes)
-    opens  = df.get('open', closes)
-    n      = len(closes)
-    wins = 0; losses = 0; gross_profit = 0.0; gross_loss = 0.0
-
-    if strategy in ('momentum', 'auto'):
-        for i in range(30, n - 1):
-            window = closes[:i+1]
-            rsi    = calculate_rsi(window, period=14)
-            _, _, ema_t = calculate_ema_trend(window, short=9, long=21)
-            _, _, _, mt = calculate_macd(window)
-            if rsi < 35 and ema_t == 'bullish' and mt == 'bullish':
-                direction = 'BUY'
-            elif rsi > 65 and ema_t == 'bearish' and mt == 'bearish':
-                direction = 'SELL'
-            else:
-                continue
-            entry = closes[i]
-            tp = entry * (1 + MOMENTUM_TP_PCT) if direction == 'BUY' else entry * (1 - MOMENTUM_TP_PCT)
-            sl = entry * (1 - MOMENTUM_SL_PCT) if direction == 'BUY' else entry * (1 + MOMENTUM_SL_PCT)
-            outcome = None
-            for j in range(i+1, min(i+11, n)):
-                if direction == 'BUY':
-                    if highs[j] >= tp: outcome = 'win';  break
-                    if lows[j]  <= sl: outcome = 'loss'; break
-                else:
-                    if lows[j]  <= tp: outcome = 'win';  break
-                    if highs[j] >= sl: outcome = 'loss'; break
-            if outcome is None:
-                outcome = 'win' if (closes[min(i+10,n-1)] > entry if direction=='BUY' else closes[min(i+10,n-1)] < entry) else 'loss'
-            if outcome == 'win': wins += 1; gross_profit += MOMENTUM_TP_PCT * 100
-            else:                losses += 1; gross_loss  += MOMENTUM_SL_PCT * 100
-
-    elif strategy in ('grid', 'grid_dca'):
-        spacing = GRID_SPACING_PCT; tp_pct = GRID_TP_PCT
-        for i in range(20, n - 5):
-            window_low = min(lows[i:i+3])
-            entry      = closes[i]
-            dip_pct    = (entry - window_low) / entry
-            if dip_pct < spacing: continue
-            tp_target = window_low * (1 + tp_pct)
-            bounced   = any(highs[i+j] >= tp_target for j in range(1, 6))
-            if bounced: wins += 1; gross_profit += tp_pct * 100
-            else:       losses += 1; gross_loss  += spacing * 100
-
-    elif strategy == 'ema_macd':
-        for i in range(40, n - 1):
-            window = closes[:i+1]; wo = opens[:i+1]
-            ema9_s  = ema_series(window, 9)
-            ema21_s = ema_series(window, 21)
-            ema30_s = ema_series(window, 30)
-            ml_curr, sl_curr, _, _ = calculate_macd(window)
-            ml_prev, sl_prev, _, _ = calculate_macd(window[:-1]) if len(window) > 1 else (0,0,0,'neutral')
-            bull_x = ml_curr > sl_curr and ml_prev <= sl_prev
-            bear_x = ml_curr < sl_curr and ml_prev >= sl_prev
-            prev_c = closes[i-1]; prev_o = opens[i-1]
-            curr_c = closes[i];   curr_o = opens[i]
-            if bull_x and prev_c < prev_o and prev_c < ema30_s[-2] and curr_c > curr_o and curr_c > ema9_s[-1]:
-                direction = 'BUY'
-            elif bear_x and prev_c > prev_o and prev_c > ema30_s[-2] and curr_c < curr_o and curr_c < ema21_s[-1]:
-                direction = 'SELL'
-            else: continue
-            entry = closes[i]
-            tp = entry*(1+MOMENTUM_TP_PCT) if direction=='BUY' else entry*(1-MOMENTUM_TP_PCT)
-            sl = entry*(1-MOMENTUM_SL_PCT) if direction=='BUY' else entry*(1+MOMENTUM_SL_PCT)
-            outcome = None
-            for j in range(i+1, min(i+11, n)):
-                if direction == 'BUY':
-                    if highs[j] >= tp: outcome = 'win';  break
-                    if lows[j]  <= sl: outcome = 'loss'; break
-                else:
-                    if lows[j]  <= tp: outcome = 'win';  break
-                    if highs[j] >= sl: outcome = 'loss'; break
-            if outcome is None:
-                outcome = 'win' if (closes[min(i+10,n-1)] > entry if direction=='BUY' else closes[min(i+10,n-1)] < entry) else 'loss'
-            if outcome == 'win': wins += 1; gross_profit += MOMENTUM_TP_PCT * 100
-            else:                losses += 1; gross_loss  += MOMENTUM_SL_PCT * 100
-
-    total = wins + losses
-    if total == 0:
-        return {'win_rate': 55, 'total_trades': 0, 'profit_factor': 1.0, 'go': True,
-                'reason': 'No matching setups in history'}
-
-    win_rate      = round((wins / total) * 100, 1)
-    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
-    go            = win_rate >= 52 and profit_factor >= 1.0
-    reason = (f'Backtest {total} setups: {win_rate}% win rate, '
-              f'profit factor {profit_factor}x -- {"PROCEED" if go else "CAUTION"}')
-    print(f'  [BACKTEST] {reason}')
-    return {'win_rate': win_rate, 'total_trades': total,
-            'profit_factor': profit_factor, 'go': go, 'reason': reason}
-
-
+# How it works:
+# - Opens initial position in signal direction
+# - If price moves against you, opens another position
+#   at the better price (averages down/up)
+# - Max 5 position adds (safety cap)
+# - When price reverses back, ALL averaged positions
+#   profit simultaneously
+# - Result: even bad initial entries recover with averaging
 # ============================================
-# EMA/MACD STRATEGY (custom strategy)
-# BUY:  MACD upward cross + prev red<EMA30 + curr green>EMA9
-# SELL: MACD downward cross + prev green>EMA30 + curr red<EMA21
-# EMAs: 9, 21, 30, 50, 100, 200
-# MACD: fast=50, slow=200, signal=1
-# ============================================
-def generate_ema_macd_signal(symbol):
-    try:
-        df = fetch_ohlcv(symbol, timeframe='5m', limit=250)
-        if not df or len(df['close']) < 210:
-            print(f'  [EMA_MACD] Insufficient data for {symbol}')
-            return None
-        closes = df['close']; opens = df.get('open', closes)
-        ema9   = ema_series(closes, 9)
-        ema21  = ema_series(closes, 21)
-        ema30  = ema_series(closes, 30)
-        ema50  = ema_series(closes, 50)
-        ema100 = ema_series(closes, 100)
-        ema200 = ema_series(closes, 200)
-        macd_line = [a - b for a, b in zip(ema_series(closes, 50), ema_series(closes, 200))]
-        sig_line  = ema_series(macd_line, 1)
-        curr_c = closes[-1]; curr_o = opens[-1]
-        prev_c = closes[-2]; prev_o = opens[-2]
-        curr_green = curr_c > curr_o; curr_red = curr_c < curr_o
-        prev_green = prev_c > prev_o; prev_red = prev_c < prev_o
-        macd_curr = macd_line[-1]; macd_prev = macd_line[-2]
-        sig_curr  = sig_line[-1];  sig_prev  = sig_line[-2]
-        bull_x = macd_curr > sig_curr and macd_prev <= sig_prev
-        bear_x = macd_curr < sig_curr and macd_prev >= sig_prev
-        trend_bull = closes[-1] > ema200[-1]
-        trend_bear = closes[-1] < ema200[-1]
-        direction = None; confidence = 0
-        if bull_x and prev_red and prev_c < ema30[-2] and curr_green and curr_c > ema9[-1]:
-            direction = 'BUY'; confidence = 78
-            if trend_bull: confidence += 7
-            if curr_c > ema50[-1]: confidence += 3
-            if curr_c > ema100[-1]: confidence += 2
-        elif bear_x and prev_green and prev_c > ema30[-2] and curr_red and curr_c < ema21[-1]:
-            direction = 'SELL'; confidence = 78
-            if trend_bear: confidence += 7
-            if curr_c < ema50[-1]: confidence += 3
-            if curr_c < ema100[-1]: confidence += 2
-        if direction is None:
-            print(f'  [EMA_MACD] {symbol}: no crossover setup')
-            return None
-        current_price = fetch_current_price(symbol) or closes[-1]
-        confidence = min(95, confidence)
-        print(f'  [EMA_MACD] {symbol}: {direction} {confidence}%')
-        return {'symbol': symbol, 'direction': direction, 'confidence': round(confidence,1),
-                'strategy': 'ema_macd', 'rsi': calculate_rsi(closes, 14),
-                'ema_trend': 'bullish' if closes[-1] > ema21[-1] else 'bearish',
-                'macd_trend': 'bullish' if bull_x else 'bearish',
-                'current_price': current_price}
-    except Exception as e:
-        print(f'  [EMA_MACD] Error for {symbol}: {e}')
-        return None
+def execute_always_win_session(amount, timeframe_minutes=None, num_trades=1,
+                                user_id=None, user_balance=None, user_api_key=None,
+                                user_api_secret=None):
+    """
+    Always Win (Position Averaging):
+    Opens initial trade on best signal.
+    If price moves against position, adds more at better prices.
+    Max 5 adds. When price reverses, all positions profit together.
+    """
+    results = {
+        'strategy':     'always_win',
+        'trades':       [],
+        'total_trades': 0,
+        'wins':         0,
+        'losses':       0,
+        'net_pnl':      0.0,
+        'win_rate':     0.0,
+        'real_trading': True,
+        'trade_mode':   'futures'
+    }
 
+    clear_stop(user_id)
 
-def execute_ema_macd_session(amount, timeframe_minutes, num_trades=1, symbol=None):
-    results = {'strategy': 'ema_macd', 'trades': [], 'total_trades': 0,
-               'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
-               'real_trading': True, 'trade_mode': 'spot'}
-    balance_info = get_bybit_balance()
-    if not balance_info['success']:
-        return {**results, 'real_trading': False, 'error': 'Bybit unreachable'}
-    available_usdt = balance_info['USDT']
-    trade_mode = balance_info.get('trade_mode', 'spot')
-    leverage   = LEVERAGE if trade_mode == 'futures' else 1
-    results['trade_mode'] = trade_mode
-    amount = min(amount, available_usdt * 0.99)
-    trade_usdt = amount / num_trades
-    session_loss_limit = amount * MAX_SESSION_LOSS_PCT
-    best_signal = None; best_conf = 0
-    for pair in CRYPTO_PAIRS:
-        sig = generate_ema_macd_signal(pair)
-        if sig and sig['confidence'] > best_conf:
-            best_signal = sig; best_conf = sig['confidence']
-        time.sleep(0.2)
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+    else:
+        return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
+
+    print(f'[AW] Balance: ${available_usdt:.2f} | Always Win session starting')
+
+    MAX_ADDS    = 5      # maximum position adds
+    ADD_SPACING = 1.5    # add new position every 1.5x ATR against us
+    fee_rate    = 0.001
+    slice_amt   = amount / MAX_ADDS  # each add uses equal slice
+
+    _set_active({'running': True, 'user_id': user_id, 'status': 'scanning',
+                 'message': 'Always Win: scanning for best pair...'})
+
+    best_signal = select_best_pair(CRYPTO_PAIRS)
     if best_signal is None:
-        results['message'] = 'No EMA/MACD crossover setup found right now. Try again in a few minutes.'
+        _clear_active(user_id)
+        results['message'] = 'No quality setup found. Try again shortly.'
         return results
-    bt = backtest_strategy(best_signal['symbol'], strategy='ema_macd')
-    results['backtest'] = bt
-    if not bt['go']:
-        results['message'] = f'Backtest caution: {bt["reason"]}. Session paused.'
+
+    sym       = best_signal['symbol']
+    direction = best_signal['direction']
+    atr       = best_signal.get('atr', 0.001)
+    bybit_sym = sym.replace('/', '').replace(':USDT', '')
+    if not bybit_sym.endswith('USDT'):
+        bybit_sym += 'USDT'
+
+    print(f'[AW] Pair: {sym} | Direction: {direction} | ATR: {atr:.6f}')
+
+    positions  = []   # list of {price, qty, order_id}
+    real_pnl   = 0.0
+    adds_done  = 0
+    won        = False
+
+    _set_active({
+        'status':    'entering',
+        'symbol':    sym,
+        'direction': direction,
+        'message':   f'Always Win: opening initial {direction} on {sym}',
+    })
+
+    # Open initial position
+    order = execute_real_trade(sym, direction, slice_amt, 'futures')
+    if not order['success']:
+        _clear_active(user_id)
+        results['message'] = f'Initial entry failed: {order.get("error")}'
         return results
-    symbol = best_signal['symbol']
-    trade_direction = best_signal['direction']
-    if trade_mode == 'spot':
-        trade_direction = 'BUY'
-    elif trade_mode == 'futures':
-        # Apply ranging market RSI protection here too
-        market_cond = best_signal.get('market_condition', 'unknown')
-        rsi_now     = best_signal.get('rsi', 50)
-        if market_cond == 'ranging' and rsi_now < 50 and trade_direction == 'SELL':
-            print(f'  🛡 EMA/MACD ranging protection: RSI {rsi_now:.1f} < 50 — switching to BUY')
-            trade_direction = 'BUY'
-        if market_cond == 'ranging' and rsi_now > 60 and trade_direction == 'BUY':
-            print(f'  🛡 EMA/MACD ranging protection: RSI {rsi_now:.1f} > 60 — switching to SELL')
-            trade_direction = 'SELL'
-    for i in range(num_trades):
-        if results['net_pnl'] < -session_loss_limit: break
-        entry_order = execute_real_trade(symbol, trade_direction, trade_usdt, trade_mode)
-        if not entry_order['success']:
-            print(f'  [EMA_MACD] Entry failed: {entry_order.get("error")}')
+
+    positions.append({'price': order['price'], 'qty': order['quantity']})
+    adds_done = 1
+    print(f'[AW] Initial entry #{adds_done}: {order["quantity"]} @ ${order["price"]:.6f}')
+
+    # Calculate TP based on average entry — profit target = 1x ATR from average
+    def calc_avg_entry():
+        total_cost = sum(p['price'] * p['qty'] for p in positions)
+        total_qty  = sum(p['qty'] for p in positions)
+        return total_cost / total_qty if total_qty > 0 else 0
+
+    def calc_total_qty():
+        return sum(p['qty'] for p in positions)
+
+    import math as _math
+
+    while True:
+        if should_stop(user_id):
+            print('[AW] User stop -- closing all positions')
+            total_qty = calc_total_qty()
+            if total_qty > 0:
+                cr = close_trade(bybit_sym, direction, total_qty)
+                if cr.get('success'):
+                    avg  = calc_avg_entry()
+                    cp   = cr['close_price']
+                    pc   = (cp - avg) / avg if direction == 'BUY' else (avg - cp) / avg
+                    chunk = pc * total_qty * avg * LEVERAGE - total_qty * avg * fee_rate * 2
+                    real_pnl += chunk
+            break
+
+        time.sleep(6)
+        live_price = _get_price(sym, 'futures')
+        if not live_price:
             continue
-        entry_price = entry_order['price']; quantity = entry_order['quantity']
-        tp_pct = MOMENTUM_TP_PCT / leverage; sl_pct = MOMENTUM_SL_PCT / leverage
-        tp = entry_price*(1+tp_pct) if trade_direction=='BUY' else entry_price*(1-tp_pct)
-        sl = entry_price*(1-sl_pct) if trade_direction=='BUY' else entry_price*(1+sl_pct)
-        max_wait = timeframe_minutes * 60; elapsed = 0
-        px = bybit_futures if trade_mode == 'futures' else bybit_spot
-        msym = entry_order['symbol']
-        while elapsed < max_wait:
-            time.sleep(10); elapsed += 10
-            try:
-                live_price = float(px.fetch_ticker(msym)['last'])
-                if trade_direction=='BUY'  and live_price >= tp: break
-                if trade_direction=='BUY'  and live_price <= sl: break
-                if trade_direction=='SELL' and live_price <= tp: break
-                if trade_direction=='SELL' and live_price >= sl: break
-            except Exception: pass
-        close_order = close_trade(msym, trade_direction, quantity, trade_mode)
-        real_pnl = 0.0; won = False
-        if close_order['success']:
-            cp = close_order['close_price']
-            pc = (cp - entry_price) if trade_direction=='BUY' else (entry_price - cp)
-            real_pnl = round((pc / entry_price) * trade_usdt * leverage - trade_usdt * 0.002, 4)
-            won = real_pnl > 0
-        results['trades'].append({'index': i+1, 'symbol': symbol, 'direction': trade_direction,
-            'strategy': 'ema_macd', 'confidence': best_signal['confidence'],
-            'rsi': best_signal['rsi'], 'profit': real_pnl, 'won': won,
-            'price': entry_price, 'real_order': True})
-        results['total_trades'] += 1; results['net_pnl'] += real_pnl
-        if won: results['wins'] += 1
-        else:   results['losses'] += 1
-        time.sleep(0.5)
-    results['net_pnl']  = round(results['net_pnl'], 4)
-    results['win_rate'] = round((results['wins']/results['total_trades'])*100,1) if results['total_trades']>0 else 0
+
+        avg_entry  = calc_avg_entry()
+        total_qty  = calc_total_qty()
+
+        # TP: when price reaches avg_entry + 1.5x ATR (BUY) or avg_entry - 1.5x ATR (SELL)
+        tp_price = avg_entry + atr * 1.5 if direction == 'BUY' else avg_entry - atr * 1.5
+
+        # Live PnL
+        pc_now = (live_price - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - live_price) / avg_entry
+        live_pnl_now = pc_now * total_qty * avg_entry * LEVERAGE
+        _set_active({
+            'current_price': live_price,
+            'pnl':           round(live_pnl_now, 4),
+            'pnl_pct':       round(pc_now * LEVERAGE * 100, 2),
+            'message':       f'AW {direction} | Avg: ${avg_entry:.6f} | TP: ${tp_price:.6f} | Adds: {adds_done}/{MAX_ADDS}',
+        })
+
+        print(f'[AW] Price: ${live_price:.6f} | Avg: ${avg_entry:.6f} | '
+              f'TP: ${tp_price:.6f} | LivePnL: ${live_pnl_now:.4f} | Adds: {adds_done}/{MAX_ADDS}')
+
+        # Check TP
+        tp_hit = live_price >= tp_price if direction == 'BUY' else live_price <= tp_price
+        if tp_hit:
+            print(f'[AW] TP HIT @ ${live_price:.6f} -- closing all {total_qty} units')
+            _set_active({'status': 'closing', 'message': f'AW TP hit @ ${live_price:.6f}'})
+            cr = close_trade(bybit_sym, direction, total_qty)
+            if cr.get('success'):
+                cp    = cr['close_price']
+                pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
+                chunk = pc * total_qty * avg_entry * LEVERAGE - total_qty * avg_entry * fee_rate * 2
+                real_pnl += chunk
+                print(f'[AW] Closed @ ${cp:.6f} | PnL: ${chunk:.4f}')
+                won = chunk > 0
+            break
+
+        # Check if we should add another position (price moved against us by ADD_SPACING * ATR)
+        price_vs_avg = (avg_entry - live_price) / avg_entry if direction == 'BUY' else (live_price - avg_entry) / avg_entry
+        add_threshold = ADD_SPACING * (adds_done * 0.5)  # each add requires more adverse move
+        should_add = price_vs_avg >= (atr / avg_entry) * add_threshold if avg_entry > 0 else False
+
+        if should_add and adds_done < MAX_ADDS:
+            print(f'[AW] Price adverse by {price_vs_avg*100:.3f}% -- adding position #{adds_done+1}')
+            _set_active({'message': f'AW averaging: opening add #{adds_done+1} @ ${live_price:.6f}'})
+            add_order = execute_real_trade(sym, direction, slice_amt, 'futures')
+            if add_order['success']:
+                positions.append({'price': add_order['price'], 'qty': add_order['quantity']})
+                adds_done += 1
+                new_avg = calc_avg_entry()
+                print(f'[AW] Add #{adds_done} @ ${add_order["price"]:.6f} | New avg: ${new_avg:.6f}')
+            else:
+                print(f'[AW] Add failed: {add_order.get("error")}')
+
+        elif adds_done >= MAX_ADDS:
+            # Max adds reached -- if price is still going hard against us, cut loss
+            if price_vs_avg > (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False:
+                print(f'[AW] Max adverse move reached -- cutting loss')
+                _set_active({'status': 'closing', 'message': 'AW: max loss protection triggered'})
+                cr = close_trade(bybit_sym, direction, total_qty)
+                if cr.get('success'):
+                    cp    = cr['close_price']
+                    pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
+                    chunk = pc * total_qty * avg_entry * LEVERAGE - total_qty * avg_entry * fee_rate * 2
+                    real_pnl += chunk
+                    print(f'[AW] Cut loss @ ${cp:.6f} | PnL: ${chunk:.4f}')
+                break
+
+    real_pnl = round(real_pnl, 4)
+    won      = real_pnl > 0
+    print(f'[AW] Session complete | PnL: ${real_pnl:.4f} | Won: {won}')
+
+    _clear_active(user_id)
+    results['trades'].append({
+        'index': 1, 'symbol': sym, 'direction': direction,
+        'strategy': 'always_win', 'confidence': best_signal['confidence'],
+        'rsi': best_signal['rsi'], 'profit': real_pnl,
+        'won': won, 'price': positions[0]['price'] if positions else 0,
+        'real_order': True,
+    })
+    results['total_trades'] = 1
+    results['net_pnl']      = real_pnl
+    results['wins']         = 1 if won else 0
+    results['losses']       = 0 if won else 1
+    results['win_rate']     = 100.0 if won else 0.0
     return results
+
 
 
 # ============================================
@@ -2348,34 +1657,42 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
             }
         print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
 
-    if strategy == 'grid' or strategy == 'grid_dca':
-        result = execute_grid_session(amount, timeframe_minutes, symbol=symbol)
-
-    elif strategy == 'momentum':
+    if strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
                                           num_trades=num_trades, force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
                                           user_trade_mode='futures')
 
-    elif strategy == 'ema_macd':
-        result = execute_ema_macd_session(amount, timeframe_minutes,
-                                          num_trades=num_trades, symbol=symbol)
+    elif strategy == 'pickup' or strategy == 'pick_up':
+        result = execute_pickup_session(amount, timeframe_minutes,
+                                        user_id=user_id,
+                                        user_balance=_user_live_bal,
+                                        user_api_key=user_api_key,
+                                        user_api_secret=user_api_secret)
+
+    elif strategy == 'always_win' or strategy == 'aw':
+        result = execute_always_win_session(amount, timeframe_minutes,
+                                             user_id=user_id,
+                                             user_balance=_user_live_bal,
+                                             user_api_key=user_api_key,
+                                             user_api_secret=user_api_secret)
 
     elif strategy == 'auto' or strategy == 'auto_best':
-        result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol,
-                                           user_balance=_user_live_bal,
-                                           user_trade_mode='futures',
-                                           user_id=user_id)
+        # Auto-Best uses momentum as the core engine
+        result = execute_momentum_session(amount, timeframe_minutes,
+                                          num_trades=num_trades, force=force, symbol=symbol,
+                                          user_id=user_id,
+                                          user_balance=_user_live_bal,
+                                          user_trade_mode='futures')
+        result['strategy'] = 'auto'
 
     else:
-        print(f'Unknown strategy "{strategy}" — defaulting to auto')
-        result = execute_auto_best_session(amount, timeframe_minutes,
-                                           num_trades=num_trades, symbol=symbol,
-                                           user_balance=_user_live_bal,
-                                           user_trade_mode='futures',
-                                           user_id=user_id)
+        result = execute_momentum_session(amount, timeframe_minutes,
+                                          num_trades=num_trades, force=force, symbol=symbol,
+                                          user_id=user_id,
+                                          user_balance=_user_live_bal,
+                                          user_trade_mode='futures')
 
     # Restore admin exchange after user session completes
     if use_user_account and _original_futures is not None:

@@ -42,7 +42,7 @@ fetch('/api/user-balance')
   })
   .catch(() => {});
   
-let selectedStrategy  = window.SELECTED_STRATEGY || 'grid';
+let selectedStrategy  = window.SELECTED_STRATEGY || 'momentum';
 let selectedPair      = window.SELECTED_PAIR     || 'XRP/USDT';   // default pair
 let selectedLeverage  = window.SELECTED_LEVERAGE || 2;             // default 2x leverage
 let compoundRate      = 0.0;  // 0=off, 0.5=reinvest 50% of profits
@@ -70,10 +70,10 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 // 2b. STRATEGY SELECTOR
 // ============================================
 const strategyHints = {
-  auto:     'Bot scans all pairs and picks Grid or Momentum based on live market conditions.',
-  grid:     'Places 5 buy orders in a price ladder. Level 1 fills instantly. Very high win rate.',
-  momentum: 'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.',
-  ema_macd: 'MACD crossover (fast 50, slow 200) + two-candle EMA30/EMA9 confirmation. Precise trend reversal entries.'
+  auto:       'Bot scans all 25 pairs and picks the best opportunity automatically.',
+  momentum:   'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.',
+  pickup:     'Pick Up Trade: opens BUY + SELL simultaneously. Whichever direction price moves, one side profits.',
+  always_win: 'Always Win: averages into position if price moves against you (max 5 adds). Recovers when price reverses.'
 };
 
 document.querySelectorAll('.strategy-btn').forEach(btn => {
