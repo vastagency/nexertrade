@@ -764,7 +764,17 @@ def api_bot_execute():
             'timeframe': timeframe, 'strategy': strategy
         }, room='admin_room')
 
-        # Start session in background thread — return job_id immediately
+        # Kill any existing running session for this user before starting new one
+        # Prevents ghost sessions running in background from previous clicks
+        from bot import request_stop as _req_stop
+        _req_stop(current_user.id)
+        with _trade_jobs_lock:
+            for _jid, _job in list(_trade_jobs.items()):
+                if _job.get('user_id') == current_user.id and _job.get('status') == 'running':
+                    _trade_jobs[_jid]['status'] = 'done'
+                    print(f'  [SESSION] Killed ghost session {_jid} for user {current_user.id}')
+
+        # Start session in background thread -- return job_id immediately
         # This prevents Railway's 30s HTTP timeout from killing the connection
         job_id = str(uuid.uuid4())
         with _trade_jobs_lock:

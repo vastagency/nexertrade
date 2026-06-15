@@ -1890,6 +1890,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             'tp_hits': tps_hit,
             'message': f'Trade closed | PnL: ${real_pnl:.4f} | TPs: {tps_hit}/4',
         })
+        # won = True if closed in profit regardless of how it closed
+        won = real_pnl > 0
         results['trades'].append({
             'index':          i + 1,
             'symbol':         sym,
