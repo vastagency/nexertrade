@@ -31,6 +31,11 @@ app = Flask(__name__,
             static_folder='static')
 
 app.config['SECRET_KEY']                  = os.getenv('SECRET_KEY', 'nexertrade-dev-key-2026')
+app.config['PERMANENT_SESSION_LIFETIME']   = 60 * 60 * 24 * 7  # 7 days
+app.config['SESSION_COOKIE_SECURE']        = False  # True if HTTPS only
+app.config['SESSION_COOKIE_HTTPONLY']      = True
+app.config['SESSION_COOKIE_SAMESITE']      = 'Lax'
+app.config['REMEMBER_COOKIE_DURATION']     = 60 * 60 * 24 * 7
 db_url = os.getenv('DATABASE_URL', 'sqlite:///nexertrade.db')
 if db_url.startswith('postgres://'):
     db_url = db_url.replace('postgres://', 'postgresql://', 1)
@@ -424,7 +429,9 @@ def api_login():
     if not user.is_active:
         return jsonify({'success': False, 'message': 'Your account has been suspended'}), 403
 
-    login_user(user, remember=remember)
+    login_user(user, remember=True)
+    from flask import session as _sess
+    _sess.permanent = True
     redirect_url = '/admin' if user.is_admin else '/dashboard'
     return jsonify({'success': True, 'message': 'Login successful', 'redirect': redirect_url}), 200
 

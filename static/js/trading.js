@@ -277,12 +277,32 @@ function tickLiveChart(newPrice) {
 
 
 // ============================================
-// 5. TIMER
+// 5. SESSION ELAPSED TIMER
 // ============================================
+let sessionStartTime  = null;
+let sessionTimerInterval = null;
 
+function startSessionTimer() {
+  sessionStartTime = Date.now();
+  clearInterval(sessionTimerInterval);
+  sessionTimerInterval = setInterval(() => {
+    if (!isTrading) { clearInterval(sessionTimerInterval); return; }
+    const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+    const mins    = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const secs    = String(elapsed % 60).padStart(2, '0');
+    const timerEl = document.getElementById('sessionTimer');
+    if (timerEl) timerEl.textContent = `${mins}:${secs}`;
+    // Progress bar grows over first 5 minutes then pulses
+    const pct = Math.min(100, (elapsed / 300) * 100);
+    const bar = document.getElementById('sessionProgressBar');
+    if (bar && pct < 100) bar.style.width = pct + '%';
+  }, 1000);
+}
 
-
-
+function stopSessionTimer() {
+  clearInterval(sessionTimerInterval);
+  sessionTimerInterval = null;
+}
 
 // ============================================
 // 6. TRADE STREAM UI
@@ -372,6 +392,7 @@ async function startSession(force = false) {
   document.getElementById('sessionStatusSub').textContent   = `Amount: $${selectedAmount} | 4 TPs + SL | Waiting for signal...`;
   document.getElementById('sessionIcon').className          = 'session-icon';
   document.getElementById('sessionPanel').style.display     = 'block';
+  startSessionTimer();  // FIX F: start elapsed timer
 
   const btn = document.getElementById('mainActionBtn');
   btn.classList.add('stopping');
@@ -564,6 +585,7 @@ async function stopSession(natural = false, botData = null) {
   const panel = document.getElementById('liveTradePanel');
   if (panel) panel.style.display = 'none';
   clearInterval(chartInterval);
+  stopSessionTimer();  // FIX F: stop elapsed timer
 
   document.getElementById('sessionProgressBar').style.width  = '100%';
   document.getElementById('sessionStatusTitle').textContent  = 'Session complete';
@@ -1000,14 +1022,26 @@ function updateLiveTradeUI(data) {
     }
 }
 
-// Poll only when trading is active
+// Poll only when trading is active -- drives chart, timer, and live trade panel
 setInterval(async () => {
-    if (!isTrading) return;   // do nothing if no session is running
+    if (!isTrading) return;
     try {
         const res  = await fetch('/api/live_status');
         const data = await res.json();
         updateLiveTradeUI(data);
+        // FIX E: tick the live chart with real current price from backend
+        if (data && data.current_price && data.current_price > 0) {
+            tickLiveChart(data.current_price);
+        }
+        // Update chart pair label to real trading pair
+        if (data && data.pair && data.active) {
+            const labelEl = document.getElementById('liveChartLabel');
+            if (labelEl) {
+                const displayPair = data.pair.replace('USDT', '/USD');
+                labelEl.innerHTML = '<span class="live-dot"></span> Live &middot; ' + displayPair;
+            }
+        }
     } catch (err) {
-        // silently skip — network hiccup, don't crash UI
+        // silently skip -- network hiccup
     }
 }, 4000);

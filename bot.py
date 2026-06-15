@@ -106,7 +106,7 @@ FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 # Momentum scalper
 MOMENTUM_TP_PCT  = 0.03    # +3% take profit — real directional profit target
 MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss  → R:R = 2:1
-MIN_CONF         = 72      # minimum confidence -- only high-conviction trades
+MIN_CONF         = 65      # quality scalps -- trend filter protects direction
 STRONG_CONF      = 82      # strong signal -- full size entry
 
 # Grid/DCA
@@ -453,7 +453,7 @@ def detect_market_condition(df):
 # - Minimum confidence: 72% (was 60%)
 # ============================================
 
-MIN_CONF    = 72    # raised from 60 — only high-conviction trades
+MIN_CONF    = 65    # quality scalps -- trend filter still protects direction
 STRONG_CONF = 82    # strong signal — scale in with full size
 
 def calculate_ema50(closes):
@@ -686,8 +686,8 @@ def generate_signal(symbol, timeframe='5m'):
 
         # ── GATE 4: MINIMUM SCORE ───────────────────────────────────────
         # Need clear conviction — ±6 minimum (old was ±2)
-        if abs(score) < 6:
-            print(f'  [{symbol}] Score {score} below scalping threshold (min ±6)')
+        if abs(score) < 4:
+            print(f'  [{symbol}] Score {score} too weak (min 4)')
             return None
 
         # ── DIRECTION — must align with 1h trend ────────────────────────
@@ -710,6 +710,9 @@ def generate_signal(symbol, timeframe='5m'):
         elif abs_score >= 10: confidence = 84
         elif abs_score >= 8:  confidence = 80
         elif abs_score >= 6:  confidence = 75
+        elif abs_score >= 5:  confidence = 71
+        elif abs_score >= 4:  confidence = 67
+        else:                 confidence = 60
 
         # Confluence bonuses
         if volume_trend == 'confirming':   confidence = min(95, confidence + 3)
@@ -803,7 +806,7 @@ def select_best_pair(pairs):
     best_confidence = 0
     passed          = []
 
-    print('  Scanning pairs for best opportunity...')
+    print(f'  Scanning {len(pairs)} pairs...')
     for pair in pairs:
         try:
             sig = generate_signal(pair)
@@ -812,7 +815,7 @@ def select_best_pair(pairs):
                 if sig['confidence'] > best_confidence:
                     best_signal     = sig
                     best_confidence = sig['confidence']
-            time.sleep(0.3)
+            time.sleep(0.2)
         except Exception as e:
             print(f'  Scan error for {pair}: {e}')
 
@@ -1628,27 +1631,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         sym    = sig['symbol']
         symbol = sym  # lock in for subsequent trades in session
 
-        # Direction logic
-        if trade_mode == 'futures':
-            bull_emas = sum([
-                sig.get('ema_trend')   == 'bullish',
-                sig.get('ema_trend15') == 'bullish',
-                sig.get('ema_trend1h') == 'bullish',
-            ])
-            bear_emas    = 3 - bull_emas
-            trade_dir    = sig['direction']
-            market_cond  = sig.get('market_condition', 'ranging')
-            rsi_now      = sig.get('rsi', 50)
-
-            if trade_dir == 'BUY' and bear_emas >= 2:
-                trade_dir = 'SELL'
-                print(f'  EMA override: SELL (bearish {bear_emas}/3 EMAs)')
-            if market_cond == 'ranging' and rsi_now < 50 and trade_dir == 'SELL':
-                trade_dir = 'BUY'
-            if market_cond == 'ranging' and rsi_now > 60 and trade_dir == 'BUY':
-                trade_dir = 'SELL'
-        else:
-            trade_dir = 'BUY'
+        # Signal engine Gate 4 already enforces trend alignment -- trust it
+        trade_dir = sig['direction']
 
         print(f'\nTrade {i+1}/{num_trades}: {sym} {trade_dir} | '
               f'RSI:{sig["rsi"]} | Conf:{sig["confidence"]:.0f}% | '
@@ -1760,12 +1744,13 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 remaining_qty = 0
                 break  # always break regardless of close result
 
-            time.sleep(8)
+            time.sleep(6)
             try:
-                ticker     = price_exchange.fetch_ticker(monitor_sym)
-                live_price = float(ticker['last'])
+                # Direct REST -- bypasses CCXT pre-flight that 403s on Railway
+                live_price = _get_price(monitor_sym, 'futures')
+                if not live_price:
+                    continue
             except Exception as e:
-                # If we can't fetch price 3 times in a row, position may be gone
                 print(f'  Price fetch error: {e} -- continuing')
                 continue
 

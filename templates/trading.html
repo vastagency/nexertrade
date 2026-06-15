@@ -39,7 +39,7 @@
           </svg>
           <span class="notif-dot"></span>
         </button>
-        <div class="nav-user">
+        <a href="/profile" class="nav-user" style="text-decoration:none;cursor:pointer;" title="Go to Profile">
           <div class="nav-user-avatar">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
@@ -47,7 +47,7 @@
             </svg>
           </div>
           <span class="nav-user-name">{{ user.name.split()[0] }}</span>
-        </div>
+        </a>
         <a href="/logout" class="nav-icon-btn">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
