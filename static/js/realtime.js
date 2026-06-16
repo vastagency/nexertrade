@@ -28,7 +28,11 @@ socket.on('connected', (data) => {
 socket.on('balance_update', (data) => {
   console.log('Balance update received:', data);
 
-  // Update all balance displays on current page
+  // Only update balance display if this is a meaningful update
+  // (session complete, deposit confirmed, etc) -- NOT on initial connect
+  // On initial connect the server renders the correct value already
+  if (!data.is_live_event) return;  // skip join_dashboard emit
+
   const balanceEls = [
     document.getElementById('statBalance'),
     document.getElementById('availableBalance'),
@@ -39,11 +43,7 @@ socket.on('balance_update', (data) => {
     if (el) {
       const oldVal = parseFloat(el.textContent.replace('$', '')) || 0;
       const newVal = data.balance;
-
-      // Animate the number change
       animateBalanceChange(el, oldVal, newVal);
-
-      // Flash green if increased, red if decreased
       if (newVal > oldVal) {
         el.style.color = 'var(--accent-green)';
         setTimeout(() => { el.style.color = ''; }, 2000);
@@ -413,43 +413,4 @@ toastStyles.textContent = `
 document.head.appendChild(toastStyles);
 
 
-// ================================
-// NEXERTRADE LIVE UI ENGINE
-// ================================
-
-function updateLiveTradeUI(data) {
-
-    const statusEl = document.getElementById('liveTradeStatus');
-    const pairEl   = document.getElementById('liveTradePair');
-    const sideEl   = document.getElementById('liveTradeSide');
-    const pnlEl    = document.getElementById('liveTradePnl');
-    const tpEl     = document.getElementById('liveTradeTp');
-    const barEl    = document.getElementById('tradeProgressBar');
-
-    if(statusEl) statusEl.innerText = data.status || 'Monitoring active trade...';
-    if(pairEl) pairEl.innerText = data.pair || '-';
-    if(sideEl) sideEl.innerText = data.side || '-';
-    if(pnlEl) pnlEl.innerText = (data.pnl || 0) + '%';
-    if(tpEl) tpEl.innerText = `${data.tp_hits || 0} / 4`;
-
-    if(barEl){
-        const width = ((data.tp_hits || 0) / 4) * 100;
-        barEl.style.width = width + '%';
-    }
-}
-
-setInterval(async () => {
-
-    try {
-
-        const res = await fetch('/api/live_status');
-        const data = await res.json();
-
-        updateLiveTradeUI(data);
-
-    } catch(err) {
-        console.log('Live UI update error', err);
-    }
-
-}, 4000);
-
+// Live trade UI handled by trading.js

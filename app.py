@@ -220,11 +220,14 @@ def on_disconnect():
 def on_join_dashboard():
     if current_user.is_authenticated:
         join_room(f'user_{current_user.id}')
+        # is_live_event=False tells realtime.js to ignore this
+        # The server already rendered the correct balance on page load
         emit('balance_update', {
             'balance':            get_display_balance(current_user),
             'total_profit':       round(current_user.total_profit, 2),
             'total_withdrawn':    round(current_user.total_withdrawn, 2),
-            'sessions_completed': current_user.sessions_completed
+            'sessions_completed': current_user.sessions_completed,
+            'is_live_event':      False
         })
 
 @socketio.on('ping_server')
@@ -898,7 +901,8 @@ def api_bot_result(job_id):
         'balance':            _live_bal,
         'total_profit':       round(current_user.total_profit, 2),
         'total_withdrawn':    round(current_user.total_withdrawn, 2),
-        'sessions_completed': current_user.sessions_completed
+        'sessions_completed': current_user.sessions_completed,
+        'is_live_event':      True
     }, room=f'user_{current_user.id}')
 
     socketio.emit('session_complete', {
