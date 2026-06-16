@@ -159,6 +159,29 @@ def _clear_active(user_id=None):
         'status': 'idle', 'message': '',
     })
 
+# ============================================
+# STOP SIGNAL SYSTEM
+# Allows app.py to signal bot threads to stop
+# ============================================
+_stop_flags = {}  # {user_id: True/False}
+
+def request_stop(user_id):
+    """Signal the bot session for this user to stop after current trade."""
+    if user_id:
+        _stop_flags[user_id] = True
+        print(f'  [STOP] Stop requested for user {user_id}')
+
+def clear_stop(user_id):
+    """Clear the stop signal for this user."""
+    if user_id:
+        _stop_flags.pop(user_id, None)
+
+def should_stop(user_id):
+    """Check if a stop has been requested for this user."""
+    return bool(_stop_flags.get(user_id, False))
+
+
+
 
 # ============================================
 # 2. ACCOUNT MANAGEMENT
