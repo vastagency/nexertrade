@@ -16,16 +16,23 @@ const userData = window.USER_DATA || {
 
 // Fetch live Bybit balance — must complete before window.load animation runs
 // Store a promise so the animation waits for the real balance
+// Use the balance already rendered by server (live_balance from get_display_balance)
+// Only fetch from API if we need a refresh -- don't overwrite with stale DB value
+const _serverBalance = window.USER_DATA ? window.USER_DATA.balance : 0;
 window._balanceReady = fetch('/api/user-balance')
   .then(r => r.json())
   .then(data => {
-    if (data.success) {
-      userData.balance = data.balance;  // update before animation reads it
+    if (data.success && data.source === 'bybit_live') {
+      userData.balance = data.balance;  // only update if live Bybit data
       const subEl = document.getElementById('statBalanceSub');
-      if (subEl) subEl.textContent = data.source === 'bybit_live' ? 'Live Bybit Balance' : 'Available to trade';
+      if (subEl) subEl.textContent = 'Live Bybit Balance';
+    } else if (_serverBalance > 0) {
+      userData.balance = _serverBalance;  // keep server-rendered value
     }
   })
-  .catch(() => {});
+  .catch(() => {
+    if (_serverBalance > 0) userData.balance = _serverBalance;
+  });
 
 
 // ============================================

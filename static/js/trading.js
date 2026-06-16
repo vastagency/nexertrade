@@ -34,10 +34,13 @@ let totalTrades       = 1;  // updated from server when session starts
 fetch('/api/user-balance')
   .then(r => r.json())
   .then(data => {
-    if (data.success) {
+    if (data.success && data.balance > 0) {
       availableBalance = data.balance;
       const balEl = document.getElementById('availableBalance');
-      if (balEl) balEl.textContent = '$' + data.balance.toFixed(2);
+      // Only update if we got a real value (not the stale $8.05 fallback)
+      if (balEl && (data.source === 'bybit_live' || data.balance !== 8.05)) {
+        balEl.textContent = '$' + data.balance.toFixed(2);
+      }
     }
   })
   .catch(() => {});
