@@ -201,6 +201,59 @@ def get_bybit_balance():
     return {'USDT': 0, 'total': 0, 'success': False,
             'error': 'Cannot fetch Bybit balance.', 'trade_mode': 'futures'}
 
+
+def get_user_bybit_balance(api_key, api_secret):
+    """
+    Fetch USDT balance from a USER's Bybit account using their API keys.
+    Called by app.py get_display_balance() to show real balance on UI.
+    Returns float or None on failure.
+    """
+    if not api_key or not api_secret:
+        return None
+    import hmac, hashlib
+    timestamp  = str(int(time.time() * 1000))
+    recv_win   = '5000'
+    params_str = 'accountType=UNIFIED'
+    raw_sign   = timestamp + api_key + recv_win + params_str
+    sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
+    try:
+        proxy_url = _get_random_proxy_url()
+        sess = requests.Session()
+        sess.trust_env = False
+        if proxy_url:
+            sess.proxies = {'http': proxy_url, 'https': proxy_url}
+        resp = sess.get(
+            f'https://api.bybit.com/v5/account/wallet-balance?{params_str}',
+            headers={'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+                     'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign},
+            timeout=10
+        )
+        data = resp.json()
+        if data.get('retCode') == 0:
+            for acc in data['result']['list']:
+                for coin in acc.get('coin', []):
+                    if coin['coin'] == 'USDT':
+                        bal = float(coin.get('walletBalance') or coin.get('availableToWithdraw') or 0)
+                        if bal >= 0:
+                            print(f'  [USER BALANCE] ${bal:.2f} USDT')
+                            return bal
+        print(f'  [USER BALANCE] Failed: retCode={data.get("retCode")} {data.get("retMsg")}')
+    except Exception as e:
+        print(f'  [USER BALANCE] Failed: {e}')
+    return None
+
+
+def validate_user_bybit_keys(api_key, api_secret):
+    """
+    Validate user Bybit API keys by fetching balance.
+    Returns (True, balance_float) on success or (False, error_message) on failure.
+    """
+    bal = get_user_bybit_balance(api_key, api_secret)
+    if bal is not None:
+        return True, bal
+    return False, 'Could not connect to Bybit. Check your API key and secret are correct and have Futures trading permission.'
+
+
 def get_bybit_positions():
     try:
         positions = bybit_futures.fetch_positions()

@@ -1094,22 +1094,18 @@ def api_admin_top_users():
 @admin_required
 def api_admin_users():
     users = User.query.filter_by(is_admin=False).all()
-    from bot import get_user_bybit_balance
+    # Return basic user data immediately -- live balance fetched separately
+    # to avoid blocking the admin page load
     user_list = []
     for u in users:
-        live_bal = None
-        if u.bybit_connected and u.bybit_api_key:
-            try:
-                live_bal = get_user_bybit_balance(u.bybit_api_key, u.bybit_api_secret)
-            except Exception:
-                pass
         user_list.append({
             'id':              u.id,
             'name':            u.name,
             'email':           u.email,
-            'balance':         round(live_bal, 2) if live_bal is not None else round(u.balance, 2),
-            'balance_source':  'bybit_live' if live_bal is not None else 'platform',
+            'balance':         round(u.balance, 2),
+            'balance_source':  'platform',
             'bybit_connected': bool(u.bybit_connected and u.bybit_api_key),
+            'bybit_api_key':   (u.bybit_api_key[:8] + '...') if u.bybit_api_key else None,
             'total_profit':    round(u.total_profit, 2),
             'platform_pnl':    round(u.total_profit, 2),
             'sessions':        u.sessions_completed,
