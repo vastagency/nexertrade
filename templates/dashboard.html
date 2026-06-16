@@ -123,7 +123,7 @@
           </div>
         </div>
         <p class="stat-label">CURRENT BALANCE</p>
-        <h2 class="stat-value mono" id="statBalance">${{ "%.2f"|format(user.balance) }}</h2>
+        <h2 class="stat-value mono" id="statBalance">${{ "%.2f"|format(live_balance) }}</h2>
         <p class="stat-sub positive" id="statBalanceSub">Available to trade</p>
       </div>
 
@@ -274,7 +274,7 @@
      /* jshint ignore:start */
     window.USER_DATA = {
       name: "{{ user.name }}",
-      balance: {{ user.balance }},
+      balance: {{ live_balance }},
       total_profit: {{ user.total_profit }},
       total_withdrawn: {{ user.total_withdrawn }},
       sessions_completed: {{ user.sessions_completed }}

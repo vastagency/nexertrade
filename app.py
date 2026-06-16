@@ -248,14 +248,17 @@ def dashboard():
     sessions = TradeSession.query.filter_by(
         user_id=current_user.id
     ).order_by(TradeSession.started_at.desc()).limit(5).all()
-    return render_template('dashboard.html', user=current_user, sessions=sessions)
+    live_balance = get_display_balance(current_user)
+    return render_template('dashboard.html', user=current_user, sessions=sessions,
+                           live_balance=live_balance)
 
 @app.route('/trading')
 @login_required
 def trading():
     if current_user.is_admin:
         return redirect(url_for('admin'))
-    return render_template('trading.html', user=current_user)
+    live_balance = get_display_balance(current_user)
+    return render_template('trading.html', user=current_user, live_balance=live_balance)
 
 @app.route('/deposit')
 @login_required
@@ -1091,16 +1094,29 @@ def api_admin_top_users():
 @admin_required
 def api_admin_users():
     users = User.query.filter_by(is_admin=False).all()
-    return jsonify([{
-        'id':           u.id,
-        'name':         u.name,
-        'email':        u.email,
-        'balance':      round(u.balance, 2),
-        'total_profit': round(u.total_profit, 2),
-        'sessions':     u.sessions_completed,
-        'status':       'active' if u.is_active else 'inactive',
-        'joined':       u.joined_at.strftime('%Y-%m-%d')
-    } for u in users])
+    from bot import get_user_bybit_balance
+    user_list = []
+    for u in users:
+        live_bal = None
+        if u.bybit_connected and u.bybit_api_key:
+            try:
+                live_bal = get_user_bybit_balance(u.bybit_api_key, u.bybit_api_secret)
+            except Exception:
+                pass
+        user_list.append({
+            'id':              u.id,
+            'name':            u.name,
+            'email':           u.email,
+            'balance':         round(live_bal, 2) if live_bal is not None else round(u.balance, 2),
+            'balance_source':  'bybit_live' if live_bal is not None else 'platform',
+            'bybit_connected': bool(u.bybit_connected and u.bybit_api_key),
+            'total_profit':    round(u.total_profit, 2),
+            'platform_pnl':    round(u.total_profit, 2),
+            'sessions':        u.sessions_completed,
+            'status':          'active' if u.is_active else 'inactive',
+            'joined':          u.joined_at.strftime('%Y-%m-%d')
+        })
+    return jsonify(user_list)
 
 @app.route('/api/admin/users/<int:user_id>/toggle', methods=['POST'])
 @login_required

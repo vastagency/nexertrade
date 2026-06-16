@@ -107,7 +107,7 @@
       </div>
       <div class="balance-badge">
         <span class="balance-label">Available balance</span>
-        <span class="balance-value mono" id="availableBalance">${{ "%.2f"|format(user.balance) }}</span>
+        <span class="balance-value mono" id="availableBalance">${{ "%.2f"|format(live_balance) }}</span>
       </div>
     </div>
 
@@ -345,7 +345,7 @@
   </main>
 
   <script>
-    window.USER_BALANCE = 0; // overridden immediately by /api/user-balance fetch below
+    window.USER_BALANCE = {{ live_balance }};
     window.BYBIT_CONNECTED = {{ "true" if user.bybit_connected else "false" }};
     function toggleCompound(cb) {
       const label = document.getElementById("compoundLabel");
