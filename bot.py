@@ -1166,6 +1166,314 @@ def close_trade(symbol, direction, quantity, trade_mode='futures'):
 
 
 # ============================================
+# 6. MOMENTUM SESSION
+# ============================================
+# ============================================
+# 6. MOMENTUM SESSION — Main Trading Engine
+# ============================================
+def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
+                              force=False, symbol=None, user_id=None,
+                              user_balance=None, user_trade_mode='futures'):
+    results = {
+        'strategy':     'momentum',
+        'trades':       [],
+        'total_trades': 0,
+        'wins':         0,
+        'losses':       0,
+        'net_pnl':      0.0,
+        'win_rate':     0.0,
+        'real_trading': True,
+        'trade_mode':   user_trade_mode,
+    }
+
+    clear_stop(user_id)
+    trade_mode = user_trade_mode or 'futures'
+    fee_rate   = 0.001
+
+    if user_balance is not None and user_balance > 0:
+        available_usdt = user_balance
+    else:
+        return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
+
+    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {LEVERAGE}x')
+
+    for i in range(num_trades):
+        if should_stop(user_id):
+            break
+
+        _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
+                     'message': f'Scanning market for trade {i+1}/{num_trades}...'})
+
+        best_signal = None
+        if symbol:
+            sig = generate_signal(symbol)
+            if sig:
+                best_signal = sig
+        else:
+            best_signal = select_best_pair(CRYPTO_PAIRS)
+
+        if not best_signal:
+            # Keep scanning every 30 seconds until signal found or user stops
+            print('  No signal yet -- will rescan in 30s...')
+            scan_wait = 0
+            while not best_signal and not should_stop(user_id):
+                import time as _t; _t.sleep(30)
+                scan_wait += 30
+                print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
+                _set_active({'status': 'scanning',
+                             'message': f'Scanning... waited {scan_wait}s for setup'})
+                if symbol:
+                    sig = generate_signal(symbol)
+                    if sig: best_signal = sig
+                else:
+                    best_signal = select_best_pair(CRYPTO_PAIRS)
+            if not best_signal:
+                break  # user stopped
+
+        sym        = best_signal['symbol']
+        trade_dir  = best_signal['direction']
+        confidence = best_signal['confidence']
+        atr        = best_signal.get('atr', 0.001)
+
+        # Signal engine Gate 4 already enforces trend alignment -- trust it
+        trade_dir = best_signal['direction']
+
+        print(f'\nTrade {i+1}/{num_trades}: {sym} {trade_dir} | '
+              f'RSI:{best_signal["rsi"]:.2f} | Conf:{confidence:.0f}% | '
+              f'FUTURES | Market:{best_signal.get("market_condition","unknown")}')
+
+        trade_usdt = min(amount, available_usdt * 0.95)
+        order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode)
+
+        if not order['success']:
+            print(f'  Entry failed: {order.get("error")}')
+            results['trades'].append({
+                'index': i+1, 'symbol': sym, 'direction': trade_dir,
+                'strategy': 'momentum', 'confidence': confidence,
+                'rsi': best_signal['rsi'], 'profit': 0, 'won': False,
+                'price': 0, 'tps_hit': 0, 'real_order': False,
+                'message': order.get('error', 'Entry failed')
+            })
+            continue
+
+        entry_price  = order['price']
+        quantity     = order['quantity']
+        monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
+
+        # ATR-based TP/SL
+        atr_sl_mult  = 2.0
+        atr_tp_mults = [1.0, 2.0, 3.5, 5.5]
+        if trade_dir == 'BUY':
+            sl_price  = entry_price - (atr * atr_sl_mult)
+            tp_prices = [entry_price + (atr * m) for m in atr_tp_mults]
+        else:
+            sl_price  = entry_price + (atr * atr_sl_mult)
+            tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
+
+        max_sl_pct = 0.025
+        sl_pct     = abs(sl_price - entry_price) / entry_price
+        if sl_pct > max_sl_pct:
+            sl_price = (entry_price * (1 - max_sl_pct) if trade_dir == 'BUY'
+                        else entry_price * (1 + max_sl_pct))
+
+        print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
+        print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
+              f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
+
+        _set_active({
+            'active':        True,
+            'user_id':       user_id,
+            'pair':          sym,
+            'side':          trade_dir,
+            'entry':         entry_price,
+            'current_price': entry_price,
+            'pnl':           0.0,
+            'pnl_pct':       0.0,
+            'tp_hits':       0,
+            'tp_prices':     [round(p, 6) for p in tp_prices],
+            'sl_price':      round(sl_price, 6),
+            'position_size': quantity,
+            'leverage':      LEVERAGE,
+            'status':        'monitoring',
+            'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
+        })
+
+        try:
+            from app import socketio
+            socketio.emit('trade_entry', {
+                'trade_num': i+1, 'symbol': sym, 'direction': trade_dir,
+                'price': entry_price, 'tp1': tp_prices[0], 'sl': sl_price,
+                'confidence': confidence, 'leverage': LEVERAGE,
+            }, room=f'user_{user_id}')
+        except Exception:
+            pass
+
+        # Monitor loop
+        remaining_qty = quantity
+        tps_hit       = 0
+        real_pnl      = 0.0
+        won           = False
+        TP_CLOSE_FRAC = 0.25
+        import math as _math
+
+        while remaining_qty > 0:
+            if should_stop(user_id):
+                print(f'  User stop: attempting to close {remaining_qty:.4f} at market')
+                cr = close_trade(monitor_sym, trade_dir, remaining_qty)
+                if cr.get('success'):
+                    cp  = cr['close_price']
+                    pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    pnl = pc * remaining_qty * entry_price * LEVERAGE - remaining_qty * entry_price * fee_rate * 2
+                    real_pnl += pnl
+                    print(f'  Stopped @ ${cp:.4f} | PnL: ${pnl:.4f}')
+                remaining_qty = 0
+                break
+
+            import time as _t; _t.sleep(6)
+            try:
+                live_price = _get_price(monitor_sym, 'futures')
+                if not live_price:
+                    continue
+            except Exception as e:
+                print(f'  Price fetch error: {e} -- continuing')
+                continue
+
+            # Live PnL
+            price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
+            pct_move     = price_diff / entry_price if entry_price > 0 else 0
+            live_pnl_now = round(pct_move * remaining_qty * entry_price * LEVERAGE, 4)
+            live_pnl_pct = round(pct_move * LEVERAGE * 100, 4)
+
+            # Check SL
+            sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
+            if sl_hit:
+                print(f'  SL hit @ ${live_price:.4f} — closing full position')
+                _set_active({'status': 'closing', 'current_price': live_price,
+                             'message': f'SL hit @ ${live_price:.4f}'})
+                cr = close_trade(monitor_sym, trade_dir, remaining_qty)
+                if cr.get('success'):
+                    cp  = cr['close_price']
+                    pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    pnl = pc * remaining_qty * entry_price * LEVERAGE - remaining_qty * entry_price * fee_rate * 2
+                    real_pnl     += pnl
+                    remaining_qty = 0
+                    print(f'  SL closed @ ${cp:.4f} | PnL: ${pnl:.4f}')
+                else:
+                    print(f'  SL close failed: {cr.get("error")} -- position may still be open on Bybit')
+                    remaining_qty = 0
+                break
+
+            # Check TPs
+            tp_triggered = False
+            for tp_idx in range(tps_hit, len(tp_prices)):
+                tp_price = tp_prices[tp_idx]
+                tp_hit   = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
+                if tp_hit:
+                    tp_triggered = True
+                    _tp_sym  = monitor_sym
+                    instr    = _get_qty_step(_tp_sym)
+                    step     = instr['step']
+                    min_qty  = instr['min_qty']
+                    raw_q    = remaining_qty * TP_CLOSE_FRAC
+                    decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+                    close_qty = round(_math.floor(raw_q / step) * step, decimals)
+                    close_qty = min(close_qty, remaining_qty)
+
+                    if close_qty < min_qty or close_qty <= 0:
+                        tps_hit += 1
+                        continue
+
+                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} (step={step})')
+                    cr = close_trade(monitor_sym, trade_dir, close_qty)
+                    actual_closed = cr.get('qty_closed', close_qty)
+                    if cr.get('success'):
+                        cp        = cr['close_price']
+                        pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        pnl_chunk = pc * actual_closed * entry_price * LEVERAGE - actual_closed * entry_price * fee_rate * 2
+                        real_pnl      += pnl_chunk
+                        remaining_qty -= actual_closed
+                        tps_hit        = tp_idx + 1
+                        won            = True
+                        print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Remaining: {remaining_qty:.4f}')
+
+                        _set_active({
+                            'tp_hits':       tps_hit,
+                            'pnl':           round(real_pnl, 4),
+                            'current_price': cp,
+                            'position_size': remaining_qty,
+                            'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Running PnL: ${real_pnl:.4f}',
+                        })
+
+                        try:
+                            from app import socketio
+                            socketio.emit('tp_hit', {
+                                'tp_num': tp_idx+1, 'price': cp,
+                                'pnl': pnl_chunk, 'remaining': remaining_qty
+                            }, room=f'user_{user_id}')
+                        except Exception:
+                            pass
+
+                        if remaining_qty <= 0 or tps_hit >= len(tp_prices):
+                            remaining_qty = 0
+                    break
+
+            if not tp_triggered:
+                _set_active({
+                    'current_price': live_price,
+                    'pnl':           live_pnl_now,
+                    'pnl_pct':       live_pnl_pct,
+                    'tp_hits':       tps_hit,
+                    'status':        'monitoring',
+                    'message':       f'Monitoring {trade_dir} {sym} | Price ${live_price:.4f} | TPs {tps_hit}/4',
+                })
+                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
+                      f'Remaining: {remaining_qty:.4f}')
+
+        real_pnl = round(real_pnl, 4)
+        _set_active({
+            'active':  False,
+            'status':  'closed',
+            'pnl':     real_pnl,
+            'tp_hits': tps_hit,
+            'message': f'Trade closed | PnL: ${real_pnl:.4f} | TPs: {tps_hit}/4',
+        })
+
+        won = real_pnl > 0
+        results['trades'].append({
+            'index':            i + 1,
+            'symbol':           sym,
+            'direction':        trade_dir,
+            'strategy':         'momentum',
+            'confidence':       confidence,
+            'rsi':              best_signal['rsi'],
+            'ema_trend':        best_signal.get('ema_trend', ''),
+            'macd_trend':       best_signal.get('macd_trend', ''),
+            'volume_trend':     best_signal.get('volume_trend', 'neutral'),
+            'candle_pattern':   best_signal.get('candle_pattern', 'none'),
+            'market_condition': best_signal.get('market_condition', 'unknown'),
+            'profit':           real_pnl,
+            'won':              won,
+            'price':            entry_price,
+            'tps_hit':          tps_hit,
+            'real_order':       True,
+        })
+        results['net_pnl']      += real_pnl
+        results['total_trades'] += 1
+        results['wins']         += 1 if won else 0
+        results['losses']       += 0 if won else 1
+        available_usdt          += real_pnl
+
+        import time as _t; _t.sleep(1)
+
+    _clear_active(user_id)
+    results['net_pnl']  = round(results['net_pnl'], 4)
+    results['win_rate'] = (results['wins'] / results['total_trades'] * 100
+                           if results['total_trades'] > 0 else 0.0)
+    return results
+
+
+
+# ============================================
 # 7. PICK UP TRADE + ALWAYS WIN STRATEGIES
 # ============================================
 # ============================================
@@ -1716,15 +2024,17 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _bot_module.bybit_futures = user_futures
         print(f'  [KEY] Active key after swap: {_bot_module.bybit_futures.apiKey[:8]}...')
         print(f'  [KEY] User key:              {user_api_key[:8]}...')
-        # Fetch live balance now using user keys
-        _user_live_bal = get_user_bybit_balance(user_api_key, user_api_secret)
-        if _user_live_bal is None:
-            _bot_module.bybit_spot    = _original_spot
-            _bot_module.bybit_futures = _original_futures
-            return {'strategy': strategy, 'trades': [], 'total_trades': 0,
-                    'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
-                    'real_trading': False,
-                    'message': 'Could not fetch Bybit balance. Check API key is valid.'}
+        # Use balance passed from app.py -- already fetched at session start
+        # Don't block session on a second balance fetch that may time out
+        if user_balance and user_balance > 0:
+            _user_live_bal = user_balance
+            print(f'  [BALANCE] Using live user balance: ${_user_live_bal:.2f}')
+        else:
+            # Fallback: try to fetch once
+            _user_live_bal = get_user_bybit_balance(user_api_key, user_api_secret)
+            if _user_live_bal is None:
+                print('  [BALANCE] Could not fetch balance -- using $50 default')
+                _user_live_bal = 50.0  # safe default, actual order uses real qty
     else:
         print(f'\n{"="*50}')
         print(f'NexerTrade session | Strategy: {strategy.upper()} | '
