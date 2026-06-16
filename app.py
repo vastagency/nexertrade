@@ -77,6 +77,29 @@ def init_db():
     with app.app_context():
         db.create_all()
 
+        # Migrate: add Bybit columns if missing in Railway PostgreSQL
+        try:
+            from sqlalchemy import text
+            with db.engine.connect() as conn:
+                migrations = [
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS bybit_api_key VARCHAR(255)',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS bybit_api_secret VARCHAR(255)',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS bybit_connected BOOLEAN DEFAULT FALSE',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS bybit_connected_at TIMESTAMP',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_withdrawn FLOAT DEFAULT 0.0',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_fees_paid FLOAT DEFAULT 0.0',
+                    'ALTER TABLE trade_sessions ADD COLUMN IF NOT EXISTS real_trading BOOLEAN DEFAULT FALSE',
+                ]
+                for sql in migrations:
+                    try:
+                        conn.execute(text(sql))
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                print('DB migrations applied')
+        except Exception as e:
+            print(f'Migration note: {e}')
+
         admin_email = os.getenv('ADMIN_EMAIL', 'admin@nexertrade.io')
         admin_pass  = os.getenv('ADMIN_PASSWORD', 'Admin@2026')
         if not User.query.filter_by(email=admin_email).first():
