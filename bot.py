@@ -216,30 +216,54 @@ def get_user_bybit_balance(api_key, api_secret):
     params_str = 'accountType=UNIFIED'
     raw_sign   = timestamp + api_key + recv_win + params_str
     sign = hmac.new(api_secret.encode(), raw_sign.encode(), hashlib.sha256).hexdigest()
-    try:
-        proxy_url = _get_random_proxy_url()
-        sess = requests.Session()
-        sess.trust_env = False
-        if proxy_url:
-            sess.proxies = {'http': proxy_url, 'https': proxy_url}
-        resp = sess.get(
-            f'https://api.bybit.com/v5/account/wallet-balance?{params_str}',
-            headers={'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
-                     'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign},
-            timeout=10
-        )
+    url = f'https://api.bybit.com/v5/account/wallet-balance?{params_str}'
+    hdrs = {'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': timestamp,
+            'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sign}
+
+    def _parse_balance(resp):
         data = resp.json()
         if data.get('retCode') == 0:
             for acc in data['result']['list']:
                 for coin in acc.get('coin', []):
                     if coin['coin'] == 'USDT':
                         bal = float(coin.get('walletBalance') or coin.get('availableToWithdraw') or 0)
-                        if bal >= 0:
-                            print(f'  [USER BALANCE] ${bal:.2f} USDT')
-                            return bal
-        print(f'  [USER BALANCE] Failed: retCode={data.get("retCode")} {data.get("retMsg")}')
+                        print(f'  [USER BALANCE] ${bal:.2f} USDT')
+                        return bal
+        print(f'  [USER BALANCE] retCode={data.get("retCode")} {data.get("retMsg")}')
+        return None
+
+    # Try 1: direct (no proxy) - fastest, works if Railway IP not blocked for this endpoint
+    try:
+        sess = requests.Session()
+        sess.trust_env = False
+        resp = sess.get(url, headers=hdrs, timeout=8)
+        bal = _parse_balance(resp)
+        if bal is not None:
+            return bal
     except Exception as e:
-        print(f'  [USER BALANCE] Failed: {e}')
+        print(f'  [USER BALANCE] Direct failed: {e}')
+
+    # Try 2: via proxy - bypasses geo-block
+    try:
+        proxy_url = _get_random_proxy_url()
+        if proxy_url:
+            sess2 = requests.Session()
+            sess2.trust_env = False
+            sess2.proxies = {'http': proxy_url, 'https': proxy_url}
+            # Regenerate timestamp + signature for retry
+            import hmac as _hmac, hashlib as _hl
+            ts2  = str(int(time.time() * 1000))
+            raw2 = ts2 + api_key + recv_win + params_str
+            sig2 = _hmac.new(api_secret.encode(), raw2.encode(), _hl.sha256).hexdigest()
+            hdrs2 = {'X-BAPI-API-KEY': api_key, 'X-BAPI-TIMESTAMP': ts2,
+                     'X-BAPI-RECV-WINDOW': recv_win, 'X-BAPI-SIGN': sig2}
+            resp2 = sess2.get(url, headers=hdrs2, timeout=10)
+            bal2  = _parse_balance(resp2)
+            if bal2 is not None:
+                return bal2
+    except Exception as e:
+        print(f'  [USER BALANCE] Proxy failed: {e}')
+
     return None
 
 

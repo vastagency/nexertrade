@@ -182,19 +182,37 @@ def check_pending_withdrawal(user_id):
 # ============================================
 # SOCKETIO EVENTS
 # ============================================
+# In-memory balance cache: {user_id: (balance, timestamp)}
+_balance_cache = {}
+_BALANCE_CACHE_TTL = 60  # seconds
+
 def get_display_balance(user):
     """
-    Return live Bybit balance if API keys exist, else platform balance.
-    Tries keys regardless of bybit_connected flag to handle DB migration edge cases.
+    Return live Bybit balance. Cached for 60s to avoid slow page loads.
+    Tries API keys directly regardless of bybit_connected flag.
     """
+    import time as _time
+    # Check cache first
+    cached = _balance_cache.get(user.id)
+    if cached:
+        bal, ts = cached
+        if _time.time() - ts < _BALANCE_CACHE_TTL:
+            return bal
+
     if user.bybit_api_key and user.bybit_api_secret:
         try:
             from bot import get_user_bybit_balance
             live_bal = get_user_bybit_balance(user.bybit_api_key, user.bybit_api_secret)
             if live_bal is not None:
-                return round(live_bal, 2)
+                result = round(live_bal, 2)
+                _balance_cache[user.id] = (result, _time.time())
+                return result
         except Exception:
             pass
+
+    # Return cached value even if stale, better than $8.05
+    if cached:
+        return cached[0]
     return round(user.balance, 2)
 
 
@@ -347,6 +365,7 @@ def api_connect_bybit():
     current_user.bybit_connected  = True
     current_user.bybit_connected_at = datetime.utcnow()
     db.session.commit()
+    _balance_cache.pop(current_user.id, None)  # clear cache
 
     return jsonify({
         'success': True,
