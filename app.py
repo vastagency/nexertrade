@@ -813,14 +813,15 @@ def api_bot_execute():
         }, room='admin_room')
 
         # Kill any existing running session for this user before starting new one
-        # Prevents ghost sessions running in background from previous clicks
-        from bot import request_stop as _req_stop
-        _req_stop(current_user.id)
+        from bot import request_stop as _req_stop, clear_stop as _clear_stop
         with _trade_jobs_lock:
             for _jid, _job in list(_trade_jobs.items()):
                 if _job.get('user_id') == current_user.id and _job.get('status') == 'running':
+                    _req_stop(current_user.id)  # only stop if actually running
                     _trade_jobs[_jid]['status'] = 'done'
                     print(f'  [SESSION] Killed ghost session {_jid} for user {current_user.id}')
+        # Always clear stop flag before starting new session
+        _clear_stop(current_user.id)
 
         # Start session in background thread -- return job_id immediately
         # This prevents Railway's 30s HTTP timeout from killing the connection
@@ -832,8 +833,8 @@ def api_bot_execute():
                 'amount':  amount
             }
         # Get user's connected Bybit credentials if available
-        u_api_key    = current_user.bybit_api_key    if current_user.bybit_connected else None
-        u_api_secret = current_user.bybit_api_secret if current_user.bybit_connected else None
+        u_api_key    = current_user.bybit_api_key
+        u_api_secret = current_user.bybit_api_secret
 
         t = threading.Thread(
             target=_run_trade_job,
