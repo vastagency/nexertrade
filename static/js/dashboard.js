@@ -208,15 +208,15 @@ function animateValue(elementId, start, end, duration, prefix = '', suffix = '',
 }
 
 window.addEventListener('load', () => {
-  // Wait for live balance fetch before animating, so we animate to the correct value
-  Promise.resolve(window._balanceReady).then(() => {
-    setTimeout(() => {
-      animateValue('statBalance',   0, userData.balance,           1200, '$', '', 2);
-      animateValue('statProfit',    0, userData.total_profit,      1400, '$', '', 2);
-      animateValue('statWithdrawn', 0, userData.total_withdrawn,   1100, '$', '', 2);
-      animateValue('statSessions',  0, userData.sessions_completed, 1000, '', '', 0);
-    }, 200);
-  });
+  // Use server-rendered balance immediately -- no waiting for API
+  // Server already fetched live Bybit balance at render time
+  const finalBalance = window.USER_DATA ? window.USER_DATA.balance : userData.balance;
+  setTimeout(() => {
+    animateValue('statBalance',   0, finalBalance,              1200, '$', '', 2);
+    animateValue('statProfit',    0, userData.total_profit,      1400, '$', '', 2);
+    animateValue('statWithdrawn', 0, userData.total_withdrawn,   1100, '$', '', 2);
+    animateValue('statSessions',  0, userData.sessions_completed, 1000, '', '', 0);
+  }, 100);
 });
 
 

@@ -184,10 +184,10 @@ def check_pending_withdrawal(user_id):
 # ============================================
 def get_display_balance(user):
     """
-    Return the balance to show on the frontend.
-    Live Bybit balance if connected, else platform balance.
+    Return live Bybit balance if API keys exist, else platform balance.
+    Tries keys regardless of bybit_connected flag to handle DB migration edge cases.
     """
-    if user.bybit_connected and user.bybit_api_key:
+    if user.bybit_api_key and user.bybit_api_secret:
         try:
             from bot import get_user_bybit_balance
             live_bal = get_user_bybit_balance(user.bybit_api_key, user.bybit_api_secret)
@@ -371,7 +371,7 @@ def api_disconnect_bybit():
 @login_required
 def api_user_balance():
     """Fetch user's live Bybit balance if connected, else return platform balance."""
-    if current_user.bybit_connected and current_user.bybit_api_key:
+    if current_user.bybit_api_key and current_user.bybit_api_secret:
         from bot import get_user_bybit_balance
         live_bal = get_user_bybit_balance(
             current_user.bybit_api_key,
@@ -737,7 +737,7 @@ def api_bot_execute():
             return jsonify({'success': False, 'message': f'Amount must be between ${min_dep:.0f} and ${max_dep:.0f}'}), 400
 
         # Gate: user must have Bybit connected to trade
-        if not current_user.bybit_connected or not current_user.bybit_api_key:
+        if not current_user.bybit_api_key or not current_user.bybit_api_secret:
             return jsonify({'success': False, 'message': 'Connect your Bybit account first. Go to Profile to connect Bybit.'}), 400
 
         # Check live Bybit balance, not stale DB balance
