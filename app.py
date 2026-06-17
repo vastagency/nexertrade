@@ -777,20 +777,22 @@ def api_bot_execute():
         if amount > live_balance:
             return jsonify({'success': False, 'message': f'Insufficient Bybit balance. Your live balance is ${live_balance:.2f}'}), 400
 
-        # Weak signal pre-check — skip for grid (grid uses limit orders not signal confidence)
+        # Weak signal pre-check:
+        # Only warn if a signal EXISTS but has low confidence.
+        # If generate_signal returns None (neutral 1h trend = no setup on that pair),
+        # that is NOT a weak signal — the session will scan all 25 pairs instead.
+        # Never block session start just because the pre-check pair has no setup.
         if not force and strategy in ('momentum', 'auto', 'pickup', 'always_win'):
             try:
                 from bot import generate_signal
-                # Use the user's selected pair if provided, otherwise default scan pair
                 check_symbol = selected_symbol if selected_symbol else 'XRP/USDT'
                 preview_signal = generate_signal(check_symbol)
-                if preview_signal and preview_signal['confidence'] < 60:
-                    # Determine reason for warning — more informative than just "weak"
-                    rsi_val = preview_signal.get('rsi', 50)
-                    direction = preview_signal.get('direction', 'BUY')
+                # Only warn if signal exists AND confidence is low — None means scan elsewhere
+                if preview_signal is not None and preview_signal['confidence'] < 60:
+                    rsi_val     = preview_signal.get('rsi', 50)
+                    direction   = preview_signal.get('direction', 'BUY')
                     market_cond = preview_signal.get('market_condition', 'unknown')
-                    ema_trend = preview_signal.get('ema_trend', 'neutral')
-
+                    ema_trend   = preview_signal.get('ema_trend', 'neutral')
                     if rsi_val > 68:
                         reason = f'Market is overbought (RSI {rsi_val:.0f}) — high risk of reversal.'
                     elif rsi_val < 32:
@@ -799,7 +801,6 @@ def api_bot_execute():
                         reason = f'Market is ranging with low momentum — signals unreliable.'
                     else:
                         reason = f'Signal confidence is only {preview_signal["confidence"]:.0f}%. Market conditions are uncertain.'
-
                     return jsonify({
                         'success':          False,
                         'weak_signal':      True,

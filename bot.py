@@ -638,31 +638,54 @@ def calculate_stochastic(closes, highs, lows, k_period=14, d_period=3):
 
 def get_1h_trend_bias(closes1h):
     """
-    The master trend filter. Uses EMA9/21/50 on 1h.
-    Returns: 'bullish', 'bearish', or 'neutral' (no trade when neutral)
-    EMA9 > EMA21 > EMA50 = strong bull
-    EMA9 < EMA21 < EMA50 = strong bear
-    Mixed = neutral, skip
+    The master trend filter. Uses EMA9/21/50 on 1h plus price momentum.
+    Returns: 'bullish', 'bearish', or 'neutral' (no trade when truly neutral)
+
+    Alignment tiers:
+      Strong:  EMA9 > EMA21 > EMA50  (or full bear reverse)
+      Partial: 2 of 3 EMAs aligned + price above/below EMA50
+      Weak:    EMA9 vs EMA21 only + price momentum confirmation
+      Neutral: Genuinely flat/choppy — skip
     """
     if len(closes1h) < 50:
         return 'neutral'
     ema9  = ema_series(closes1h, 9)[-1]
     ema21 = ema_series(closes1h, 21)[-1]
     ema50 = ema_series(closes1h, 50)[-1]
+    price = closes1h[-1]
 
-    # Strong alignment
+    # ── Tier 1: Strong full alignment ──────────────────────────────────
     if ema9 > ema21 and ema21 > ema50:
         return 'bullish'
     if ema9 < ema21 and ema21 < ema50:
         return 'bearish'
 
-    # Partial alignment — still tradeable but weaker
+    # ── Tier 2: Partial alignment — 2 of 3 ────────────────────────────
     if ema9 > ema21 and ema9 > ema50:
         return 'bullish'
     if ema9 < ema21 and ema9 < ema50:
         return 'bearish'
 
-    # Mixed — skip, wait for clarity
+    # ── Tier 3: EMA21 vs EMA50 + price momentum tiebreaker ────────────
+    # Price above both EMA21 and EMA50 with recent upward momentum
+    recent_mom = closes1h[-1] - closes1h[-6]  # last 6 candles net move
+    if ema21 > ema50 and price > ema50:
+        if recent_mom > 0:
+            return 'bullish'
+    if ema21 < ema50 and price < ema50:
+        if recent_mom < 0:
+            return 'bearish'
+
+    # ── Tier 4: Pure price momentum when EMAs are compressed ──────────
+    # When EMAs cluster tightly (< 0.3% apart), use price vs EMA50 + momentum
+    ema_spread = abs(ema9 - ema50) / ema50 if ema50 > 0 else 1
+    if ema_spread < 0.003:  # EMAs within 0.3% of each other = compressed
+        if price > ema50 and recent_mom > 0:
+            return 'bullish'
+        if price < ema50 and recent_mom < 0:
+            return 'bearish'
+
+    # Genuinely mixed — skip
     return 'neutral'
 
 def generate_signal(symbol, timeframe='5m'):
@@ -1227,16 +1250,23 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                      'message': f'Scanning market for trade {i+1}/{num_trades}...'})
 
         best_signal = None
-        if symbol:
-            sig = generate_signal(symbol)
+        preferred_symbol = symbol  # remember user's preferred pair
+
+        # Step 1: Try user's selected pair first
+        if preferred_symbol:
+            sig = generate_signal(preferred_symbol)
             if sig:
                 best_signal = sig
+            else:
+                # Preferred pair has no signal — scan ALL pairs for best opportunity
+                print(f'  [{preferred_symbol}] No signal on preferred pair — scanning all {len(CRYPTO_PAIRS)} pairs...')
+                best_signal = select_best_pair(CRYPTO_PAIRS)
         else:
             best_signal = select_best_pair(CRYPTO_PAIRS)
 
         if not best_signal:
-            # Keep scanning every 30 seconds until signal found or user stops
-            print('  No signal yet -- will rescan in 30s...')
+            # No signal on any pair — rescan every 30s until found or timeout
+            print('  No signal on any pair yet -- will rescan in 30s...')
             scan_wait = 0
             MAX_SCAN_WAIT = 600  # 10 minutes max
             while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
@@ -1244,12 +1274,9 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 scan_wait += 30
                 print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
                 _set_active({'status': 'scanning',
-                             'message': f'Scanning... waited {scan_wait}s for setup'})
-                if symbol:
-                    sig = generate_signal(symbol)
-                    if sig: best_signal = sig
-                else:
-                    best_signal = select_best_pair(CRYPTO_PAIRS)
+                             'message': f'Scanning all 25 pairs... ({scan_wait}s)'})
+                # Always scan ALL pairs during rescan — never lock on one failing pair
+                best_signal = select_best_pair(CRYPTO_PAIRS)
             if not best_signal:
                 if scan_wait >= MAX_SCAN_WAIT:
                     results['message'] = 'No quality signal found after 10 minutes. Market conditions unclear — try again later.'
