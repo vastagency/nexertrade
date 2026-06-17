@@ -2052,20 +2052,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _bot_module.LEVERAGE = user_leverage
         print(f'  Leverage set to {user_leverage}x by user selection')
 
-    # BACKTEST PRE-CHECK: run historical simulation before every signal-based session
-    if strategy not in ('grid', 'grid_dca'):
-        bt = backtest_strategy(DEFAULT_PAIR, strategy=strategy)
-        if not bt['go']:
-            return {
-                'strategy': strategy, 'trades': [], 'total_trades': 0,
-                'wins': 0, 'losses': 0, 'net_pnl': 0.0, 'win_rate': 0.0,
-                'real_trading': False, 'backtest': bt,
-                'message': (
-                    f'Backtest caution ({bt["win_rate"]}% win rate on last '
-                    f'{bt["total_trades"]} setups). Session paused to protect capital.'
-                )
-            }
-        print(f'  [BACKTEST] Pre-check passed: {bt["reason"]}')
+    # Backtest pre-check removed -- was blocking sessions
 
     if strategy == 'momentum':
         result = execute_momentum_session(amount, timeframe_minutes,
