@@ -126,18 +126,42 @@ FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 # STRATEGY CONSTANTS
 # ============================================
 # Momentum scalper
-MOMENTUM_TP_PCT  = 0.03    # +3% take profit — real directional profit target
-MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss  → R:R = 2:1
-MIN_CONF         = 63      # trend filter is the real protection -- let signals through
-STRONG_CONF      = 82      # strong signal -- full size entry
+MOMENTUM_TP_PCT  = 0.03    # +3% take profit
+MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss → R:R = 2:1
+MIN_CONF         = 68      # minimum after direction-aware adjustments — prevents weak trades
+STRONG_CONF      = 82      # strong signal — full size
 
 # Grid/DCA
-GRID_LEVELS      = 5       # number of buy levels in the grid
-GRID_SPACING_PCT = 0.002   # fallback 0.2% (overridden dynamically per session)
-GRID_TP_PCT      = 0.003   # fallback TP (overridden dynamically per session)
+GRID_LEVELS      = 5
+GRID_SPACING_PCT = 0.002
+GRID_TP_PCT      = 0.003
 
-# Session risk guard — 5% max loss protects admin Bybit pool from single-user blowout
-MAX_SESSION_LOSS_PCT = 0.05  # stop trading if session loses >5% of starting amount
+# Session risk guard
+MAX_SESSION_LOSS_PCT = 0.05
+
+# ── Smart TP fractions per strategy ─────────────────────────────────
+# Momentum: scale out progressively — lock profit early, let runners run
+MOMENTUM_TP_FRACS = [0.30, 0.25, 0.25, 0.20]  # 30% at TP1, 25% TP2, 25% TP3, 20% TP4 (runner)
+# Pickup hedge: equal thirds per side
+PICKUP_TP_FRAC    = 0.333
+# Always Win: close all at TP (all positions profit together)
+AW_TP_FRAC        = 1.0
+
+# ── Trailing stop activation ─────────────────────────────────────────
+# After TP2 hit, move SL to breakeven + small buffer to lock partial profit
+TRAIL_SL_AFTER_TP = 2      # activate trailing SL after this many TPs hit
+BREAKEVEN_BUFFER  = 0.0003 # 0.03% buffer above entry for breakeven SL
+
+# ── Volatility-adaptive ATR multipliers ─────────────────────────────
+# Low volatility (ATR% < 0.15%): tighter targets
+# Normal volatility: standard
+# High volatility (ATR% > 0.5%): wider targets, wider SL
+ATR_SL_MULT_LOW   = 1.5    # tight SL in quiet market
+ATR_SL_MULT_NORM  = 2.0    # standard
+ATR_SL_MULT_HIGH  = 2.5    # give trade room in volatile market
+ATR_TP_MULTS_LOW  = [0.8,  1.6,  2.8,  4.0]
+ATR_TP_MULTS_NORM = [1.0,  2.0,  3.5,  5.5]
+ATR_TP_MULTS_HIGH = [1.2,  2.4,  4.2,  6.5]
 
 
 # ============================================
@@ -587,7 +611,7 @@ def detect_market_condition(df):
 # - Minimum confidence: 72% (was 60%)
 # ============================================
 
-MIN_CONF    = 63    # trend filter is the real protection -- let signals through
+MIN_CONF    = 68    # minimum confidence after direction-aware adjustments
 STRONG_CONF = 82    # strong signal — scale in with full size
 
 def calculate_ema50(closes):
@@ -837,10 +861,19 @@ def generate_signal(symbol, timeframe='5m'):
         if ups > downs:   score += 1
         elif downs > ups: score -= 1
 
-        # ── GATE 4: MINIMUM SCORE ───────────────────────────────────────
-        # Need clear conviction — ±6 minimum (old was ±2)
-        if abs(score) < 3:
-            print(f'  [{symbol}] Score {score} too weak (min 3)')
+        # ── GATE 4: MINIMUM SCORE — directional conviction required ────────
+        # Score must be >= +4 for BUY or <= -4 for SELL.
+        # This prevents "score=-4 → abs=4 → passes → bad SELL trade" situations.
+        # A score of 3 means barely 3 more indicators agree — not enough conviction.
+        MIN_SCORE = 4
+        if score > 0 and score < MIN_SCORE:
+            print(f'  [{symbol}] BUY score {score} below minimum +{MIN_SCORE}')
+            return None
+        if score < 0 and score > -MIN_SCORE:
+            print(f'  [{symbol}] SELL score {score} above minimum -{MIN_SCORE}')
+            return None
+        if score == 0:
+            print(f'  [{symbol}] Score 0 — no directional conviction')
             return None
 
         # ── DIRECTION — must align with 1h trend ────────────────────────
@@ -855,6 +888,30 @@ def generate_signal(symbol, timeframe='5m'):
             return None
 
         direction = raw_direction
+
+        # ── GATE 5b: RSI EXTREME EXHAUSTION FILTER ──────────────────────
+        # Never BUY when RSI5 > 72 (already overbought — chasing)
+        # Never SELL when RSI5 < 28 (already oversold — chasing the dump)
+        # Exception: if RSI1h strongly confirms (deep trend), allow but note it
+        if direction == 'BUY' and rsi5 > 72:
+            if rsi1h > 60:  # 1h also overbought = definitely chasing
+                print(f'  [{symbol}] RSI5={rsi5:.1f} overbought — no BUY chase')
+                return None
+            # rsi5 overbought but rsi1h still ok = reduce score, let it through if strong
+            score -= 2
+        if direction == 'SELL' and rsi5 < 28:
+            if rsi1h < 40:  # 1h also oversold = chasing the dump
+                print(f'  [{symbol}] RSI5={rsi5:.1f} oversold — no SELL chase')
+                return None
+            score += 2  # reduce magnitude
+
+        # Re-check score after RSI adjustment
+        if direction == 'BUY'  and score < MIN_SCORE:
+            print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
+            return None
+        if direction == 'SELL' and score > -MIN_SCORE:
+            print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
+            return None
 
         # ── CONFIDENCE CALCULATION ───────────────────────────────────────
         abs_score = abs(score)
@@ -872,28 +929,43 @@ def generate_signal(symbol, timeframe='5m'):
         if volume_trend == 'confirming':   confidence = min(95, confidence + 3)
         if candle_pat != 'none':           confidence = min(95, confidence + 2)
         if ema_bull == 3 or ema_bear == 3: confidence = min(95, confidence + 3)
-        if sr_position in ('near_support', 'near_resistance'):
-            confidence = min(95, confidence + 2)
+        # SR bonus is direction-aware:
+        # near_support is only good for BUY (price bouncing off support)
+        # near_resistance is only good for SELL (price rejecting at resistance)
+        if direction == 'BUY'  and sr_position == 'near_support':
+            confidence = min(95, confidence + 3)
+        elif direction == 'SELL' and sr_position == 'near_resistance':
+            confidence = min(95, confidence + 3)
+        elif direction == 'BUY'  and sr_position == 'near_resistance':
+            confidence = max(50, confidence - 4)  # buying INTO resistance = penalty
+        elif direction == 'SELL' and sr_position == 'near_support':
+            confidence = max(50, confidence - 4)  # selling INTO support = penalty
         if bb_squeeze:                     confidence = min(95, confidence + 2)
-        if stoch_k < 20 or stoch_k > 80:  confidence = min(95, confidence + 2)
+        # Stochastic bonus direction-aware: overbought only helps SELL, oversold only BUY
+        if direction == 'BUY'  and stoch_k < 20: confidence = min(95, confidence + 3)
+        elif direction == 'SELL' and stoch_k > 80: confidence = min(95, confidence + 3)
+        elif direction == 'BUY'  and stoch_k > 80: confidence = max(50, confidence - 3)  # buying overbought = penalty
+        elif direction == 'SELL' and stoch_k < 20: confidence = max(50, confidence - 3)  # selling oversold = penalty
 
         # ── GATE 6: MINIMUM CONFIDENCE ───────────────────────────────────
         if confidence < MIN_CONF:
             print(f'  [{symbol}] Confidence {confidence:.0f}% below minimum {MIN_CONF}% — skip')
             return None
 
-        # ── ATR-BASED TP/SL LEVELS ───────────────────────────────────────
-        # R:R minimum 2:1 guaranteed:
-        # SL = 1.0x ATR from entry
-        # TP1 = 2.0x ATR (2:1 R:R)
-        # TP2 = 3.5x ATR (3.5:1 R:R)
-        # TP3 = 5.5x ATR
-        # TP4 = 8.0x ATR (runner)
-        # SL=2x ATR gives trade room to breathe past noise
-        # TP1=1.0x ATR hits quickly (same distance as old SL)
-        # TP2-4 are runners that compound profits
-        atr_sl_mult  = 2.0
-        atr_tp_mults = [1.0, 2.0, 3.5, 5.5]
+        # ── VOLATILITY-ADAPTIVE ATR-BASED TP/SL LEVELS ───────────────────
+        # Adapts SL and TP distances to current market volatility:
+        # - Quiet market  (ATR < 0.15%): tight targets, quick scalp
+        # - Normal market (ATR 0.15–0.5%): standard R:R
+        # - Volatile mkt  (ATR > 0.5%):  wider targets, more room to breathe
+        if atr_pct < 0.15:
+            atr_sl_mult  = ATR_SL_MULT_LOW
+            atr_tp_mults = ATR_TP_MULTS_LOW
+        elif atr_pct > 0.5:
+            atr_sl_mult  = ATR_SL_MULT_HIGH
+            atr_tp_mults = ATR_TP_MULTS_HIGH
+        else:
+            atr_sl_mult  = ATR_SL_MULT_NORM
+            atr_tp_mults = ATR_TP_MULTS_NORM
 
         if direction == 'BUY':
             sl_price  = current_price - (atr * atr_sl_mult)
@@ -902,9 +974,39 @@ def generate_signal(symbol, timeframe='5m'):
             sl_price  = current_price + (atr * atr_sl_mult)
             tp_prices = [current_price - (atr * m) for m in atr_tp_mults]
 
+        # ── MINIMUM TP/SL FLOORS ────────────────────────────────────────
+        # Prevent TP targets so tight they're inside the spread or ATR noise.
+        # TP1 minimum: 0.35% from entry (fees ~0.12% each side = 0.24% round trip)
+        # SL maximum:  0.5% from entry (hard cap on any single trade loss)
+        MIN_TP1_PCT = 0.0035
+        MAX_SL_PCT  = 0.005
+
+        tp1_dist_pct = abs(tp_prices[0] - current_price) / current_price if current_price > 0 else 0
+        if tp1_dist_pct < MIN_TP1_PCT and tp1_dist_pct > 0:
+            scale = MIN_TP1_PCT / tp1_dist_pct
+            if direction == 'BUY':
+                tp_prices = [current_price + (tp - current_price) * scale for tp in tp_prices]
+            else:
+                tp_prices = [current_price - (current_price - tp) * scale for tp in tp_prices]
+
+        sl_dist_pct = abs(sl_price - current_price) / current_price if current_price > 0 else 0
+        if sl_dist_pct > MAX_SL_PCT:
+            sl_price = (current_price * (1 - MAX_SL_PCT) if direction == 'BUY'
+                        else current_price * (1 + MAX_SL_PCT))
+
         # Derive TP percentages from price levels for the momentum engine
         tp_pcts = [abs(tp - current_price) / current_price for tp in tp_prices]
         sl_pct  = abs(sl_price - current_price) / current_price
+
+        # ── GATE 7: MINIMUM R:R — TP1 must be at least 1.5x SL distance ──────
+        # This was the HBAR problem: TP1=0.25% target vs SL=0.49% = 0.5:1 R:R
+        # We never enter a trade where the first take profit is smaller than the SL.
+        tp1_dist = abs(tp_prices[0] - current_price)
+        sl_dist  = abs(sl_price - current_price)
+        rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
+        if rr_ratio < 1.2:
+            print(f'  [{symbol}] R:R too poor: TP1={tp1_dist:.6f} vs SL={sl_dist:.6f} = {rr_ratio:.2f}:1 — skip')
+            return None
 
         real_price = fetch_current_price(symbol)
         if real_price:
@@ -954,31 +1056,85 @@ def generate_signal(symbol, timeframe='5m'):
         return None
 
 
+def _signal_quality_score(sig):
+    """
+    Composite quality ranking for a signal — used to pick the BEST trade.
+    Combines: score magnitude, confidence, RSI distance from extreme,
+    ATR (volatility = profit potential), and volume confirmation.
+    This prevents picking a "high confidence but low score" signal like HBAR.
+    """
+    abs_score  = abs(sig.get('score', 0))
+    confidence = sig.get('confidence', 0)
+    atr_pct    = sig.get('atr_pct', 0)
+    vol        = sig.get('volume_trend', 'weak')
+    rsi        = sig.get('rsi', 50)
+    direction  = sig.get('direction', 'BUY')
+    candle     = sig.get('candle_pattern', 'none')
+    sr         = sig.get('sr_position', 'neutral')
+
+    # RSI quality: ideally we want RSI near extremes in the trade direction
+    # BUY: RSI should be below 45 (oversold bounce)
+    # SELL: RSI should be above 55 (overbought rejection)
+    if direction == 'BUY':
+        rsi_quality = max(0, (50 - rsi) / 30)   # 0→1 as RSI goes 50→20
+    else:
+        rsi_quality = max(0, (rsi - 50) / 30)   # 0→1 as RSI goes 50→80
+
+    # Base quality formula:
+    # score_magnitude counts most (50%) — it represents indicator agreement
+    # confidence adds secondary weight (30%)
+    # ATR, volume, candle, SR add edge bonuses (20%)
+    score_weight      = (abs_score / 16.0) * 50        # normalised to max 50
+    confidence_weight = ((confidence - 60) / 35.0) * 30 # normalised to max 30
+    rsi_weight        = rsi_quality * 8                 # max 8
+    atr_weight        = min(atr_pct / 0.5, 1.0) * 5    # max 5 (0.5%+ ATR = full)
+    vol_weight        = 4 if vol == 'confirming' else 0
+    candle_weight     = 3 if candle != 'none' else 0
+    sr_weight         = (2 if (direction == 'BUY'  and sr == 'near_support') or
+                              (direction == 'SELL' and sr == 'near_resistance') else 0)
+
+    return (score_weight + confidence_weight + rsi_weight +
+            atr_weight + vol_weight + candle_weight + sr_weight)
+
+
 def select_best_pair(pairs):
     """
-    Scan all pairs and return the highest-confidence signal that passed
-    all gates. Returns None if no pair passes — bot waits, does not force trade.
+    Scan all pairs and return the HIGHEST QUALITY signal that passed all gates.
+
+    Quality is ranked by _signal_quality_score() — a composite of:
+    - Score magnitude (indicator agreement) — 50% weight
+    - Confidence — 30% weight
+    - RSI distance from extreme, ATR, volume, candle, SR — 20% weight
+
+    This prevents the "high confidence but low score" trap:
+    a signal with score=-4 but conf=74% will score LOWER than
+    a signal with score=+6 and conf=70%.
+
+    Returns None if no pair passes — bot waits, does not force a trade.
     """
-    best_signal     = None
-    best_confidence = 0
-    passed          = []
+    best_signal   = None
+    best_quality  = -1
+    passed        = []
 
     print(f'  Scanning {len(pairs)} pairs...')
     for pair in pairs:
         try:
             sig = generate_signal(pair)
             if sig:
+                quality = _signal_quality_score(sig)
+                sig['quality_score'] = round(quality, 2)
                 passed.append(sig)
-                if sig['confidence'] > best_confidence:
-                    best_signal     = sig
-                    best_confidence = sig['confidence']
+                if quality > best_quality:
+                    best_signal  = sig
+                    best_quality = quality
             time.sleep(0.2)
         except Exception as e:
             print(f'  Scan error for {pair}: {e}')
 
     if best_signal:
         print(f'  Best pair: {best_signal["symbol"]} '
-              f'({best_signal["direction"]} {best_signal["confidence"]:.0f}% '
+              f'({best_signal["direction"]} conf={best_signal["confidence"]:.0f}% '
+              f'score={best_signal["score"]} quality={best_quality:.1f} '
               f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}%)')
     else:
         print('  No strong setup yet — continuing market scan — bot will wait')
@@ -1312,9 +1468,17 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         quantity     = order['quantity']
         monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
 
-        # ATR-based TP/SL
-        atr_sl_mult  = 2.0
-        atr_tp_mults = [1.0, 2.0, 3.5, 5.5]
+        # ── Volatility-adaptive ATR TP/SL (matches signal engine) ────────
+        if atr_pct < 0.15:
+            atr_sl_mult  = ATR_SL_MULT_LOW
+            atr_tp_mults = ATR_TP_MULTS_LOW
+        elif atr_pct > 0.5:
+            atr_sl_mult  = ATR_SL_MULT_HIGH
+            atr_tp_mults = ATR_TP_MULTS_HIGH
+        else:
+            atr_sl_mult  = ATR_SL_MULT_NORM
+            atr_tp_mults = ATR_TP_MULTS_NORM
+
         if trade_dir == 'BUY':
             sl_price  = entry_price - (atr * atr_sl_mult)
             tp_prices = [entry_price + (atr * m) for m in atr_tp_mults]
@@ -1322,11 +1486,20 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             sl_price  = entry_price + (atr * atr_sl_mult)
             tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
 
+        # Hard cap: SL never more than 2.5% from entry (protects capital)
         max_sl_pct = 0.025
-        sl_pct     = abs(sl_price - entry_price) / entry_price
-        if sl_pct > max_sl_pct:
+        sl_pct_actual = abs(sl_price - entry_price) / entry_price
+        if sl_pct_actual > max_sl_pct:
             sl_price = (entry_price * (1 - max_sl_pct) if trade_dir == 'BUY'
                         else entry_price * (1 + max_sl_pct))
+
+        # Trailing SL state — moves to breakeven after TRAIL_SL_AFTER_TP TPs hit
+        trailing_sl_active = False
+        breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
+                        else entry_price * (1 - BREAKEVEN_BUFFER))
+
+        # ATR percent for logging
+        atr_pct_val = best_signal.get('atr_pct', 0)
 
         print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
         print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
@@ -1360,12 +1533,14 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         except Exception:
             pass
 
-        # Monitor loop
-        remaining_qty = quantity
-        tps_hit       = 0
-        real_pnl      = 0.0
-        won           = False
-        TP_CLOSE_FRAC = 0.25
+        # Monitor loop — upgraded with trailing SL + progressive TP fractions
+        remaining_qty      = quantity
+        tps_hit            = 0
+        real_pnl           = 0.0
+        won                = False
+        trailing_sl_active = False
+        breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
+                        else entry_price * (1 - BREAKEVEN_BUFFER))
         import math as _math
 
         while remaining_qty > 0:
@@ -1396,12 +1571,35 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             live_pnl_now = round(pct_move * remaining_qty * entry_price * LEVERAGE, 4)
             live_pnl_pct = round(pct_move * LEVERAGE * 100, 4)
 
+            # ── TRAILING STOP LOGIC ───────────────────────────────────────
+            # After TRAIL_SL_AFTER_TP TPs hit, activate trailing SL to lock profits
+            if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
+                sl_price = breakeven_sl
+                trailing_sl_active = True
+                print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
+                _set_active({'sl_price': round(sl_price, 6),
+                             'message': f'Trailing SL active @ ${sl_price:.4f}'})
+
+            # Ratchet trailing SL as price moves in our favour (1 ATR behind price)
+            if trailing_sl_active:
+                if trade_dir == 'BUY':
+                    new_trail = live_price - (atr * 1.0)
+                    if new_trail > sl_price:
+                        sl_price = new_trail
+                        _set_active({'sl_price': round(sl_price, 6)})
+                else:
+                    new_trail = live_price + (atr * 1.0)
+                    if new_trail < sl_price:
+                        sl_price = new_trail
+                        _set_active({'sl_price': round(sl_price, 6)})
+
             # Check SL
             sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
             if sl_hit:
-                print(f'  SL hit @ ${live_price:.4f} — closing full position')
+                sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
+                print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
                 _set_active({'status': 'closing', 'current_price': live_price,
-                             'message': f'SL hit @ ${live_price:.4f}'})
+                             'message': f'{sl_label} hit @ ${live_price:.4f}'})
                 cr = close_trade(monitor_sym, trade_dir, remaining_qty)
                 if cr.get('success'):
                     cp  = cr['close_price']
@@ -1409,25 +1607,26 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                     pnl = pc * remaining_qty * entry_price * LEVERAGE - remaining_qty * entry_price * fee_rate * 2
                     real_pnl     += pnl
                     remaining_qty = 0
-                    print(f'  SL closed @ ${cp:.4f} | PnL: ${pnl:.4f}')
+                    print(f'  {sl_label} closed @ ${cp:.4f} | PnL: ${pnl:.4f}')
                 else:
-                    print(f'  SL close failed: {cr.get("error")} -- position may still be open on Bybit')
+                    print(f'  {sl_label} close failed: {cr.get("error")} -- may still be open on Bybit')
                     remaining_qty = 0
                 break
 
-            # Check TPs
+            # Check TPs — progressive fractions (30/25/25/20%)
             tp_triggered = False
             for tp_idx in range(tps_hit, len(tp_prices)):
                 tp_price = tp_prices[tp_idx]
                 tp_hit   = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
                 if tp_hit:
                     tp_triggered = True
-                    _tp_sym  = monitor_sym
-                    instr    = _get_qty_step(_tp_sym)
+                    instr    = _get_qty_step(monitor_sym)
                     step     = instr['step']
                     min_qty  = instr['min_qty']
-                    raw_q    = remaining_qty * TP_CLOSE_FRAC
-                    decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+                    # Progressive fraction: TP1=30%, TP2=25%, TP3=25%, TP4=close all
+                    tp_frac   = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
+                    raw_q     = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
+                    decimals  = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
                     close_qty = round(_math.floor(raw_q / step) * step, decimals)
                     close_qty = min(close_qty, remaining_qty)
 
@@ -1435,7 +1634,7 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         tps_hit += 1
                         continue
 
-                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} (step={step})')
+                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
                     cr = close_trade(monitor_sym, trade_dir, close_qty)
                     actual_closed = cr.get('qty_closed', close_qty)
                     if cr.get('success'):
@@ -1476,10 +1675,10 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                     'pnl_pct':       live_pnl_pct,
                     'tp_hits':       tps_hit,
                     'status':        'monitoring',
-                    'message':       f'Monitoring {trade_dir} {sym} | Price ${live_price:.4f} | TPs {tps_hit}/4',
+                    'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
                 })
                 print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
-                      f'Remaining: {remaining_qty:.4f}')
+                      f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
 
         real_pnl = round(real_pnl, 4)
         _set_active({
