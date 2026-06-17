@@ -78,6 +78,28 @@ bybit_futures = _inject_proxy(ccxt.bybit({
 
 bybit = bybit_spot
 
+# ============================================
+# USER EXCHANGE FACTORY
+# Creates a fresh CCXT Bybit instance using a user's own API credentials.
+# Called by execute_session() when trading on a user's own Bybit account.
+# ============================================
+def get_user_exchange(api_key, api_secret, mode='futures'):
+    """
+    Create a CCXT Bybit exchange instance with the user's own API credentials.
+    Injects proxy so all calls route through the same proxy pool as the admin exchange.
+    """
+    options = {
+        'defaultType': 'linear' if mode == 'futures' else 'spot',
+        'recvWindow': 20000,
+    }
+    exchange = ccxt.bybit({
+        'apiKey':          api_key,
+        'secret':          api_secret,
+        'enableRateLimit': True,
+        'options':         options,
+    })
+    return _inject_proxy(exchange)
+
 # Binance for market data fallback — also proxied to bypass country blocks
 binance_data = _inject_proxy(ccxt.binance({
     'enableRateLimit': True,
@@ -1216,7 +1238,8 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             # Keep scanning every 30 seconds until signal found or user stops
             print('  No signal yet -- will rescan in 30s...')
             scan_wait = 0
-            while not best_signal and not should_stop(user_id):
+            MAX_SCAN_WAIT = 600  # 10 minutes max
+            while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
                 import time as _t; _t.sleep(30)
                 scan_wait += 30
                 print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
@@ -1228,7 +1251,9 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 else:
                     best_signal = select_best_pair(CRYPTO_PAIRS)
             if not best_signal:
-                break  # user stopped
+                if scan_wait >= MAX_SCAN_WAIT:
+                    results['message'] = 'No quality signal found after 10 minutes. Market conditions unclear — try again later.'
+                break  # user stopped or timed out
 
         sym        = best_signal['symbol']
         trade_dir  = best_signal['direction']
@@ -1950,11 +1975,12 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 # ============================================
 # 9. AUTO-BEST SESSION
 # ============================================
-def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None):
+def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=None,
+                               user_id=None, user_balance=None):
     """
     Auto-best: scans all pairs, reads market conditions, picks the
     strategy that fits best right now.
-    - Ranging market → Grid/DCA (exploits the oscillation)
+    - Ranging market → Momentum (grid removed)
     - Trending market → Momentum scalper (rides the direction)
     """
     print('Auto-best: scanning market conditions...')
@@ -1963,9 +1989,13 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     best_signal = select_best_pair(CRYPTO_PAIRS)
 
     if best_signal is None:
-        # No signal cleared minimum confidence — use grid on best pair by volume
-        print('  No strong momentum signal — defaulting to Grid/DCA on XRP/USDT')
-        return execute_grid_session(amount, timeframe_minutes, symbol='XRP/USDT')
+        # No signal cleared minimum confidence — fall back to momentum on XRP/USDT
+        print('  No strong momentum signal — falling back to momentum on XRP/USDT')
+        return execute_momentum_session(amount, timeframe_minutes,
+                                        num_trades=num_trades,
+                                        user_id=user_id,
+                                        user_balance=user_balance,
+                                        user_trade_mode='futures')
 
     market_condition = best_signal.get('market_condition', 'ranging')
     symbol           = best_signal['symbol']
@@ -1973,15 +2003,14 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
     print(f'  Auto-best decision: {symbol} | Condition: {market_condition} | '
           f'Signal: {best_signal["direction"]} {best_signal["confidence"]:.0f}%')
 
-    if market_condition == 'ranging':
-        print('  → Ranging market detected — launching Grid/DCA')
-        return execute_grid_session(amount, timeframe_minutes, symbol=symbol)
-    else:
-        print(f'  → Trending market ({market_condition}) — launching Momentum Scalper')
-        results = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
-                                            user_id=user_id)
-        results['strategy'] = 'auto_momentum'
-        return results
+    print(f'  → Launching Momentum Scalper on {symbol}')
+    results = execute_momentum_session(amount, timeframe_minutes,
+                                       num_trades=num_trades,
+                                       user_id=user_id,
+                                       user_balance=user_balance,
+                                       user_trade_mode='futures')
+    results['strategy'] = 'auto_momentum'
+    return results
 
 
 # ============================================
@@ -1990,7 +2019,7 @@ def execute_auto_best_session(amount, timeframe_minutes, num_trades=1, symbol=No
 def execute_session(amount, timeframe_minutes, num_trades=1,
                     strategy='auto', force=False, symbol=None,
                     user_leverage=None, user_api_key=None, user_api_secret=None,
-                    user_id=None):
+                    user_id=None, user_balance=None):
     """
     Main entry point for all trading sessions.
 

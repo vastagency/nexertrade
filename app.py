@@ -3,6 +3,13 @@
 #   Phase 6: Wallet & Withdrawal Security
 # ============================================
 
+# eventlet monkey_patch MUST be first — before ALL other imports.
+# Required when gunicorn uses --worker-class eventlet.
+# Without this, threading.Thread inside eventlet workers blocks the
+# entire worker process and kills sessions after ~8 seconds.
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import re
 from flask import Flask, render_template, request, redirect, url_for, jsonify
@@ -45,7 +52,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 bcrypt        = Bcrypt(app)
 login_manager = LoginManager(app)
-socketio      = SocketIO(app, async_mode='threading', cors_allowed_origins='*')
+socketio      = SocketIO(app, async_mode='eventlet', cors_allowed_origins='*')
 
 login_manager.login_view    = 'login'
 login_manager.login_message = 'Please login to access this page.'
