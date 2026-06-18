@@ -479,6 +479,12 @@ async function startSession(force = false) {
           document.getElementById('sessionStatusTitle').textContent = 'Trading live... waiting for TP/SL';
           continue;
         }
+        if (pollData.status === 'not_found') {
+          // Job not in memory — container may have restarted mid-session.
+          // The trade on Bybit is still live. Keep UI alive, keep polling.
+          document.getElementById('sessionStatusTitle').textContent = 'Trading live... monitoring position';
+          continue;
+        }
         if (pollData.status === 'error') {
           document.getElementById('sessionStatusTitle').textContent = '! ' + (pollData.message || 'Trade error');
           document.getElementById('sessionStatusTitle').style.color = '#ef4444';
@@ -1041,7 +1047,13 @@ setInterval(async () => {
     try {
         const res  = await fetch('/api/live_status');
         const data = await res.json();
-        updateLiveTradeUI(data);
+        // Only update the live trade panel if backend confirms an active trade.
+        // If data.active is false while isTrading is true, the bot thread may have
+        // just restarted and lost in-memory state — do NOT hide the panel in that case.
+        // The job polling loop is the authority on whether a session is truly done.
+        if (data && data.active) {
+            updateLiveTradeUI(data);
+        }
         // FIX E: tick the live chart with real current price from backend
         if (data && data.current_price && data.current_price > 0) {
             tickLiveChart(data.current_price);
