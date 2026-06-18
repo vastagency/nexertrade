@@ -114,11 +114,21 @@ else:
     print('✓ Connected to Bybit LIVE trading')
 
 CRYPTO_PAIRS  = [
+    # ── Tier 1: Large-cap, highest liquidity ─────────────────────────────
     'BTC/USDT',   'ETH/USDT',   'SOL/USDT',   'XRP/USDT',   'BNB/USDT',
     'DOGE/USDT',  'ADA/USDT',   'AVAX/USDT',  'LINK/USDT',  'DOT/USDT',
     'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
     'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
     'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'HBAR/USDT',
+    # ── Tier 2: Mid-cap, good Bybit futures volume ───────────────────────
+    'WLD/USDT',   'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'BLUR/USDT',
+    'MANTA/USDT', 'ALT/USDT',   'JUP/USDT',   'DYM/USDT',   'STRK/USDT',
+    'PIXEL/USDT', 'PORTAL/USDT','BOME/USDT',  'NOT/USDT',   'IO/USDT',
+    'ZK/USDT',    'LISTA/USDT', 'ZRO/USDT',   'EIGEN/USDT', 'DOGS/USDT',
+    # ── Tier 3: Established alts with consistent futures signals ─────────
+    'SAND/USDT',  'MANA/USDT',  'CHZ/USDT',   'ENJ/USDT',   'GALA/USDT',
+    'IMX/USDT',   'LDO/USDT',   'CRV/USDT',   'SUSHI/USDT', 'YFI/USDT',
+    'CAKE/USDT',  'OCEAN/USDT', 'RNDR/USDT',  'FET/USDT',   'AGIX/USDT',
 ]
 FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
