@@ -52,7 +52,15 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db.init_app(app)
 bcrypt        = Bcrypt(app)
 login_manager = LoginManager(app)
-socketio      = SocketIO(app, async_mode='eventlet', cors_allowed_origins='*')
+socketio      = SocketIO(
+    app,
+    async_mode='eventlet',
+    cors_allowed_origins='*',
+    ping_interval=20,       # send keepalive ping every 20s — prevents Railway idle timeout
+    ping_timeout=60,        # allow 60s for pong response before dropping
+    logger=False,
+    engineio_logger=False,
+)
 
 login_manager.login_view    = 'login'
 login_manager.login_message = 'Please login to access this page.'

@@ -13,8 +13,23 @@ socket.on('connect', () => {
   socket.emit('join_dashboard');
 });
 
-socket.on('disconnect', () => {
-  console.log('✗ Real-time disconnected');
+socket.on('disconnect', (reason) => {
+  console.log('✗ Real-time disconnected:', reason);
+  // NOTE: Do NOT set isTrading = false here.
+  // The bot thread on the server keeps running through a socket dropout.
+  // The polling loop in trading.js (/api/bot/result) keeps the session alive
+  // independently of the WebSocket. A socket reconnect does NOT mean the
+  // trade is done — only the poll returning status='done' means that.
+});
+
+socket.on('reconnect', (attemptNumber) => {
+  console.log('✓ Real-time reconnected after', attemptNumber, 'attempts');
+  // Rejoin user room so we keep receiving balance_update / session_complete
+  socket.emit('join_dashboard');
+});
+
+socket.on('reconnect_attempt', () => {
+  console.log('↻ Attempting socket reconnect...');
 });
 
 socket.on('connected', (data) => {
