@@ -128,8 +128,8 @@ FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 # Momentum scalper
 MOMENTUM_TP_PCT  = 0.03    # +3% take profit
 MOMENTUM_SL_PCT  = 0.015   # -1.5% stop loss → R:R = 2:1
-MIN_CONF         = 68      # minimum after direction-aware adjustments — prevents weak trades
-STRONG_CONF      = 82      # strong signal — full size
+MIN_CONF         = 65      # minimum after direction-aware adjustments — prevents weak trades
+STRONG_CONF      = 80      # strong signal — full size
 
 # Grid/DCA
 GRID_LEVELS      = 5
@@ -611,8 +611,8 @@ def detect_market_condition(df):
 # - Minimum confidence: 72% (was 60%)
 # ============================================
 
-MIN_CONF    = 68    # minimum confidence after direction-aware adjustments
-STRONG_CONF = 82    # strong signal — scale in with full size
+MIN_CONF    = 65    # minimum confidence after direction-aware adjustments
+STRONG_CONF = 80    # strong signal — scale in with full size
 
 def calculate_ema50(closes):
     """EMA50 for trend structure."""
@@ -861,11 +861,26 @@ def generate_signal(symbol, timeframe='5m'):
         if ups > downs:   score += 1
         elif downs > ups: score -= 1
 
+        # ── TREND-ALIGNED BONUS ──────────────────────────────────────────
+        # When the raw score already points in the same direction as the 1h trend,
+        # reward that confluence with +1 before the minimum-score gate.
+        # This converts a trend-aligned score=3 into 4 and lets it proceed.
+        # Counter-trend signals get no bonus — they'll be rejected by Gate 5 anyway.
+        raw_dir_pre = 'BUY' if score > 0 else ('SELL' if score < 0 else None)
+        if raw_dir_pre == 'BUY'  and trend_bias == 'bullish': score += 1
+        if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
+
         # ── GATE 4: MINIMUM SCORE — directional conviction required ────────
-        # Score must be >= +4 for BUY or <= -4 for SELL.
-        # This prevents "score=-4 → abs=4 → passes → bad SELL trade" situations.
-        # A score of 3 means barely 3 more indicators agree — not enough conviction.
-        MIN_SCORE = 4
+        # MIN_SCORE = 3 base. A score of 3 (after trend bonus) with secondary
+        # confluence (volume, candle, stoch extreme) is a tradeable setup.
+        # Without secondary confluence a score-3 is borderline noise — skip.
+        MIN_SCORE = 3
+        secondary_confirms = (
+            (volume_trend == 'confirming') +
+            (candle_pat != 'none') +
+            (stoch_k < 25 or stoch_k > 75) +
+            (bb_squeeze)
+        )
         if score > 0 and score < MIN_SCORE:
             print(f'  [{symbol}] BUY score {score} below minimum +{MIN_SCORE}')
             return None
@@ -874,6 +889,10 @@ def generate_signal(symbol, timeframe='5m'):
             return None
         if score == 0:
             print(f'  [{symbol}] Score 0 — no directional conviction')
+            return None
+        # Score=3 (abs) still requires at least one secondary confirmation
+        if abs(score) == MIN_SCORE and secondary_confirms == 0:
+            print(f'  [{symbol}] Score {score} at minimum — no secondary confluence, skip')
             return None
 
         # ── DIRECTION — must align with 1h trend ────────────────────────
@@ -905,11 +924,11 @@ def generate_signal(symbol, timeframe='5m'):
                 return None
             score += 2  # reduce magnitude
 
-        # Re-check score after RSI adjustment
-        if direction == 'BUY'  and score < MIN_SCORE:
+        # Re-check score after RSI adjustment (MIN_SCORE = 3)
+        if direction == 'BUY'  and score < 3:
             print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
             return None
-        if direction == 'SELL' and score > -MIN_SCORE:
+        if direction == 'SELL' and score > -3:
             print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
             return None
 
@@ -1004,7 +1023,7 @@ def generate_signal(symbol, timeframe='5m'):
         tp1_dist = abs(tp_prices[0] - current_price)
         sl_dist  = abs(sl_price - current_price)
         rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
-        if rr_ratio < 1.2:
+        if rr_ratio < 1.0:
             print(f'  [{symbol}] R:R too poor: TP1={tp1_dist:.6f} vs SL={sl_dist:.6f} = {rr_ratio:.2f}:1 — skip')
             return None
 
