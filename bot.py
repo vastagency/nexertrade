@@ -120,15 +120,14 @@ CRYPTO_PAIRS  = [
     'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
     'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
     'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'HBAR/USDT',
-    # ── Tier 2: Mid-cap, good Bybit futures volume ───────────────────────
+    # ── Tier 2: Mid-cap, confirmed Bybit futures volume ──────────────────
     'WLD/USDT',   'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'BLUR/USDT',
-    'MANTA/USDT', 'ALT/USDT',   'JUP/USDT',   'DYM/USDT',   'STRK/USDT',
-    'PIXEL/USDT', 'PORTAL/USDT','BOME/USDT',  'NOT/USDT',   'IO/USDT',
-    'ZK/USDT',    'LISTA/USDT', 'ZRO/USDT',   'EIGEN/USDT', 'DOGS/USDT',
-    # ── Tier 3: Established alts with consistent futures signals ─────────
+    'JUP/USDT',   'DYM/USDT',   'STRK/USDT',  'BOME/USDT',  'NOT/USDT',
+    'ZK/USDT',    'ZRO/USDT',   'DOGS/USDT',  'IO/USDT',    'EIGEN/USDT',
+    # ── Tier 3: Established alts, reliable Bybit futures data ────────────
     'SAND/USDT',  'MANA/USDT',  'CHZ/USDT',   'ENJ/USDT',   'GALA/USDT',
-    'IMX/USDT',   'LDO/USDT',   'CRV/USDT',   'SUSHI/USDT', 'YFI/USDT',
-    'CAKE/USDT',  'OCEAN/USDT', 'RNDR/USDT',  'FET/USDT',   'AGIX/USDT',
+    'IMX/USDT',   'LDO/USDT',   'CRV/USDT',   'SUSHI/USDT', 'CAKE/USDT',
+    'FET/USDT',   'MANTA/USDT', 'ALT/USDT',   'PORTAL/USDT','PIXEL/USDT',
 ]
 FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
