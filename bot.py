@@ -1329,9 +1329,14 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
         return {'success': False, 'error': str(e), 'price': 0}
 
 
-def close_trade(symbol, direction, quantity, trade_mode='futures'):
-    """Close a futures position via direct Bybit REST API."""
-    exchange   = bybit_futures
+def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None):
+    """
+    Close a futures position via direct Bybit REST API.
+    Pass exchange= explicitly to use the correct user account.
+    Falls back to current bybit_futures global (swapped during user sessions).
+    """
+    if exchange is None:
+        exchange = bybit_futures
     bybit_sym  = symbol.replace('/', '').replace(':USDT', '')
     if not bybit_sym.endswith('USDT'):
         bybit_sym = bybit_sym + 'USDT'
@@ -1368,6 +1373,13 @@ def close_trade(symbol, direction, quantity, trade_mode='futures'):
         }, exchange)
 
         print(f'  [CLOSE RESP] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
+
+        # retCode 110017 = "position size is zero" — already closed on Bybit (TP/SL hit)
+        if resp.get('retCode') == 110017:
+            print(f'  [CLOSE] Position already zero on Bybit — treating as closed successfully')
+            return {'success': True, 'order_id': 'already_closed', 'close_price': close_price,
+                    'qty_closed': quantity}
+
         if resp.get('retCode') != 0:
             return {'success': False, 'error': resp.get('retMsg'), 'close_price': close_price}
 
@@ -1393,7 +1405,11 @@ def close_trade(symbol, direction, quantity, trade_mode='futures'):
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                               force=False, symbol=None, user_id=None,
-                              user_balance=None, user_trade_mode='futures'):
+                              user_balance=None, user_trade_mode='futures',
+                              user_exchange=None):
+    # user_exchange: passed explicitly so all close_trade calls use the correct
+    # user Bybit account regardless of global swap state (avoids race condition).
+    _user_exchange = user_exchange  # local alias for use inside monitor loop
     results = {
         'strategy':     'momentum',
         'trades':       [],
@@ -1461,6 +1477,10 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         trade_dir  = best_signal['direction']
         confidence = best_signal['confidence']
         atr        = best_signal.get('atr', 0.001)
+        # FIX BUG 1: atr_pct was never assigned here — caused NameError the instant
+        # the monitor loop checked it, silently killing the loop while the Bybit
+        # position stayed open with no TP/SL management.
+        atr_pct    = best_signal.get('atr_pct', 0.3)
 
         # Signal engine Gate 4 already enforces trend alignment -- trust it
         trade_dir = best_signal['direction']
@@ -1552,20 +1572,23 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         except Exception:
             pass
 
-        # Monitor loop — upgraded with trailing SL + progressive TP fractions
+        # Monitor loop — resilient: any exception retries, never exits silently
         remaining_qty      = quantity
         tps_hit            = 0
         real_pnl           = 0.0
         won                = False
         trailing_sl_active = False
+        consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 10
         breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
                         else entry_price * (1 - BREAKEVEN_BUFFER))
         import math as _math
 
         while remaining_qty > 0:
+          try:  # BUG 3 FIX: wrap entire loop body — exceptions retry, never exit silently
             if should_stop(user_id):
                 print(f'  User stop: attempting to close {remaining_qty:.4f} at market')
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty)
+                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
                 if cr.get('success'):
                     cp  = cr['close_price']
                     pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
@@ -1576,13 +1599,20 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 break
 
             import time as _t; _t.sleep(6)
-            try:
-                live_price = _get_price(monitor_sym, 'futures')
-                if not live_price:
-                    continue
-            except Exception as e:
-                print(f'  Price fetch error: {e} -- continuing')
+
+            live_price = _get_price(monitor_sym, 'futures')
+            if not live_price:
+                consecutive_errors += 1
+                print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f'  Too many price failures — emergency close attempt')
+                    try:
+                        close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    except Exception as _ce:
+                        print(f'  [MONITOR] Emergency close failed: {_ce}')
+                    remaining_qty = 0
                 continue
+            consecutive_errors = 0
 
             # Live PnL
             price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
@@ -1619,8 +1649,16 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
                 _set_active({'status': 'closing', 'current_price': live_price,
                              'message': f'{sl_label} hit @ ${live_price:.4f}'})
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty)
-                if cr.get('success'):
+                # Retry SL close up to 3 times — never silently exit with position open
+                cr = None
+                for _attempt in range(3):
+                    cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    if cr.get('success'):
+                        break
+                    print(f'  {sl_label} close attempt {_attempt+1}/3 failed: {cr.get("error")} — retrying...')
+                    import time as _t3; _t3.sleep(2)
+
+                if cr and cr.get('success'):
                     cp  = cr['close_price']
                     pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
                     pnl = pc * remaining_qty * entry_price * LEVERAGE - remaining_qty * entry_price * fee_rate * 2
@@ -1628,7 +1666,10 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                     remaining_qty = 0
                     print(f'  {sl_label} closed @ ${cp:.4f} | PnL: ${pnl:.4f}')
                 else:
-                    print(f'  {sl_label} close failed: {cr.get("error")} -- may still be open on Bybit')
+                    print(f'  [CRITICAL] {sl_label} close FAILED after 3 attempts!')
+                    print(f'  [ACTION REQUIRED] Manually close {remaining_qty} {monitor_sym} on Bybit')
+                    _set_active({'status': 'error',
+                                 'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
                     remaining_qty = 0
                 break
 
@@ -1654,7 +1695,7 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         continue
 
                     print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
-                    cr = close_trade(monitor_sym, trade_dir, close_qty)
+                    cr = close_trade(monitor_sym, trade_dir, close_qty, exchange=_user_exchange)
                     actual_closed = cr.get('qty_closed', close_qty)
                     if cr.get('success'):
                         cp        = cr['close_price']
@@ -1698,6 +1739,23 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                 })
                 print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
                       f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
+
+            consecutive_errors = 0  # reset on clean iteration
+
+          except Exception as _loop_err:
+            # NEVER let an exception silently exit the monitor loop.
+            # Log it, wait, retry — the Bybit position must stay managed.
+            consecutive_errors += 1
+            print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
+                try:
+                    close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                except Exception as _ce:
+                    print(f'  [MONITOR] Emergency close also failed: {_ce}')
+                remaining_qty = 0
+                break
+            import time as _t2; _t2.sleep(6)
 
         real_pnl = round(real_pnl, 4)
         _set_active({
@@ -2363,7 +2421,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
                                           num_trades=num_trades, force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
-                                          user_trade_mode='futures')
+                                          user_trade_mode='futures',
+                                          user_exchange=user_futures if use_user_account else None)
 
     # Restore admin exchange after user session completes
     if use_user_account and _original_futures is not None:
