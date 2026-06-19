@@ -165,16 +165,15 @@ BREAKEVEN_BUFFER  = 0.0003 # 0.03% buffer above entry for breakeven SL
 # Low volatility (ATR% < 0.15%): tighter targets
 # Normal volatility: standard
 # High volatility (ATR% > 0.5%): wider targets, wider SL
-# FIX: TP1 must always be CLOSER than SL — old values had TP1 at 1x and SL at 2x
-# which meant SL was 2x as far as TP1, creating a terrible R:R and a lazy SL.
-# New values: SL is tighter (1.2x), TP targets scale out progressively (1.5x-6x)
-# This ensures: TP1 hits quickly to bank profit, SL is close enough to protect capital
-ATR_SL_MULT_LOW   = 1.0    # tight SL in quiet/low-vol market
-ATR_SL_MULT_NORM  = 1.2    # standard — SL within striking distance
-ATR_SL_MULT_HIGH  = 1.5    # give trade room only in volatile market
-ATR_TP_MULTS_LOW  = [1.5,  2.5,  4.0,  6.0]  # TP1 > SL distance = positive R:R
-ATR_TP_MULTS_NORM = [1.5,  3.0,  5.0,  7.5]  # TP1=1.5x, SL=1.2x → R:R of 1.25:1
-ATR_TP_MULTS_HIGH = [1.5,  3.0,  5.5,  8.0]  # wider in volatile, same logic
+# TP STRATEGY: TP1 hits fast (close to entry), then TP2/3/4 run gradually
+# SL is tight to protect capital. Once TP1 hits, trailing SL moves to breakeven.
+# This gives the "TP1 fast, rest runs" behaviour Temidayo wants.
+ATR_SL_MULT_LOW   = 0.9    # very tight in quiet market
+ATR_SL_MULT_NORM  = 1.0    # standard tight SL
+ATR_SL_MULT_HIGH  = 1.2    # give room only in high-vol market
+ATR_TP_MULTS_LOW  = [1.2,  2.5,  4.0,  6.5]  # TP1=1.2x → hits fast, R:R 1.33:1
+ATR_TP_MULTS_NORM = [1.2,  2.8,  5.0,  8.0]  # TP1=1.2x, SL=1.0x → R:R 1.2:1
+ATR_TP_MULTS_HIGH = [1.2,  3.0,  5.5,  9.0]  # wider TPs for volatile coins
 
 
 # ============================================
@@ -831,10 +830,11 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # GATE 2: Only skip truly frozen markets (ATR < 0.03%)
-        # Volume on 5m is NOT a gate -- 1h trend bias is the real filter
-        if atr_pct < 0.03:
-            print(f'  [{symbol}] ATR {atr_pct:.3f}% -- price frozen, skip')
+        # GATE 2: Minimum ATR 0.20% — ensures enough volatility for TP1 to hit
+        # Below 0.20% the SL and TP are so close together that noise triggers SL
+        # before price can move to TP1 (CRV was 0.282% — borderline)
+        if atr_pct < 0.20:
+            print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — not enough volatility for clean TP1')
             return None
 
         # ── SCORING SYSTEM ──────────────────────────────────────────────
@@ -973,28 +973,60 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
             return None
 
-        # ── GATE 5b: RSI EXTREME EXHAUSTION FILTER ──────────────────────
-        # Never BUY when RSI5 > 72 (already overbought — chasing)
-        # Never SELL when RSI5 < 28 (already oversold — chasing the dump)
-        # Exception: if RSI1h strongly confirms (deep trend), allow but note it
+        # ── GATE 5b: RSI EXHAUSTION FILTER (5m + 1h) ───────────────────
+        # Rule 1: Never chase overbought/oversold on the 5m
         if direction == 'BUY' and rsi5 > 72:
-            if rsi1h > 60:  # 1h also overbought = definitely chasing
-                print(f'  [{symbol}] RSI5={rsi5:.1f} overbought — no BUY chase')
+            if rsi1h > 60:
+                print(f'  [{symbol}] RSI5={rsi5:.1f} overbought + RSI1h={rsi1h:.1f} — no BUY chase')
                 return None
-            # rsi5 overbought but rsi1h still ok = reduce score, let it through if strong
             score -= 2
-        if direction == 'SELL' and rsi5 < 28:
-            if rsi1h < 40:  # 1h also oversold = chasing the dump
-                print(f'  [{symbol}] RSI5={rsi5:.1f} oversold — no SELL chase')
-                return None
-            score += 2  # reduce magnitude
 
-        # Re-check score after RSI adjustment (MIN_SCORE = 3)
+        if direction == 'SELL' and rsi5 < 28:
+            if rsi1h < 40:
+                print(f'  [{symbol}] RSI5={rsi5:.1f} oversold + RSI1h={rsi1h:.1f} — no SELL chase')
+                return None
+            score += 2
+
+        # Rule 2: RSI1h COUNTER-DIRECTION EXHAUSTION (the CRV problem)
+        # Never SELL when RSI1h < 35 — hourly is already deeply oversold,
+        # a bounce is far more likely than further downside.
+        # Never BUY when RSI1h > 65 — hourly is already overbought,
+        # a pullback is far more likely than further upside.
+        # This catches trades where 5m signals look bearish but the 1h
+        # is already exhausted in that direction and due for reversal.
+        # TIGHTENED: RSI1h < 40 = deeply oversold on hourly = SELL is dangerous
+        # RSI1h > 60 = deeply overbought on hourly = BUY is dangerous
+        # CRV failure: RSI1h was 22.2, threshold was 35 — now raised to 40
+        if direction == 'SELL' and rsi1h < 40:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} oversold on 1h — SELL rejected (bounce risk)')
+            return None
+        if direction == 'BUY' and rsi1h > 60:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} overbought on 1h — BUY rejected (pullback risk)')
+            return None
+
+        # Rule 3: RSI1h MISALIGNMENT — when hourly RSI opposes the trade direction
+        if direction == 'SELL' and rsi1h > 55:
+            score += 1   # weaken the sell signal
+        if direction == 'BUY' and rsi1h < 45:
+            score -= 1   # weaken the buy signal
+
+        # Re-check score after adjustments
         if direction == 'BUY'  and score < 3:
-            print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
+            print(f'  [{symbol}] Score {score} too weak after RSI1h adjustment')
             return None
         if direction == 'SELL' and score > -3:
-            print(f'  [{symbol}] Score {score} too weak after RSI adjustment')
+            print(f'  [{symbol}] Score {score} too weak after RSI1h adjustment')
+            return None
+
+        # EXTRA GATE: When RSI1h is in the 40-55 danger zone for SELLs
+        # (not deeply oversold but not clearly overbought either),
+        # require a stronger signal score to compensate for the uncertainty
+        if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -5:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-5, got {score}')
+            return None
+        # Same for BUYs when RSI1h is in the 45-60 neutral zone
+        if direction == 'BUY' and 45 <= rsi1h <= 60 and score < 5:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=5, got {score}')
             return None
 
         # ── CONFIDENCE CALCULATION ───────────────────────────────────────
