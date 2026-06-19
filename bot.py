@@ -158,19 +158,23 @@ AW_TP_FRAC        = 1.0
 
 # ── Trailing stop activation ─────────────────────────────────────────
 # After TP2 hit, move SL to breakeven + small buffer to lock partial profit
-TRAIL_SL_AFTER_TP = 2      # activate trailing SL after this many TPs hit
+TRAIL_SL_AFTER_TP = 1      # activate trailing SL after TP1 hits — protects remaining position immediately
 BREAKEVEN_BUFFER  = 0.0003 # 0.03% buffer above entry for breakeven SL
 
 # ── Volatility-adaptive ATR multipliers ─────────────────────────────
 # Low volatility (ATR% < 0.15%): tighter targets
 # Normal volatility: standard
 # High volatility (ATR% > 0.5%): wider targets, wider SL
-ATR_SL_MULT_LOW   = 1.5    # tight SL in quiet market
-ATR_SL_MULT_NORM  = 2.0    # standard
-ATR_SL_MULT_HIGH  = 2.5    # give trade room in volatile market
-ATR_TP_MULTS_LOW  = [0.8,  1.6,  2.8,  4.0]
-ATR_TP_MULTS_NORM = [1.0,  2.0,  3.5,  5.5]
-ATR_TP_MULTS_HIGH = [1.2,  2.4,  4.2,  6.5]
+# FIX: TP1 must always be CLOSER than SL — old values had TP1 at 1x and SL at 2x
+# which meant SL was 2x as far as TP1, creating a terrible R:R and a lazy SL.
+# New values: SL is tighter (1.2x), TP targets scale out progressively (1.5x-6x)
+# This ensures: TP1 hits quickly to bank profit, SL is close enough to protect capital
+ATR_SL_MULT_LOW   = 1.0    # tight SL in quiet/low-vol market
+ATR_SL_MULT_NORM  = 1.2    # standard — SL within striking distance
+ATR_SL_MULT_HIGH  = 1.5    # give trade room only in volatile market
+ATR_TP_MULTS_LOW  = [1.5,  2.5,  4.0,  6.0]  # TP1 > SL distance = positive R:R
+ATR_TP_MULTS_NORM = [1.5,  3.0,  5.0,  7.5]  # TP1=1.5x, SL=1.2x → R:R of 1.25:1
+ATR_TP_MULTS_HIGH = [1.5,  3.0,  5.5,  8.0]  # wider in volatile, same logic
 
 
 # ============================================
@@ -1534,8 +1538,9 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             sl_price  = entry_price + (atr * atr_sl_mult)
             tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
 
-        # Hard cap: SL never more than 2.5% from entry (protects capital)
-        max_sl_pct = 0.025
+        # Hard cap: SL never more than 1.5% from entry (protects capital)
+        # 2.5% was too loose — on low ATR coins like PORTAL it let SL drift far
+        max_sl_pct = 0.015
         sl_pct_actual = abs(sl_price - entry_price) / entry_price
         if sl_pct_actual > max_sl_pct:
             sl_price = (entry_price * (1 - max_sl_pct) if trade_dir == 'BUY'
@@ -1589,12 +1594,37 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         trailing_sl_active = False
         consecutive_errors = 0
         MAX_CONSECUTIVE_ERRORS = 10
+        # FIX 3: Maximum session time — no trade should run more than 4 hours
+        # Prevents zombie trades sitting in loss with no SL triggering
+        import time as _time_module
+        session_start_time = _time_module.time()
+        MAX_SESSION_SECONDS = 4 * 60 * 60  # 4 hours
         breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
                         else entry_price * (1 - BREAKEVEN_BUFFER))
         import math as _math
 
         while remaining_qty > 0:
           try:  # BUG 3 FIX: wrap entire loop body — exceptions retry, never exit silently
+            # FIX 3: Force close if trade has been running longer than MAX_SESSION_SECONDS
+            elapsed = _time_module.time() - session_start_time
+            if elapsed > MAX_SESSION_SECONDS:
+                print(f'  [TIMEOUT] Session exceeded {MAX_SESSION_SECONDS//3600}h — force closing position')
+                _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
+                cr = None
+                for _attempt in range(3):
+                    cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    if cr.get('success'): break
+                    import time as _t4; _t4.sleep(2)
+                if cr and cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    real_pnl += pc * remaining_qty * entry_price * LEVERAGE - remaining_qty * entry_price * fee_rate * 2
+                    print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | PnL: ${real_pnl:.4f}')
+                else:
+                    print(f'  [TIMEOUT] Force close FAILED — manually close {monitor_sym} on Bybit!')
+                remaining_qty = 0
+                break
+
             if should_stop(user_id):
                 print(f'  User stop: attempting to close {remaining_qty:.4f} at market')
                 cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
@@ -1651,8 +1681,10 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                         sl_price = new_trail
                         _set_active({'sl_price': round(sl_price, 6)})
 
-            # Check SL
-            sl_hit = (live_price <= sl_price) if trade_dir == 'BUY' else (live_price >= sl_price)
+            # Check SL — use a small buffer (0.05% of price) to avoid missing SL
+            # due to price precision issues (e.g. $0.01600 never reaching $0.016090)
+            sl_buffer = live_price * 0.0005
+            sl_hit = (live_price <= sl_price + sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price - sl_buffer)
             if sl_hit:
                 sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
                 print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
