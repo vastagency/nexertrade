@@ -569,20 +569,61 @@ def detect_candle_pattern(df):
     return 'none'
 
 
-def calculate_support_resistance(df):
-    closes      = df['close']
-    highs       = df.get('high', closes)
-    lows        = df.get('low',  closes)
-    current     = closes[-1]
-    recent_high = max(highs[-20:])
-    recent_low  = min(lows[-20:])
-    price_range = recent_high - recent_low
-    if price_range == 0:
-        return 'middle'
-    position = (current - recent_low) / price_range
-    if position < 0.25:
+def calculate_support_resistance(df, df1h=None):
+    """
+    Upgraded SR engine. Uses both 5m swing levels AND 1h structure.
+    A real support is a multi-candle swing low that has been tested.
+    A real resistance is a multi-candle swing high that has been tested.
+    Returns: 'near_support', 'near_resistance', or 'middle'
+    """
+    closes = df['close']
+    highs  = df.get('high', closes)
+    lows   = df.get('low',  closes)
+    current = closes[-1]
+
+    # Use 1h data if available for stronger structural levels
+    ref_closes = df1h['close'] if df1h and len(df1h['close']) >= 20 else closes
+    ref_highs  = df1h.get('high', ref_closes) if df1h else highs
+    ref_lows   = df1h.get('low',  ref_closes) if df1h else lows
+
+    # Find swing highs and lows using a 3-candle pivot method
+    # A swing low: lows[i] < lows[i-1] and lows[i] < lows[i+1]
+    # A swing high: highs[i] > highs[i-1] and highs[i] > highs[i+1]
+    swing_lows  = []
+    swing_highs = []
+    ref_l = list(ref_lows)
+    ref_h = list(ref_highs)
+    for i in range(2, len(ref_l) - 1):
+        if ref_l[i] < ref_l[i-1] and ref_l[i] < ref_l[i+1]:
+            swing_lows.append(ref_l[i])
+        if ref_h[i] > ref_h[i-1] and ref_h[i] > ref_h[i+1]:
+            swing_highs.append(ref_h[i])
+
+    if not swing_lows or not swing_highs:
+        # Fallback to simple range
+        recent_high = max(ref_h[-20:])
+        recent_low  = min(ref_l[-20:])
+        price_range = recent_high - recent_low
+        if price_range == 0:
+            return 'middle'
+        pos = (current - recent_low) / price_range
+        return 'near_support' if pos < 0.25 else ('near_resistance' if pos > 0.75 else 'middle')
+
+    # Find nearest support (highest swing low BELOW current price)
+    supports = [s for s in swing_lows if s < current]
+    resistances = [r for r in swing_highs if r > current]
+
+    nearest_support    = max(supports)    if supports    else min(swing_lows)
+    nearest_resistance = min(resistances) if resistances else max(swing_highs)
+
+    # Proximity: within 0.8% of a real level = meaningful zone
+    ZONE_PCT = 0.008
+    dist_to_support    = abs(current - nearest_support)    / current
+    dist_to_resistance = abs(current - nearest_resistance) / current
+
+    if dist_to_support <= ZONE_PCT:
         return 'near_support'
-    elif position > 0.75:
+    elif dist_to_resistance <= ZONE_PCT:
         return 'near_resistance'
     return 'middle'
 
@@ -781,7 +822,7 @@ def generate_signal(symbol, timeframe='5m'):
 
         volume_trend = calculate_volume_trend(df5['volume'])
         candle_pat   = detect_candle_pattern(df5)
-        sr_position  = calculate_support_resistance(df5)
+        sr_position  = calculate_support_resistance(df5, df1h=df1h)
         atr          = calculate_atr(df5)
         current_price = float(closes5[-1])
         atr_pct      = (atr / current_price) * 100 if current_price > 0 else 0
@@ -921,6 +962,16 @@ def generate_signal(symbol, timeframe='5m'):
 
         direction = raw_direction
 
+        # ── GATE 5c: MIDDLE ZONE REJECTION ────────────────────────────────
+        # If price is in the middle zone (not near any real support/resistance),
+        # the setup has no structural backing — it's just indicator noise.
+        # A human trader would wait for price to reach a key level first.
+        # Allow middle zone ONLY if score is very high (>=6) AND confidence >=75
+        if sr_position == 'middle':
+            if abs(score) < 6 or confidence < 75:
+                print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score} conf={confidence:.0f}%)')
+                return None
+
         # ── GATE 5b: RSI EXTREME EXHAUSTION FILTER ──────────────────────
         # Never BUY when RSI5 > 72 (already overbought — chasing)
         # Never SELL when RSI5 < 28 (already oversold — chasing the dump)
@@ -978,6 +1029,25 @@ def generate_signal(symbol, timeframe='5m'):
         elif direction == 'SELL' and stoch_k > 80: confidence = min(95, confidence + 3)
         elif direction == 'BUY'  and stoch_k > 80: confidence = max(50, confidence - 3)  # buying overbought = penalty
         elif direction == 'SELL' and stoch_k < 20: confidence = max(50, confidence - 3)  # selling oversold = penalty
+
+        # ── GATE 5d: MOMENTUM QUALITY CHECK ─────────────────────────────
+        # Detect "indicator stuffing" — when a high score comes entirely from
+        # oversold/overbought indicators in a ranging market with no real momentum.
+        # Signature: RSI extreme + Stoch extreme BUT price barely moving (low ATR)
+        # and no EMA alignment or volume confirmation. This was the ENJ failure mode.
+        indicator_extremes = (
+            (direction == 'BUY'  and rsi5 < 40 and stoch_k < 30) or
+            (direction == 'SELL' and rsi5 > 60 and stoch_k > 70)
+        )
+        has_real_momentum = (
+            volume_trend == 'confirming' or
+            candle_pat != 'none' or
+            atr_pct > 0.3 or          # price is actually moving
+            (ema_bull >= 2 if direction == 'BUY' else ema_bear >= 2)  # EMAs aligned
+        )
+        if indicator_extremes and not has_real_momentum and sr_position == 'middle':
+            print(f'  [{symbol}] Indicator extremes in middle zone with no momentum — skip')
+            return None
 
         # ── GATE 6: MINIMUM CONFIDENCE ───────────────────────────────────
         if confidence < MIN_CONF:
@@ -1122,8 +1192,14 @@ def _signal_quality_score(sig):
     atr_weight        = min(atr_pct / 0.5, 1.0) * 5    # max 5 (0.5%+ ATR = full)
     vol_weight        = 4 if vol == 'confirming' else 0
     candle_weight     = 3 if candle != 'none' else 0
-    sr_weight         = (2 if (direction == 'BUY'  and sr == 'near_support') or
-                              (direction == 'SELL' and sr == 'near_resistance') else 0)
+    # Structural bonus/penalty — the most important ranking factor after score
+    # A trade AT a real level is far higher quality than one floating in the middle
+    if (direction == 'BUY' and sr == 'near_support') or (direction == 'SELL' and sr == 'near_resistance'):
+        sr_weight = 12   # strong bonus — this is exactly where trades should happen
+    elif sr == 'middle':
+        sr_weight = -8   # heavy penalty — no structural backing (ENJ was here)
+    else:
+        sr_weight = -3   # minor penalty — wrong side of level
 
     return (score_weight + confidence_weight + rsi_weight +
             atr_weight + vol_weight + candle_weight + sr_weight)
