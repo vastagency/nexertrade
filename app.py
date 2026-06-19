@@ -104,6 +104,9 @@ def init_db():
                     'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_withdrawn FLOAT DEFAULT 0.0',
                     'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_fees_paid FLOAT DEFAULT 0.0',
                     'ALTER TABLE trade_sessions ADD COLUMN IF NOT EXISTS real_trading BOOLEAN DEFAULT FALSE',
+                    # Session persistence — allows frontend to recover on refresh/new device
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS active_job_id VARCHAR(36)',
+                    'ALTER TABLE users ADD COLUMN IF NOT EXISTS active_job_amount FLOAT',
                 ]
                 for sql in migrations:
                     try:
@@ -725,10 +728,29 @@ def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, for
             with _trade_jobs_lock:
                 _trade_jobs[job_id]['status'] = 'done'
                 _trade_jobs[job_id]['results'] = results
+            # Clear persisted job_id from DB — session is finished
+            try:
+                user = User.query.get(user_id)
+                if user and user.active_job_id == job_id:
+                    user.active_job_id     = None
+                    user.active_job_amount = None
+                    db.session.commit()
+            except Exception as _dbe:
+                print(f'  [SESSION] Could not clear job_id from DB: {_dbe}')
+                db.session.rollback()
         except Exception as e:
             with _trade_jobs_lock:
                 _trade_jobs[job_id]['status'] = 'error'
                 _trade_jobs[job_id]['error']  = str(e)
+            # Clear on error too
+            try:
+                user = User.query.get(user_id)
+                if user and user.active_job_id == job_id:
+                    user.active_job_id     = None
+                    user.active_job_amount = None
+                    db.session.commit()
+            except Exception:
+                db.session.rollback()
 
 
 @app.route('/api/bot/execute', methods=['POST'])
@@ -848,6 +870,15 @@ def api_bot_execute():
                 'user_id': current_user.id,
                 'amount':  amount
             }
+        # Persist job_id to DB so the frontend can recover on refresh/new device
+        try:
+            current_user.active_job_id     = job_id
+            current_user.active_job_amount = amount
+            db.session.commit()
+        except Exception as _e:
+            print(f'  [SESSION] Could not persist job_id to DB: {_e}')
+            db.session.rollback()
+
         # Get user's connected Bybit credentials if available
         u_api_key    = current_user.bybit_api_key
         u_api_secret = current_user.bybit_api_secret
@@ -865,6 +896,42 @@ def api_bot_execute():
     except Exception as e:
         print(f'Execute error: {e}')
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/active_session')
+@login_required
+def api_active_session():
+    """
+    Returns the user's active job_id if one is persisted in DB.
+    Called on page load so the frontend can resume polling after refresh/logout.
+    """
+    job_id = current_user.active_job_id
+    amount = current_user.active_job_amount or 10.0
+    if not job_id:
+        return jsonify({'active': False})
+
+    # Verify the job is actually still running in memory
+    with _trade_jobs_lock:
+        job = _trade_jobs.get(job_id)
+
+    if job and job.get('status') == 'running':
+        return jsonify({'active': True, 'job_id': job_id, 'amount': amount})
+
+    # Job not in memory (container restarted) but DB still has it —
+    # the bot thread is alive but _trade_jobs was wiped. Keep returning active
+    # so the frontend keeps polling — it will get not_found and keep showing
+    # "Trading live... monitoring position" until the thread finishes.
+    if not job:
+        return jsonify({'active': True, 'job_id': job_id, 'amount': amount, 'recovering': True})
+
+    # Job is done — clear from DB and return inactive
+    try:
+        current_user.active_job_id     = None
+        current_user.active_job_amount = None
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+    return jsonify({'active': False})
 
 
 @app.route('/api/bot/result/<job_id>')

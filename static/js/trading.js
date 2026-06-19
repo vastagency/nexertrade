@@ -1070,3 +1070,82 @@ setInterval(async () => {
         // silently skip -- network hiccup
     }
 }, 4000);
+
+// ============================================================
+// SESSION PERSISTENCE — Resume active trade on page load
+// Checks /api/active_session on every page load. If the server
+// has an active job_id for this user (persisted in DB), resumes
+// polling so the UI reflects the live trade — even after refresh,
+// logout, or switching devices.
+// ============================================================
+async function resumeActiveSessionIfAny() {
+  try {
+    const res  = await fetch('/api/active_session');
+    const data = await res.json();
+
+    if (!data.active || !data.job_id) return;  // no active session
+
+    console.log('[RECOVER] Active session found:', data.job_id, data.recovering ? '(recovering from restart)' : '');
+
+    // Restore UI to trading state
+    isTrading   = true;
+    tradesCount = 0; winsCount = 0; lossesCount = 0;
+    sessionPnl  = 0;
+
+    const panel = document.getElementById('liveTradePanel');
+    if (panel) panel.style.display = 'block';
+
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn  = document.getElementById('stopBtn');
+    if (startBtn) startBtn.style.display = 'none';
+    if (stopBtn)  stopBtn.style.display  = 'inline-flex';
+
+    const statusTitle = document.getElementById('sessionStatusTitle');
+    if (statusTitle) {
+      statusTitle.textContent = 'Resuming session...';
+      statusTitle.style.color = '';
+    }
+
+    startSessionTimer();
+
+    // Resume polling the job
+    const jobId = data.job_id;
+    let botData = null;
+
+    while (isTrading) {
+      await new Promise(r => setTimeout(r, 5000));
+      if (!isTrading) break;
+      try {
+        const pollRes  = await fetch(`/api/bot/result/${jobId}`);
+        const pollData = await pollRes.json();
+
+        if (pollData.status === 'running') {
+          const el = document.getElementById('sessionStatusTitle');
+          if (el) el.textContent = 'Trading live... waiting for TP/SL';
+          continue;
+        }
+        if (pollData.status === 'not_found') {
+          const el = document.getElementById('sessionStatusTitle');
+          if (el) el.textContent = 'Trading live... monitoring position';
+          continue;
+        }
+        if (pollData.status === 'error') {
+          const el = document.getElementById('sessionStatusTitle');
+          if (el) { el.textContent = '! ' + (pollData.message || 'Trade error'); el.style.color = '#ef4444'; }
+          stopSession(false);
+          return;
+        }
+        if (pollData.status === 'done') { botData = pollData; break; }
+      } catch (pollErr) { console.warn('[RECOVER] Poll failed, retrying:', pollErr); }
+    }
+
+    if (botData) stopSession(true, botData);
+    else if (isTrading) stopSession(false);
+
+  } catch (err) {
+    console.warn('[RECOVER] Could not check active session:', err);
+  }
+}
+
+// Run recovery check immediately on page load
+resumeActiveSessionIfAny();

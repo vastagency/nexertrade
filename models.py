@@ -34,6 +34,11 @@ class User(UserMixin, db.Model):
     bybit_connected  = db.Column(db.Boolean, default=False)       # confirmed working
     bybit_connected_at = db.Column(db.DateTime, nullable=True)    # when last verified
 
+    # ── Active session persistence ─────────────────────────────
+    # Stored in DB so the frontend can recover on refresh/logout/new device
+    active_job_id     = db.Column(db.String(36), nullable=True)   # UUID of running job
+    active_job_amount = db.Column(db.Float,      nullable=True)   # amount for display
+
     deposits       = db.relationship('Deposit',      backref='user', lazy=True)
     withdrawals    = db.relationship('Withdrawal',   backref='user', lazy=True)
     trade_sessions = db.relationship('TradeSession', backref='user', lazy=True)
