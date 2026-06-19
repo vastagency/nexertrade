@@ -966,11 +966,12 @@ def generate_signal(symbol, timeframe='5m'):
         # If price is in the middle zone (not near any real support/resistance),
         # the setup has no structural backing — it's just indicator noise.
         # A human trader would wait for price to reach a key level first.
-        # Allow middle zone ONLY if score is very high (>=6) AND confidence >=75
-        if sr_position == 'middle':
-            if abs(score) < 6 or confidence < 75:
-                print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score} conf={confidence:.0f}%)')
-                return None
+        # FIX: confidence is not yet calculated here — use score only as the gate
+        # Score >= 7 in middle zone means very strong indicator agreement — allow
+        # Score < 7 in middle zone = no structural backing, skip
+        if sr_position == 'middle' and abs(score) < 7:
+            print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
+            return None
 
         # ── GATE 5b: RSI EXTREME EXHAUSTION FILTER ──────────────────────
         # Never BUY when RSI5 > 72 (already overbought — chasing)
