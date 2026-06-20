@@ -964,13 +964,17 @@ def generate_signal(symbol, timeframe='5m'):
 
         # ── GATE 5c: MIDDLE ZONE REJECTION ────────────────────────────────
         # If price is in the middle zone (not near any real support/resistance),
-        # the setup has no structural backing — it's just indicator noise.
+        # the setup has no structural backing — it is just indicator noise.
         # A human trader would wait for price to reach a key level first.
-        # FIX: confidence is not yet calculated here — use score only as the gate
-        # Score >= 7 in middle zone means very strong indicator agreement — allow
-        # Score < 7 in middle zone = no structural backing, skip
-        if sr_position == 'middle' and abs(score) < 7:
+        # TIGHTENED: raised threshold from 7 to 9 — JTO (score=7, weak vol, ranging)
+        # proved that score=7 in middle zone is still insufficient without structure.
+        # Also added: volume must be confirming for ANY middle zone trade to pass.
+        # This blocks ranging/weak-volume middle zone trades completely.
+        if sr_position == 'middle' and abs(score) < 9:
             print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
+            return None
+        if sr_position == 'middle' and volume_trend != 'confirming':
+            print(f'  [{symbol}] Middle zone trade requires confirming volume — skip (vol={volume_trend})')
             return None
 
         # ── GATE 5b: RSI EXHAUSTION FILTER (5m + 1h) ───────────────────
