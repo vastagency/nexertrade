@@ -1382,13 +1382,15 @@ def _get_qty_step(bybit_sym):
     return fallback
 
 
-def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
+def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None):
     """
     Place a futures market order on Bybit via direct REST API.
     No CCXT order placement — avoids 403 pre-flight on /v5/market/tickers.
     Always futures (linear perpetual). Spot removed.
+    exchange: pass the user exchange object to trade on their account.
+              Falls back to global bybit_futures (admin) if not provided.
     """
-    exchange   = bybit_futures
+    exchange   = exchange or bybit_futures
     bybit_sym  = symbol.replace('/', '').replace(':USDT', '')
     if not bybit_sym.endswith('USDT'):
         bybit_sym = bybit_sym + 'USDT'
@@ -1430,7 +1432,8 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures'):
             'orderType':   'Market',
             'qty':         str(quantity),
             'timeInForce': 'IOC',
-            'reduceOnly':  False
+            'reduceOnly':  False,
+            'positionIdx': 0  # 0 = one-way mode (required for accounts in one-way position mode)
         }, exchange)
 
         print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
@@ -1622,7 +1625,7 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
             break
 
         trade_usdt = min(amount, available_usdt * 0.95)
-        order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode)
+        order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange)
 
         if not order['success']:
             print(f'  Entry failed: {order.get("error")}')
@@ -2537,6 +2540,7 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
         _original_spot    = None
         _original_futures = None
         _user_live_bal    = None
+        user_futures      = None  # no user account — trades go to admin
 
     # Apply user-selected leverage override globally for this session
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
@@ -2551,7 +2555,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
                                           num_trades=num_trades, force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
-                                          user_trade_mode='futures')
+                                          user_trade_mode='futures',
+                                          user_exchange=user_futures if use_user_account else None)
 
     elif strategy == 'pickup' or strategy == 'pick_up':
         result = execute_pickup_session(amount, timeframe_minutes,
@@ -2573,7 +2578,8 @@ def execute_session(amount, timeframe_minutes, num_trades=1,
                                           num_trades=num_trades, force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
-                                          user_trade_mode='futures')
+                                          user_trade_mode='futures',
+                                          user_exchange=user_futures if use_user_account else None)
         result['strategy'] = 'auto'
 
     else:
