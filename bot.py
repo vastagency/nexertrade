@@ -159,7 +159,7 @@ AW_TP_FRAC        = 1.0
 # ── Trailing stop activation ─────────────────────────────────────────
 # After TP2 hit, move SL to breakeven + small buffer to lock partial profit
 TRAIL_SL_AFTER_TP = 1      # activate trailing SL after TP1 hits — protects remaining position immediately
-BREAKEVEN_BUFFER  = 0.0003 # 0.03% buffer above entry for breakeven SL
+BREAKEVEN_BUFFER  = 0.004  # 0.4% buffer above entry for breakeven SL — prevents trail firing on single tick bounce
 
 # ── Volatility-adaptive ATR multipliers ─────────────────────────────
 # Low volatility (ATR% < 0.15%): tighter targets
@@ -830,10 +830,10 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # GATE 2: Minimum ATR 0.20% — ensures enough volatility for TP1 to hit
-        # Below 0.20% the SL and TP are so close together that noise triggers SL
-        # before price can move to TP1 (CRV was 0.282% — borderline)
-        if atr_pct < 0.20:
+        # GATE 2: Minimum ATR 0.30% — ensures enough volatility for TP1 to hit
+        # Below 0.30% the SL and TP are so close together that noise triggers SL
+        # before price can move to TP1 (STX was 0.231% — caused SL hit immediately)
+        if atr_pct < 0.30:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — not enough volatility for clean TP1')
             return None
 
@@ -1092,7 +1092,7 @@ def generate_signal(symbol, timeframe='5m'):
         # - Quiet market  (ATR < 0.15%): tight targets, quick scalp
         # - Normal market (ATR 0.15–0.5%): standard R:R
         # - Volatile mkt  (ATR > 0.5%):  wider targets, more room to breathe
-        if atr_pct < 0.15:
+        if atr_pct < 0.30:
             atr_sl_mult  = ATR_SL_MULT_LOW
             atr_tp_mults = ATR_TP_MULTS_LOW
         elif atr_pct > 0.5:
@@ -1611,6 +1611,12 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
               f'RSI:{best_signal["rsi"]:.2f} | Conf:{confidence:.0f}% | '
               f'FUTURES | Market:{best_signal.get("market_condition","unknown")}')
 
+        # RACE CONDITION FIX: Check stop immediately before placing order.
+        # Prevents a trade from opening when user clicked Stop during the scan.
+        if should_stop(user_id):
+            print(f'  [STOP] Stop received before order placement — aborting trade')
+            break
+
         trade_usdt = min(amount, available_usdt * 0.95)
         order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode)
 
@@ -1630,7 +1636,7 @@ def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
         monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
 
         # ── Volatility-adaptive ATR TP/SL (matches signal engine) ────────
-        if atr_pct < 0.15:
+        if atr_pct < 0.30:
             atr_sl_mult  = ATR_SL_MULT_LOW
             atr_tp_mults = ATR_TP_MULTS_LOW
         elif atr_pct > 0.5:
