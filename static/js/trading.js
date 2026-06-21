@@ -458,8 +458,8 @@ async function startSession(force = false) {
 
     // Got job_id — now poll until the session completes on the server
     const jobId = startData.job_id;
-    totalTrades = startData.num_trades || 1;
-    document.getElementById('statTrades').textContent = `0/${totalTrades}`;
+    totalTrades = 1;  // FIX: always 1 trade per session
+    document.getElementById('statTrades').textContent = `0/1`;
     if (startData.backtest) {
       const bt = startData.backtest;
       document.getElementById('sessionStatusSub').textContent =

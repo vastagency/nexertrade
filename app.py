@@ -703,15 +703,16 @@ def api_trade_complete():
 # Solution: start session in background thread, return job_id immediately.
 # Frontend polls /api/bot/result/<job_id> every 5 seconds.
 # ============================================
-def _run_trade_job(job_id, user_id, amount, timeframe, num_trades, strategy, force,
+def _run_trade_job(job_id, user_id, amount, timeframe, strategy, force,
                    compound_rate=0.0, symbol=None, user_leverage=None,
                    user_api_key=None, user_api_secret=None, trade_user_id=None):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
             from bot import execute_session
+            # FIX: num_trades removed — always 1 trade per session
             results = execute_session(
-                amount, timeframe, num_trades,
+                amount, timeframe,
                 strategy=strategy, force=force,
                 symbol=symbol, user_leverage=user_leverage,
                 user_api_key=user_api_key,
@@ -777,15 +778,8 @@ def api_bot_execute():
         if strategy not in ('auto', 'momentum', 'pickup', 'always_win'):
             strategy = 'momentum'
 
-        # Dynamic trades based on amount being traded (live balance checked later)
-        if amount >= 200:
-            num_trades = 10
-        elif amount >= 100:
-            num_trades = 5
-        elif amount >= 50:
-            num_trades = 3
-        else:
-            num_trades = 1
+        # FIX: Always 1 trade per session — fee drag makes multi-trade unprofitable
+        # Leverage does the heavy lifting, not trade quantity
 
         min_dep = float(get_setting('min_deposit', '9'))
         max_dep = float(get_setting('max_deposit', '200'))
@@ -885,13 +879,13 @@ def api_bot_execute():
 
         t = threading.Thread(
             target=_run_trade_job,
-            args=(job_id, current_user.id, amount, timeframe, num_trades, strategy, force,
+            args=(job_id, current_user.id, amount, timeframe, strategy, force,
                   compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
                   current_user.id),
             daemon=True
         )
         t.start()
-        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'num_trades': num_trades}), 202
+        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': 1}), 202
 
     except Exception as e:
         print(f'Execute error: {e}')
