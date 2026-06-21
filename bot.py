@@ -801,10 +801,30 @@ def generate_signal(symbol, timeframe='5m'):
         lows15   = df15.get('low',  closes15)
 
         # ── GATE 1: 1H TREND BIAS (master filter) ──────────────────────
+        # SELL BIAS FIX: When trend is neutral, we still allow strong directional
+        # signals through (score >= +5 BUY or <= -5 SELL) rather than blocking all.
+        # Pure neutral (score 0) still blocked. This prevents missing SELL setups
+        # when 1h EMAs are mixed but all other indicators scream bearish.
         trend_bias = get_1h_trend_bias(closes1h)
+        # Pre-calculate raw score direction to decide if neutral skip applies
+        # We need a quick preview — full score calculated below
+        price_now = closes1h[-1]
+        ema9_now  = ema_series(closes1h, 9)[-1]
+        ema21_now = ema_series(closes1h, 21)[-1]
+        rsi1h_now = calculate_rsi(closes1h, period=14)
+        # Quick bias: price below both EMAs + RSI < 50 = bearish lean even if neutral
+        bearish_lean = price_now < ema9_now and price_now < ema21_now and rsi1h_now < 52
+        bullish_lean = price_now > ema9_now and price_now > ema21_now and rsi1h_now > 48
+        _lean_trend = False
         if trend_bias == 'neutral':
-            print(f'  [{symbol}] 1h trend unclear — skipping (no counter-trend trades)')
-            return None
+            if bearish_lean or bullish_lean:
+                # Weak trend — allow through but score gate tightened to 5 (not 3)
+                trend_bias  = 'bearish' if bearish_lean else 'bullish'
+                _lean_trend = True
+                print(f'  [{symbol}] 1h neutral but price lean {trend_bias} — allowing with strict score gate')
+            else:
+                print(f'  [{symbol}] 1h trend genuinely unclear — skipping')
+                return None
 
         # ── INDICATORS ─────────────────────────────────────────────────
         rsi5  = calculate_rsi(closes5,  period=14)
@@ -833,8 +853,17 @@ def generate_signal(symbol, timeframe='5m'):
         # GATE 2: Minimum ATR 0.30% — ensures enough volatility for TP1 to hit
         # Below 0.30% the SL and TP are so close together that noise triggers SL
         # before price can move to TP1 (STX was 0.231% — caused SL hit immediately)
-        if atr_pct < 0.30:
-            print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — not enough volatility for clean TP1')
+        # SMART ATR GATE: 0.20% minimum BUT also verify TP1 gives realistic move.
+        # ATR 0.20% = minimum price movement. TP1 needs at least 0.15% to cover
+        # fees and give real profit. This replaces the blunt 0.30% blanket block
+        # that was rejecting everything during normal low-vol market hours.
+        if atr_pct < 0.20:
+            print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
+            return None
+        # Also reject if ATR is low-quality: 0.20-0.30% but TP1 < 0.15% realistic move
+        tp1_distance_pct = atr_pct * 1.2  # TP1 = 1.2x ATR
+        if atr_pct < 0.30 and tp1_distance_pct < 0.15:
+            print(f'  [{symbol}] ATR {atr_pct:.3f}% — TP1 distance {tp1_distance_pct:.3f}% too tight after fees, skip')
             return None
 
         # ── SCORING SYSTEM ──────────────────────────────────────────────
@@ -925,10 +954,9 @@ def generate_signal(symbol, timeframe='5m'):
         if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
 
         # ── GATE 4: MINIMUM SCORE — directional conviction required ────────
-        # MIN_SCORE = 3 base. A score of 3 (after trend bonus) with secondary
-        # confluence (volume, candle, stoch extreme) is a tradeable setup.
-        # Without secondary confluence a score-3 is borderline noise — skip.
-        MIN_SCORE = 3
+        # MIN_SCORE: 3 normally, raised to 5 for lean signals (was neutral trend).
+        # Lean signals need stronger indicator agreement to compensate for weaker trend.
+        MIN_SCORE = 5 if _lean_trend else 3
         secondary_confirms = (
             (volume_trend == 'confirming') +
             (candle_pat != 'none') +
