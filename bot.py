@@ -2297,3 +2297,4 @@ def get_market_overview():
         overview['recommended_strategy'] = 'momentum'
 
     return overview
+    
