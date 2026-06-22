@@ -2,17 +2,23 @@
 #   NEXERTRADE — PRODUCTION TRADING ENGINE
 #   Connected to Bybit — Real Orders Only
 #   Zero simulation. Zero fake balance.
-#   ========== MERGED + FIXED VERSION ==========
+#   ========== SIGNAL RECALIBRATION v2 ==========
 #
 #   FIXES IN THIS VERSION:
 #   1. num_trades hardcoded to 1 — removed from all signatures
 #   2. TP1 = 1.0x ATR (not 0.8x) — better gross profit vs fee ratio
 #   3. _get_qty_step() used in execute_real_trade — no hardcoded dict
-#   4. Trading hours gate — 8am-10pm UTC only
-#   5. Minimum absolute SL distance — prevents noise SL on micro-price pairs
+#   4. Trading hours DISABLED — 24/7 trading enabled
+#   5. Minimum absolute SL distance reduced to 0.2% (was 0.3%)
 #   6. Fee-aware PnL — net PnL shown after estimated fees
 #   7. positionIdx: 0 confirmed present — one-way mode fix
 #   8. user_exchange passed correctly through all momentum calls
+#   9. ATR gate lowered to 0.12% (was 0.20%) — captures more pairs
+#  10. RSI1h BUY gate raised to 65 (was 60) — allows more setups
+#  11. Secondary confluence reduced to 1 (was 2) — less strict
+#  12. R:R minimum reduced to 1.0 (was 1.2) — more valid setups
+#  13. Middle zone score threshold lowered to 5 (was 9) — more breakouts
+#  14. MIN_SCORE lean->4, normal->3 (was 5/3)
 # ============================================
 
 import os
@@ -157,14 +163,14 @@ MAX_SL_PCT  = 0.010
 
 # FIX: Minimum absolute SL distance in USDT
 # Prevents entries where SL is only 1-2 ticks away (e.g. SEI at $0.0546 with SL $0.0001 away)
-# SL must be at least 0.3% of entry price in absolute dollar terms
-MIN_SL_DISTANCE_PCT = 0.003  # 0.3% minimum SL distance
+# SL must be at least 0.2% of entry price in absolute dollar terms
+MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance
 
 # FIX: Trading hours — only trade 8am-10pm UTC
 # Outside these hours crypto markets are dead (low volume, low ATR, high noise)
 TRADING_HOURS_START = 8   # 8am UTC  (9am Lagos)
 TRADING_HOURS_END   = 22  # 10pm UTC (11pm Lagos)
-ENFORCE_TRADING_HOURS = True  # set False to disable restriction
+ENFORCE_TRADING_HOURS = False  # DISABLED — 24/7 trading enabled
 
 # Fee estimation for net PnL display
 # Bybit taker fee = 0.055% per side → ~0.11% round trip
@@ -770,14 +776,14 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # GATE: Minimum ATR 0.20%
-        if atr_pct < 0.20:
+        # GATE: Minimum ATR 0.12% — lowered to capture more pairs in low-volatility markets
+        if atr_pct < 0.12:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
             return None
 
-        # FIX: TP1 is now 1.0x ATR — check TP1 distance clears fees
+        # TP1 is 1.0x ATR — only skip if ATR is extremely tight
         tp1_distance_pct = atr_pct * 1.0
-        if atr_pct < 0.30 and tp1_distance_pct < 0.15:
+        if atr_pct < 0.15 and tp1_distance_pct < 0.08:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% — TP1 distance {tp1_distance_pct:.3f}% too tight after fees, skip')
             return None
 
@@ -851,7 +857,7 @@ def generate_signal(symbol, timeframe='5m'):
         if raw_dir_pre == 'BUY'  and trend_bias == 'bullish': score += 1
         if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
 
-        MIN_SCORE = 5 if _lean_trend else 3
+        MIN_SCORE = 4 if _lean_trend else 3
         secondary_confirms = (
             (volume_trend == 'confirming') +
             (candle_pat != 'none') +
@@ -868,7 +874,7 @@ def generate_signal(symbol, timeframe='5m'):
         if score == 0:
             print(f'  [{symbol}] Score 0 — no directional conviction')
             return None
-        if abs(score) == MIN_SCORE and secondary_confirms < 2:
+        if abs(score) == MIN_SCORE and secondary_confirms < 1:
             print(f'  [{symbol}] Score {score} at minimum — no secondary confluence, skip')
             return None
 
@@ -883,7 +889,7 @@ def generate_signal(symbol, timeframe='5m'):
 
         direction = raw_direction
 
-        if sr_position == 'middle' and abs(score) < 9:
+        if sr_position == 'middle' and abs(score) < 5:
             print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
             return None
         if sr_position == 'middle' and volume_trend != 'confirming':
@@ -891,7 +897,7 @@ def generate_signal(symbol, timeframe='5m'):
             return None
 
         if direction == 'BUY' and rsi5 > 72:
-            if rsi1h > 60:
+            if rsi1h > 65:
                 print(f'  [{symbol}] RSI5={rsi5:.1f} overbought + RSI1h={rsi1h:.1f} — no BUY chase')
                 return None
             score -= 2
@@ -905,7 +911,7 @@ def generate_signal(symbol, timeframe='5m'):
         if direction == 'SELL' and rsi1h < 40:
             print(f'  [{symbol}] RSI1h={rsi1h:.1f} oversold on 1h — SELL rejected (bounce risk)')
             return None
-        if direction == 'BUY' and rsi1h > 60:
+        if direction == 'BUY' and rsi1h > 65:
             print(f'  [{symbol}] RSI1h={rsi1h:.1f} overbought on 1h — BUY rejected (pullback risk)')
             return None
 
@@ -924,7 +930,7 @@ def generate_signal(symbol, timeframe='5m'):
         if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -5:
             print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-5, got {score}')
             return None
-        if direction == 'BUY' and 45 <= rsi1h <= 60 and score < 5:
+        if direction == 'BUY' and 45 <= rsi1h <= 65 and score < 5:
             print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=5, got {score}')
             return None
 
@@ -999,7 +1005,7 @@ def generate_signal(symbol, timeframe='5m'):
         if sl_dist_abs < min_sl_abs:
             sl_price = (current_price - min_sl_abs if direction == 'BUY'
                         else current_price + min_sl_abs)
-            print(f'  [{symbol}] SL too tight ({sl_dist_abs:.6f}) — expanded to min 0.3% (${min_sl_abs:.6f})')
+            print(f'  [{symbol}] SL too tight ({sl_dist_abs:.6f}) — expanded to min 0.2% (${min_sl_abs:.6f})')
 
         tp1_dist_pct = abs(tp_prices[0] - current_price) / current_price if current_price > 0 else 0
         if tp1_dist_pct < MIN_TP1_PCT and tp1_dist_pct > 0:
@@ -1021,7 +1027,7 @@ def generate_signal(symbol, timeframe='5m'):
         tp1_dist = abs(tp_prices[0] - current_price)
         sl_dist  = abs(sl_price - current_price)
         rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
-        if rr_ratio < 1.2:
+        if rr_ratio < 1.0:
             print(f'  [{symbol}] R:R too poor: {rr_ratio:.2f}:1 — skip')
             return None
 
@@ -1496,7 +1502,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     if sl_dist_abs < min_sl_abs:
         sl_price = (entry_price - min_sl_abs if trade_dir == 'BUY'
                     else entry_price + min_sl_abs)
-        print(f'  [SL FIX] SL expanded to min 0.3% distance: ${sl_price:.6f}')
+        print(f'  [SL FIX] SL expanded to min 0.2% distance: ${sl_price:.6f}')
 
     sl_pct_actual = abs(sl_price - entry_price) / entry_price
     if sl_pct_actual > MAX_SL_PCT:
