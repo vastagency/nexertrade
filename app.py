@@ -1,6 +1,7 @@
 # ============================================
 #   NEXERTRADE — MAIN APPLICATION
 #   Phase 6: Wallet & Withdrawal Security
+#   + Multi‑trade support (num_trades)
 # ============================================
 
 # eventlet monkey_patch MUST be first — before ALL other imports.
@@ -705,19 +706,21 @@ def api_trade_complete():
 # ============================================
 def _run_trade_job(job_id, user_id, amount, timeframe, strategy, force,
                    compound_rate=0.0, symbol=None, user_leverage=None,
-                   user_api_key=None, user_api_secret=None, trade_user_id=None):
+                   user_api_key=None, user_api_secret=None, trade_user_id=None,
+                   num_trades=1):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
             from bot import execute_session
-            # FIX: num_trades removed — always 1 trade per session
+            # Pass num_trades to the session
             results = execute_session(
                 amount, timeframe,
                 strategy=strategy, force=force,
                 symbol=symbol, user_leverage=user_leverage,
                 user_api_key=user_api_key,
                 user_api_secret=user_api_secret,
-                user_id=trade_user_id
+                user_id=trade_user_id,
+                num_trades=num_trades
             )
             # Apply compounding if enabled
             if compound_rate > 0 and results.get('net_pnl', 0) != 0:
@@ -767,6 +770,11 @@ def api_bot_execute():
         # User-selected pair and leverage
         selected_symbol   = data.get('symbol', None)       # e.g. 'XRP/USDT' or None
         user_leverage     = data.get('leverage', None)     # e.g. 2, 5, 10 or None
+        # NEW: extract num_trades from frontend, default to 1
+        num_trades        = int(data.get('num_trades', 1))
+        if num_trades < 1:
+            num_trades = 1
+
         if user_leverage:
             try:
                 user_leverage = int(user_leverage)
@@ -777,9 +785,6 @@ def api_bot_execute():
 
         if strategy not in ('auto', 'momentum', 'pickup', 'always_win'):
             strategy = 'momentum'
-
-        # FIX: Always 1 trade per session — fee drag makes multi-trade unprofitable
-        # Leverage does the heavy lifting, not trade quantity
 
         min_dep = float(get_setting('min_deposit', '9'))
         max_dep = float(get_setting('max_deposit', '200'))
@@ -801,17 +806,12 @@ def api_bot_execute():
         if amount > live_balance:
             return jsonify({'success': False, 'message': f'Insufficient Bybit balance. Your live balance is ${live_balance:.2f}'}), 400
 
-        # Weak signal pre-check:
-        # Only warn if a signal EXISTS but has low confidence.
-        # If generate_signal returns None (neutral 1h trend = no setup on that pair),
-        # that is NOT a weak signal — the session will scan all 25 pairs instead.
-        # Never block session start just because the pre-check pair has no setup.
+        # Weak signal pre-check (unchanged)
         if not force and strategy in ('momentum', 'auto', 'pickup', 'always_win'):
             try:
                 from bot import generate_signal
                 check_symbol = selected_symbol if selected_symbol else 'XRP/USDT'
                 preview_signal = generate_signal(check_symbol)
-                # Only warn if signal exists AND confidence is low — None means scan elsewhere
                 if preview_signal is not None and preview_signal['confidence'] < 60:
                     rsi_val     = preview_signal.get('rsi', 50)
                     direction   = preview_signal.get('direction', 'BUY')
@@ -841,7 +841,8 @@ def api_bot_execute():
 
         socketio.emit('session_started', {
             'user': current_user.name, 'amount': amount,
-            'timeframe': timeframe, 'strategy': strategy
+            'timeframe': timeframe, 'strategy': strategy,
+            'num_trades': num_trades
         }, room='admin_room')
 
         # Kill any existing running session for this user before starting new one
@@ -862,7 +863,8 @@ def api_bot_execute():
             _trade_jobs[job_id] = {
                 'status':  'running',
                 'user_id': current_user.id,
-                'amount':  amount
+                'amount':  amount,
+                'num_trades': num_trades   # store for reference
             }
         # Persist job_id to DB so the frontend can recover on refresh/new device
         try:
@@ -881,9 +883,10 @@ def api_bot_execute():
             _run_trade_job,
             job_id, current_user.id, amount, timeframe, strategy, force,
             compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
-            current_user.id
+            current_user.id,
+            num_trades
         )
-        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': 1}), 202
+        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': num_trades}), 202
 
     except Exception as e:
         print(f'Execute error: {e}')
@@ -977,7 +980,7 @@ def api_bot_result(job_id):
     # Save session to DB and update user balance
     session = TradeSession(
         user_id=current_user.id,
-        timeframe=job['amount'],
+        timeframe=job['amount'],   # using amount as timeframe for backward compatibility
         amount=job['amount'],
         total_trades=results['total_trades'],
         wins=results['wins'],
