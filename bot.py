@@ -77,22 +77,33 @@ bybit_spot = _inject_proxy(ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'spot', 'recvWindow': 20000},
+    'options': {
+        'defaultType': 'spot', 'recvWindow': 20000,
+        'adjustForTimeDifference': False,
+        'fetchCurrencies': False,
+    },
 }))
 
 bybit_futures = _inject_proxy(ccxt.bybit({
     'apiKey': BYBIT_API_KEY,
     'secret': BYBIT_API_SECRET,
     'enableRateLimit': True,
-    'options': {'defaultType': 'linear', 'recvWindow': 20000},
+    'options': {
+        'defaultType': 'linear', 'recvWindow': 20000,
+        'adjustForTimeDifference': False,
+        'fetchCurrencies': False,
+    },
 }))
 
 bybit = bybit_spot
 
 def get_user_exchange(api_key, api_secret, mode='futures'):
     options = {
-        'defaultType': 'linear' if mode == 'futures' else 'spot',
-        'recvWindow': 20000,
+        'defaultType':          'linear' if mode == 'futures' else 'spot',
+        'recvWindow':           20000,
+        'adjustForTimeDifference': False,  # skip time sync call
+        'fetchCurrencies':      False,     # skip /v5/asset/coin/query-info call
+        'fetchMarkets':         False,     # skip market info fetch on init
     }
     exchange = ccxt.bybit({
         'apiKey':          api_key,
