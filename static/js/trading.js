@@ -649,16 +649,16 @@ document.getElementById('mainActionBtn').addEventListener('click', () => {
       .catch(() => {});
     document.getElementById('actionBtnText').textContent = 'STOPPING...';
     document.getElementById('sessionStatusTitle').textContent = 'Stop requested - closing position...';
-    // If still stuck after 20s, force-kill the session
+    // If still stuck after 8s, force-reset the session
     setTimeout(async () => {
       if (isTrading) {
-        console.log('Session stuck - force killing...');
+        console.log('Session stuck - force resetting...');
         try {
-          await fetch('/api/bot/kill', { method: 'POST', headers: {'Content-Type': 'application/json'} });
+          await fetch('/api/bot/reset', { method: 'POST', headers: {'Content-Type': 'application/json'} });
         } catch (_) {}
         stopSession(false);
       }
-    }, 20000);
+    }, 8000);
     return;
   } else {
     // Gate: must have Bybit connected
