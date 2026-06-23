@@ -21,7 +21,7 @@
 #  14.  100 pairs (was 55) — more opportunities
 #  15.  Always-Win zombie loop timeout (VULN-002 FIX)
 #  16.  Signal recalibration v2 — lean->4, normal->3
-#  17.  Robust Hedge/One-Way mode detection via /v5/account/info
+#  17.  Robust Hedge/One-Way mode detection via /v5/position/switch-mode
 # ============================================
 
 import os
@@ -481,7 +481,7 @@ def fetch_current_price(symbol='BTC/USDT'):
 
 
 # ============================================
-# TECHNICAL INDICATORS (unchanged)
+# TECHNICAL INDICATORS
 # ============================================
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
@@ -680,7 +680,7 @@ def calculate_stochastic(closes, highs, lows, k_period=14, d_period=3):
 
 
 # ============================================
-# SIGNAL GENERATION (unchanged)
+# SIGNAL GENERATION
 # ============================================
 def get_1h_trend_bias(closes1h):
     if len(closes1h) < 50:
@@ -1186,12 +1186,13 @@ def _bybit_signed_request(method, endpoint, params, exchange_obj):
     return resp.json()
 
 
-# Cache position mode per user key
+# Cache position mode per user key (for linear futures)
 _position_mode_cache = {}
 
 def _get_position_idx(direction, exchange=None):
     """
-    Detect user Bybit position mode reliably using /v5/account/info.
+    Detect user Bybit position mode specifically for linear (futures) contracts.
+    Uses /v5/position/switch-mode?category=linear to get the actual mode.
     Returns:
       0 = One-Way Mode (both sides share the same position)
       1 = Hedge Mode -> BUY/Long
@@ -1201,46 +1202,55 @@ def _get_position_idx(direction, exchange=None):
     _exch = exchange or bybit_futures
     cache_key = getattr(_exch, 'apiKey', 'default')[:8]
 
-    if cache_key not in _position_mode_cache:
-        # Primary: use /v5/account/info to get positionMode
+    # Check cache
+    if cache_key in _position_mode_cache:
+        mode_str = _position_mode_cache[cache_key]
+    else:
+        mode_str = None
+
+    if mode_str is None:
+        # Primary: use /v5/position/switch-mode with category=linear
         try:
-            resp = _bybit_signed_request('GET', '/v5/account/info', {}, _exch)
+            resp = _bybit_signed_request('GET', '/v5/position/switch-mode', {
+                'category': 'linear',
+            }, _exch)
             if resp.get('retCode') == 0:
-                pos_mode = resp.get('result', {}).get('positionMode', 0)
-                # positionMode: 0 = one-way, 3 = hedge
-                _position_mode_cache[cache_key] = 'hedge' if pos_mode == 3 else 'oneway'
-                print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]} (from account info)')
+                # mode: 0 or 1 = one-way, 3 = hedge
+                mode_val = resp.get('result', {}).get('mode', 0)
+                mode_str = 'hedge' if mode_val == 3 else 'oneway'
+                print(f'  [POSITION MODE] {cache_key}: {mode_str} (from switch-mode)')
             else:
-                # Fallback: try older detection
-                raise Exception('account/info failed')
+                # Fallback to /v5/account/info
+                raise Exception('switch-mode failed')
         except Exception:
-            # Fallback: try to detect via /v5/position/switch-mode or /v5/position/list
+            # Fallback: try /v5/account/info
             try:
-                resp2 = _bybit_signed_request('GET', '/v5/position/switch-mode', {
-                    'category': 'linear',
-                }, _exch)
+                resp2 = _bybit_signed_request('GET', '/v5/account/info', {}, _exch)
                 if resp2.get('retCode') == 0:
-                    mode_val = resp2.get('result', {}).get('mode', 0)
-                    _position_mode_cache[cache_key] = 'hedge' if mode_val == 3 else 'oneway'
+                    pos_mode = resp2.get('result', {}).get('positionMode', 0)
+                    mode_str = 'hedge' if pos_mode == 3 else 'oneway'
+                    print(f'  [POSITION MODE] {cache_key}: {mode_str} (fallback account info)')
                 else:
-                    # Last resort: check if user has any hedge positions
+                    # Last resort: check positions
                     pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
                         'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
                     }, _exch)
                     if pos_resp.get('retCode') == 0:
                         positions = pos_resp.get('result', {}).get('list', [])
                         if positions and positions[0].get('positionIdx', 0) in [1, 2]:
-                            _position_mode_cache[cache_key] = 'hedge'
+                            mode_str = 'hedge'
                         else:
-                            _position_mode_cache[cache_key] = 'oneway'
+                            mode_str = 'oneway'
                     else:
-                        _position_mode_cache[cache_key] = 'oneway'
-                print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]} (fallback)')
+                        mode_str = 'oneway'
+                    print(f'  [POSITION MODE] {cache_key}: {mode_str} (last resort)')
             except Exception as e:
                 print(f'  [POSITION MODE] Could not detect, defaulting to oneway: {e}')
-                _position_mode_cache[cache_key] = 'oneway'
+                mode_str = 'oneway'
 
-    mode_str = _position_mode_cache.get(cache_key, 'oneway')
+        # Cache the result
+        _position_mode_cache[cache_key] = mode_str
+
     if mode_str == 'hedge':
         return 1 if direction == 'BUY' else 2
     return 0
@@ -1424,7 +1434,7 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
-# MOMENTUM SESSION (unchanged except leverage fix)
+# MOMENTUM SESSION
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None,
                               force=False, symbol=None, user_id=None,
