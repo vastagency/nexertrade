@@ -15,7 +15,7 @@
 #   8.  user_exchange passed directly — no global swap (VULN-001 FIX)
 #   9.  ATR gate 0.12%, RSI1h 65, confluence 1, R:R 1.0, middle zone 5
 #  10.  eventlet.sleep() — fixes monitoring loop flood bug
-#  11.  15-min time exit — no indefinite waits
+#  11.  4h max session limit (15-min exit REMOVED — was cutting good trades)
 #  12.  30s log throttle — clean Railway logs
 #  13.  Min price $0.05 — skip micro-price coins (PORTAL fix)
 #  14.  100 pairs (was 55) — more opportunities
@@ -192,9 +192,6 @@ ENFORCE_TRADING_HOURS = False  # DISABLED — 24/7 trading enabled
 # Bybit taker fee = 0.055% per side → ~0.11% round trip
 BYBIT_FEE_RATE = 0.00055  # per side (taker)
 
-# Time-based exit: close trade if no TP/SL hit after 15 minutes
-# Prevents indefinite waiting in choppy markets
-MAX_TRADE_DURATION_MINUTES = 15
 
 
 # ============================================
@@ -1605,23 +1602,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     while remaining_qty > 0:
       try:
         elapsed = _time_module.time() - session_start_time
-        # Time-based exit: close after MAX_TRADE_DURATION_MINUTES if no TP/SL hit
-        if elapsed > MAX_TRADE_DURATION_MINUTES * 60:
-            print(f'  [TIMEOUT] Trade duration exceeded {MAX_TRADE_DURATION_MINUTES} min — closing at market')
-            _set_active({'status': 'closing', 'message': f'Time limit ({MAX_TRADE_DURATION_MINUTES} min) reached — closing'})
-            cr = None
-            for _attempt in range(3):
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                if cr.get('success'): break
-                eventlet.sleep(2)
-            if cr and cr.get('success'):
-                cp = cr['close_price']
-                pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * LEVERAGE
-                print(f'  [TIMEOUT] Closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
-            remaining_qty = 0
-            break
-
+        # 4-hour hard session limit — only safety net, no early exit
         if elapsed > MAX_SESSION_SECONDS:
             print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
             _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
