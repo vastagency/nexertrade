@@ -1246,7 +1246,7 @@ def _get_qty_step(bybit_sym):
     return fallback
 
 
-def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None):
+def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None, leverage=None):
     """
     Place a futures market order on Bybit.
     FIX: Uses _get_qty_step() for all pairs — no hardcoded step dict.
@@ -1280,13 +1280,13 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
         try:
             lev_resp = _bybit_signed_request('POST', '/v5/position/set-leverage', {
                 'category': 'linear', 'symbol': bybit_sym,
-                'buyLeverage': str(LEVERAGE), 'sellLeverage': str(LEVERAGE)
+                'buyLeverage': str(session_lev), 'sellLeverage': str(session_lev)
             }, exchange)
             code = lev_resp.get('retCode')
             if code not in (0, 110043):
                 print(f'  [LEVERAGE] Warning: {lev_resp.get("retMsg")}')
             else:
-                print(f'  [LEVERAGE] {LEVERAGE}x confirmed on {bybit_sym}')
+                print(f'  [LEVERAGE] {session_lev}x confirmed on {bybit_sym}')
         except Exception as e:
             print(f'  [LEVERAGE] Could not set: {e}')
 
@@ -1307,7 +1307,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             return {'success': False, 'error': f'Order failed: {resp.get("retMsg")}', 'price': current_price}
 
         order_id = resp.get('result', {}).get('orderId', 'unknown')
-        print(f'  [FUTURES {LEVERAGE}x] {direction} {quantity} {bybit_sym} @ ${current_price:.4f} | OrderID: {order_id}')
+        print(f'  [FUTURES {session_lev}x] {direction} {quantity} {bybit_sym} @ ${current_price:.4f} | OrderID: {order_id}')
         return {
             'success':    True,
             'order_id':   order_id,
@@ -1317,7 +1317,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             'price':      current_price,
             'cost':       usdt_amount,
             'trade_mode': 'futures',
-            'leverage':   LEVERAGE,
+            'leverage':   session_lev,
             'status':     'filled'
         }
     except Exception as e:
@@ -1407,13 +1407,15 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     clear_stop(user_id)
     trade_mode = user_trade_mode or 'futures'
     fee_rate   = BYBIT_FEE_RATE
+    # FIX: Capture leverage locally — avoids global LEVERAGE race condition in multi-user
+    session_lev = LEVERAGE  # already set by execute_session before this call
 
     if user_balance is not None and user_balance > 0:
         available_usdt = user_balance
     else:
         return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
 
-    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {LEVERAGE}x')
+    print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {session_lev}x')
 
     # FIX: Exactly 1 trade — loop runs once
     _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
@@ -1482,7 +1484,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         return results
 
     trade_usdt = min(amount, available_usdt * 0.95)
-    order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange)
+    order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=session_lev)
 
     if not order['success']:
         print(f'  Entry failed: {order.get("error")}')
@@ -1539,7 +1541,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
     print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
           f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
-    print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*LEVERAGE:.4f} gross to profit')
+    print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
 
     # FIX 4: Set native Bybit SL via trading-stop endpoint (server-side backup)
     # Our monitoring loop remains primary, but Bybit will close if server goes down
@@ -1572,7 +1574,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         'tp_prices':     [round(p, 6) for p in tp_prices],
         'sl_price':      round(sl_price, 6),
         'position_size': quantity,
-        'leverage':      LEVERAGE,
+        'leverage':      session_lev,
         'status':        'monitoring',
         'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
     })
@@ -1582,7 +1584,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         socketio.emit('trade_entry', {
             'trade_num': 1, 'symbol': sym, 'direction': trade_dir,
             'price': entry_price, 'tp1': tp_prices[0], 'sl': sl_price,
-            'confidence': confidence, 'leverage': LEVERAGE,
+            'confidence': confidence, 'leverage': session_lev,
         }, room=f'user_{user_id}')
     except Exception:
         pass
@@ -1614,7 +1616,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr and cr.get('success'):
                 cp = cr['close_price']
                 pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * LEVERAGE
+                real_pnl += pc * remaining_qty * entry_price * session_lev
                 print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
             break
@@ -1625,7 +1627,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr.get('success'):
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * LEVERAGE
+                real_pnl += pc * remaining_qty * entry_price * session_lev
                 print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
             break
@@ -1647,10 +1649,10 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
         price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
         pct_move     = price_diff / entry_price if entry_price > 0 else 0
-        live_pnl_now = round(pct_move * remaining_qty * entry_price * LEVERAGE, 4)
+        live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
         # FIX: Show net PnL on UI (gross minus estimated fees)
         live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
-        live_pnl_pct = round(pct_move * LEVERAGE * 100, 4)
+        live_pnl_pct = round(pct_move * session_lev * 100, 4)
 
         if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
             sl_price = breakeven_sl
@@ -1689,7 +1691,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr and cr.get('success'):
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                pnl = pc * remaining_qty * entry_price * LEVERAGE
+                pnl = pc * remaining_qty * entry_price * session_lev
                 real_pnl     += pnl
                 remaining_qty = 0
                 net = real_pnl - estimate_fees(notional)
@@ -1726,7 +1728,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 if cr.get('success'):
                     cp        = cr['close_price']
                     pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                    pnl_chunk = pc * actual_closed * entry_price * LEVERAGE
+                    pnl_chunk = pc * actual_closed * entry_price * session_lev
                     real_pnl      += pnl_chunk
                     remaining_qty -= actual_closed
                     tps_hit        = tp_idx + 1
@@ -2234,8 +2236,9 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
         user_futures      = None
 
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
-        import bot as _bot_module
-        _bot_module.LEVERAGE = user_leverage
+        # FIX: Set global LEVERAGE as default — session functions capture it locally
+        # This avoids the race condition when two users run different leverages simultaneously
+        LEVERAGE = user_leverage
         print(f'  Leverage set to {user_leverage}x by user selection')
 
     if strategy == 'momentum':
