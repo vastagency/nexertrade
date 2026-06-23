@@ -21,6 +21,7 @@
 #  14.  100 pairs (was 55) — more opportunities
 #  15.  Always-Win zombie loop timeout (VULN-002 FIX)
 #  16.  Signal recalibration v2 — lean->4, normal->3
+#  17.  Robust Hedge/One-Way mode detection via /v5/account/info
 # ============================================
 
 import os
@@ -101,9 +102,9 @@ def get_user_exchange(api_key, api_secret, mode='futures'):
     options = {
         'defaultType':          'linear' if mode == 'futures' else 'spot',
         'recvWindow':           20000,
-        'adjustForTimeDifference': False,  # skip time sync call
-        'fetchCurrencies':      False,     # skip /v5/asset/coin/query-info call
-        'fetchMarkets':         False,     # skip market info fetch on init
+        'adjustForTimeDifference': False,
+        'fetchCurrencies':      False,
+        'fetchMarkets':         False,
     }
     exchange = ccxt.bybit({
         'apiKey':          api_key,
@@ -167,9 +168,6 @@ AW_TP_FRAC        = 1.0
 TRAIL_SL_AFTER_TP = 1
 BREAKEVEN_BUFFER  = 0.004
 
-# FIX: ATR multipliers — TP1 raised back to 1.0x ATR (from 0.8x)
-# Reason: at 0.8x ATR, TP1 gross profit is too small relative to fees.
-# 1.0x ATR gives ~0.22-0.30% move which clears fees more comfortably.
 ATR_SL_MULT_LOW   = 1.2
 ATR_SL_MULT_NORM  = 1.0
 ATR_SL_MULT_HIGH  = 0.9
@@ -181,22 +179,13 @@ ATR_TP_MULTS_HIGH = [1.0,  3.0,  5.0,  8.0]
 MIN_TP1_PCT = 0.0015
 MAX_SL_PCT  = 0.010
 
-# FIX: Minimum absolute SL distance in USDT
-# Prevents entries where SL is only 1-2 ticks away (e.g. SEI at $0.0546 with SL $0.0001 away)
-# SL must be at least 0.2% of entry price in absolute dollar terms
 MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance
 
-# FIX: Trading hours — only trade 8am-10pm UTC
-# Outside these hours crypto markets are dead (low volume, low ATR, high noise)
-TRADING_HOURS_START = 8   # 8am UTC  (9am Lagos)
-TRADING_HOURS_END   = 22  # 10pm UTC (11pm Lagos)
-ENFORCE_TRADING_HOURS = False  # DISABLED — 24/7 trading enabled
+TRADING_HOURS_START = 8
+TRADING_HOURS_END   = 22
+ENFORCE_TRADING_HOURS = False  # DISABLED
 
-# Fee estimation for net PnL display
-# Bybit taker fee = 0.055% per side → ~0.11% round trip
 BYBIT_FEE_RATE = 0.00055  # per side (taker)
-
-
 
 # ============================================
 # ACTIVE TRADE STATE
@@ -235,9 +224,6 @@ def _clear_active(user_id=None):
         'status': 'idle', 'message': '',
     })
 
-# ============================================
-# STOP SIGNAL SYSTEM
-# ============================================
 _stop_flags = {}
 
 def request_stop(user_id):
@@ -254,26 +240,19 @@ def should_stop(user_id):
 
 
 # ============================================
-# FIX: TRADING HOURS CHECK
+# TRADING HOURS CHECK (disabled)
 # ============================================
 def is_trading_hours():
-    """
-    Returns True if current UTC time is within allowed trading window.
-    8am-10pm UTC = active market hours (London + NY overlap + Asian open).
-    Outside these hours: low volume, low ATR, noise SL hits, poor fills.
-    """
     if not ENFORCE_TRADING_HOURS:
         return True
     now_utc = datetime.now(timezone.utc)
     hour = now_utc.hour
     in_hours = TRADING_HOURS_START <= hour < TRADING_HOURS_END
     if not in_hours:
-        print(f'  [HOURS] Current UTC time: {now_utc.strftime("%H:%M")} — outside trading window '
-              f'({TRADING_HOURS_START:02d}:00-{TRADING_HOURS_END:02d}:00 UTC). Bot will wait.')
+        print(f'  [HOURS] Current UTC time: {now_utc.strftime("%H:%M")} — outside trading window')
     return in_hours
 
 def minutes_until_trading():
-    """Returns minutes until next trading window opens."""
     now_utc = datetime.now(timezone.utc)
     hour = now_utc.hour
     minute = now_utc.minute
@@ -285,23 +264,17 @@ def minutes_until_trading():
 
 
 # ============================================
-# FIX: FEE-AWARE PNL CALCULATION
+# FEE-AWARE PNL
 # ============================================
 def estimate_fees(notional_usdt):
-    """
-    Estimate total round-trip fees for a trade.
-    notional_usdt = quantity * entry_price (before leverage).
-    Fee = open fee + close fee = 2 * 0.055% of notional.
-    """
     return notional_usdt * BYBIT_FEE_RATE * 2
 
 def net_pnl(gross_pnl, notional_usdt):
-    """Return gross PnL minus estimated fees."""
     return gross_pnl - estimate_fees(notional_usdt)
 
 
 # ============================================
-# 2. ACCOUNT MANAGEMENT
+# ACCOUNT MANAGEMENT
 # ============================================
 def get_bybit_balance():
     import hmac, hashlib
@@ -412,7 +385,7 @@ def get_bybit_positions():
 
 
 # ============================================
-# 3. MARKET DATA
+# MARKET DATA
 # ============================================
 def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     bybit_symbol = symbol.replace('/', '').replace(':USDT', '')
@@ -443,7 +416,7 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
         except Exception as e:
             print(f'Bybit OHLCV ({category}) failed for {symbol}/{timeframe}: {e}')
 
-    # FIX 4: Skip Binance fallback for Bybit-only pairs to avoid proxy timeouts
+    # Skip Binance fallback for Bybit-only pairs
     bybit_only = [
         'TURBO', 'AI16Z', 'TST', 'NEIRO', 'VINE', 'MATIC', 'MKR', 'BAL',
         'MELANIA', 'TRUMP', 'FARTCOIN', 'LAYER', 'IP', 'BERA', 'HYPE',
@@ -451,7 +424,7 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     ]
     base_sym = symbol.replace('/USDT', '').replace(':USDT', '')
     if base_sym in bybit_only:
-        return None  # Bybit-only pair — no Binance fallback
+        return None
 
     try:
         binance_sym = symbol.replace('/', '').replace(':USDT', '')
@@ -508,7 +481,7 @@ def fetch_current_price(symbol='BTC/USDT'):
 
 
 # ============================================
-# 4. TECHNICAL INDICATORS
+# TECHNICAL INDICATORS (unchanged)
 # ============================================
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
@@ -707,7 +680,7 @@ def calculate_stochastic(closes, highs, lows, k_period=14, d_period=3):
 
 
 # ============================================
-# 5. SIGNAL GENERATION
+# SIGNAL GENERATION (unchanged)
 # ============================================
 def get_1h_trend_bias(closes1h):
     if len(closes1h) < 50:
@@ -788,9 +761,6 @@ def generate_signal(symbol, timeframe='5m'):
         rsi15 = calculate_rsi(closes15, period=14)
         rsi1h = calculate_rsi(closes1h, period=14)
 
-        # DATA QUALITY CHECK: If RSI values are identical across timeframes,
-        # data is likely from a bad Binance fallback (all same candles).
-        # Also check if Stochastic values are suspiciously identical.
         if abs(rsi5 - rsi15) < 0.5 and abs(rsi15 - rsi1h) < 0.5:
             print(f'  [{symbol}] Data quality fail — RSI identical across timeframes ({rsi5:.1f}/{rsi15:.1f}/{rsi1h:.1f}), likely bad data')
             return None
@@ -814,18 +784,14 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # GATE: Minimum ATR 0.12% — lowered to capture more pairs in low-volatility markets
         if atr_pct < 0.12:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
             return None
 
-        # GATE: Minimum price $0.05 — skip micro-price coins where tick size kills R:R
-        # At $0.0155 (PORTAL), TP1 at same price can't clear fees despite decent ATR%
         if current_price < 0.05:
             print(f'  [{symbol}] Price ${current_price:.6f} too low — micro-price coin, skip')
             return None
 
-        # TP1 is 1.0x ATR — only skip if ATR is extremely tight
         tp1_distance_pct = atr_pct * 1.0
         if atr_pct < 0.15 and tp1_distance_pct < 0.08:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% — TP1 distance {tp1_distance_pct:.3f}% too tight after fees, skip')
@@ -1024,7 +990,6 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] Confidence {confidence:.0f}% below minimum {MIN_CONF}% — skip')
             return None
 
-        # ATR-based TP/SL
         if atr_pct < 0.30:
             atr_sl_mult  = ATR_SL_MULT_LOW
             atr_tp_mults = ATR_TP_MULTS_LOW
@@ -1042,8 +1007,6 @@ def generate_signal(symbol, timeframe='5m'):
             sl_price  = current_price + (atr * atr_sl_mult)
             tp_prices = [current_price - (atr * m) for m in atr_tp_mults]
 
-        # FIX: Minimum absolute SL distance
-        # Prevents SL being placed only 1-2 ticks away on micro-price coins
         sl_dist_abs = abs(sl_price - current_price)
         min_sl_abs  = current_price * MIN_SL_DISTANCE_PCT
         if sl_dist_abs < min_sl_abs:
@@ -1067,7 +1030,6 @@ def generate_signal(symbol, timeframe='5m'):
         tp_pcts = [abs(tp - current_price) / current_price for tp in tp_prices]
         sl_pct  = abs(sl_price - current_price) / current_price
 
-        # R:R gate
         tp1_dist = abs(tp_prices[0] - current_price)
         sl_dist  = abs(sl_price - current_price)
         rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
@@ -1188,7 +1150,7 @@ def select_best_pair(pairs):
 
 
 # ============================================
-# 6. REAL ORDER EXECUTION
+# REAL ORDER EXECUTION – FIXED POSITION MODE DETECTION
 # ============================================
 def _bybit_signed_request(method, endpoint, params, exchange_obj):
     import hmac, hashlib, json as _json
@@ -1224,49 +1186,59 @@ def _bybit_signed_request(method, endpoint, params, exchange_obj):
     return resp.json()
 
 
-# Cache position mode per user key to avoid repeated API calls
+# Cache position mode per user key
 _position_mode_cache = {}
 
 def _get_position_idx(direction, exchange=None):
     """
-    Detect user Bybit position mode and return correct positionIdx.
-    One-Way Mode -> positionIdx=0 (both BUY and SELL)
-    Hedge Mode   -> positionIdx=1 (BUY/long), positionIdx=2 (SELL/short)
-    
-    Uses /v5/account/info for reliable detection, cached per user key.
-    Falls back to checking open positions if account info unavailable.
+    Detect user Bybit position mode reliably using /v5/account/info.
+    Returns:
+      0 = One-Way Mode (both sides share the same position)
+      1 = Hedge Mode -> BUY/Long
+      2 = Hedge Mode -> SELL/Short
     """
     global _position_mode_cache
     _exch = exchange or bybit_futures
     cache_key = getattr(_exch, 'apiKey', 'default')[:8]
 
     if cache_key not in _position_mode_cache:
+        # Primary: use /v5/account/info to get positionMode
         try:
-            # Primary: check account position mode via /v5/position/switch-mode
-            resp = _bybit_signed_request('GET', '/v5/position/switch-mode', {
-                'category': 'linear',
-            }, _exch)
+            resp = _bybit_signed_request('GET', '/v5/account/info', {}, _exch)
             if resp.get('retCode') == 0:
-                mode_val = resp.get('result', {}).get('mode', 0)
-                # mode=0 or mode=1 = one-way, mode=3 = hedge
-                _position_mode_cache[cache_key] = 'hedge' if mode_val == 3 else 'oneway'
+                pos_mode = resp.get('result', {}).get('positionMode', 0)
+                # positionMode: 0 = one-way, 3 = hedge
+                _position_mode_cache[cache_key] = 'hedge' if pos_mode == 3 else 'oneway'
+                print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]} (from account info)')
             else:
-                # Fallback: try to detect via /v5/position/list
-                # If user has hedge positions, they will have positionIdx 1 or 2
-                pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
-                    'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
+                # Fallback: try older detection
+                raise Exception('account/info failed')
+        except Exception:
+            # Fallback: try to detect via /v5/position/switch-mode or /v5/position/list
+            try:
+                resp2 = _bybit_signed_request('GET', '/v5/position/switch-mode', {
+                    'category': 'linear',
                 }, _exch)
-                if pos_resp.get('retCode') == 0:
-                    positions = pos_resp.get('result', {}).get('list', [])
-                    if positions and positions[0].get('positionIdx', 0) in [1, 2]:
-                        _position_mode_cache[cache_key] = 'hedge'
+                if resp2.get('retCode') == 0:
+                    mode_val = resp2.get('result', {}).get('mode', 0)
+                    _position_mode_cache[cache_key] = 'hedge' if mode_val == 3 else 'oneway'
+                else:
+                    # Last resort: check if user has any hedge positions
+                    pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
+                        'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
+                    }, _exch)
+                    if pos_resp.get('retCode') == 0:
+                        positions = pos_resp.get('result', {}).get('list', [])
+                        if positions and positions[0].get('positionIdx', 0) in [1, 2]:
+                            _position_mode_cache[cache_key] = 'hedge'
+                        else:
+                            _position_mode_cache[cache_key] = 'oneway'
                     else:
                         _position_mode_cache[cache_key] = 'oneway'
-                else:
-                    _position_mode_cache[cache_key] = 'oneway'
-        except Exception:
-            _position_mode_cache[cache_key] = 'oneway'
-        print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]}')
+                print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]} (fallback)')
+            except Exception as e:
+                print(f'  [POSITION MODE] Could not detect, defaulting to oneway: {e}')
+                _position_mode_cache[cache_key] = 'oneway'
 
     mode_str = _position_mode_cache.get(cache_key, 'oneway')
     if mode_str == 'hedge':
@@ -1318,14 +1290,8 @@ def _get_qty_step(bybit_sym):
 
 
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None, leverage=None):
-    """
-    Place a futures market order on Bybit.
-    FIX: Uses _get_qty_step() for all pairs — no hardcoded step dict.
-    FIX: positionIdx: 0 always sent — one-way mode required.
-    FIX: exchange param used — trades on correct user account.
-    """
     exchange  = exchange or bybit_futures
-    session_lev = leverage if leverage is not None else LEVERAGE  # FIX: use passed leverage not global
+    session_lev = leverage if leverage is not None else LEVERAGE
     bybit_sym = symbol.replace('/', '').replace(':USDT', '')
     if not bybit_sym.endswith('USDT'):
         bybit_sym = bybit_sym + 'USDT'
@@ -1333,7 +1299,6 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
     try:
         current_price = _get_price(symbol, 'futures')
 
-        # FIX: Dynamic qty step from Bybit — replaces hardcoded dict
         instr    = _get_qty_step(bybit_sym)
         step     = instr['step']
         min_qty  = instr['min_qty']
@@ -1363,7 +1328,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             print(f'  [LEVERAGE] Could not set: {e}')
 
         side = 'Buy' if direction == 'BUY' else 'Sell'
-        # FIX: Detect position mode — support both One-Way (0) and Hedge (1/2)
+        # FIX: Use correct positionIdx
         pos_idx = _get_position_idx(direction, exchange)
         resp = _bybit_signed_request('POST', '/v5/order/create', {
             'category':    'linear',
@@ -1434,8 +1399,6 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
             'timeInForce': 'IOC',
             'positionIdx': pos_idx,
         }
-        # reduceOnly only works in One-Way mode (positionIdx=0)
-        # In Hedge mode, positionIdx already identifies the position
         if pos_idx == 0:
             order_params['reduceOnly'] = True
         resp = _bybit_signed_request('POST', '/v5/order/create', order_params, exchange)
@@ -1461,10 +1424,7 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
-# 7. MOMENTUM SESSION — 1 TRADE ONLY
-# FIX: num_trades hardcoded to 1 — multi-trade removed entirely.
-# Reason: multiple trades multiply fee drag without proportional gain.
-# Leverage does the heavy lifting on a single quality signal.
+# MOMENTUM SESSION (unchanged except leverage fix)
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None,
                               force=False, symbol=None, user_id=None,
@@ -1487,8 +1447,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     clear_stop(user_id)
     trade_mode = user_trade_mode or 'futures'
     fee_rate   = BYBIT_FEE_RATE
-    # FIX: Capture leverage locally — avoids global LEVERAGE race condition in multi-user
-    session_lev = LEVERAGE  # already set by execute_session before this call
+    session_lev = LEVERAGE  # captured before any change
 
     if user_balance is not None and user_balance > 0:
         available_usdt = user_balance
@@ -1497,31 +1456,27 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {session_lev}x')
 
-    # FIX: Exactly 1 trade — loop runs once
     _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
                  'message': 'Scanning market for best signal...'})
 
     best_signal = None
     preferred_symbol = symbol
 
-    # FIX: Trading hours gate — wait if outside active hours
     if not is_trading_hours():
         wait_mins = minutes_until_trading()
         print(f'  [HOURS] Market inactive. Next window opens in ~{wait_mins} minutes.')
         _set_active({'status': 'waiting',
                      'message': f'Outside trading hours — market opens in ~{wait_mins}min (8am UTC)'})
-        # Wait in 5-minute chunks until trading hours open
         waited = 0
-        MAX_WAIT = wait_mins + 10  # don't wait more than needed + buffer
+        MAX_WAIT = wait_mins + 10
         while not is_trading_hours() and not should_stop(user_id) and waited < MAX_WAIT:
-            eventlet.sleep(300)  # 5 minutes
+            eventlet.sleep(300)
             waited += 5
         if not is_trading_hours():
             results['message'] = 'Outside trading hours. Please start a session between 8am-10pm UTC.'
             _clear_active(user_id)
             return results
 
-    # Find signal
     if preferred_symbol:
         sig = generate_signal(preferred_symbol)
         if sig:
@@ -1581,9 +1536,8 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     entry_price  = order['price']
     quantity     = order['quantity']
     monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
-    notional     = quantity * entry_price  # for fee calculation
+    notional     = quantity * entry_price
 
-    # TP/SL levels
     if atr_pct < 0.30:
         atr_sl_mult  = ATR_SL_MULT_LOW
         atr_tp_mults = ATR_TP_MULTS_LOW
@@ -1601,7 +1555,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         sl_price  = entry_price + (atr * atr_sl_mult)
         tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
 
-    # FIX: Enforce minimum absolute SL distance
     sl_dist_abs = abs(sl_price - entry_price)
     min_sl_abs  = entry_price * MIN_SL_DISTANCE_PCT
     if sl_dist_abs < min_sl_abs:
@@ -1623,15 +1576,14 @@ def execute_momentum_session(amount, timeframe_minutes=None,
           f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
     print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
 
-    # FIX 4: Set native Bybit SL via trading-stop endpoint (server-side backup)
-    # Our monitoring loop remains primary, but Bybit will close if server goes down
+    # Set native SL
     try:
         sl_resp = _bybit_signed_request('POST', '/v5/position/trading-stop', {
             'category':    'linear',
             'symbol':      monitor_sym,
             'stopLoss':    str(round(sl_price, 6)),
             'slTriggerBy': 'LastPrice',
-            'positionIdx': _get_position_idx(direction, exchange) if direction else 0,
+            'positionIdx': _get_position_idx(trade_dir, _user_exchange or bybit_futures),
         }, _user_exchange or bybit_futures)
         if sl_resp.get('retCode') == 0:
             print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
@@ -1684,7 +1636,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     while remaining_qty > 0:
       try:
         elapsed = _time_module.time() - session_start_time
-        # 4-hour hard session limit — only safety net, no early exit
         if elapsed > MAX_SESSION_SECONDS:
             print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
             _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
@@ -1730,7 +1681,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
         pct_move     = price_diff / entry_price if entry_price > 0 else 0
         live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
-        # FIX: Show net PnL on UI (gross minus estimated fees)
         live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
         live_pnl_pct = round(pct_move * session_lev * 100, 4)
 
@@ -1840,7 +1790,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 break
 
         if not tp_triggered:
-            # Always update state dict (used by /api/live_status polling)
             _set_active({
                 'current_price': live_price,
                 'pnl':           live_pnl_now,
@@ -1850,7 +1799,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 'status':        'monitoring',
                 'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
             })
-            # Throttle log output: print only every 30 seconds to reduce log spam
             if int(_time_module.time()) % 30 < 6:
                 print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
                       f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
@@ -1882,7 +1830,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         'message':  f'Trade closed | Gross: ${real_pnl:.4f} | Net after fees: ${real_pnl_net:.4f} | TPs: {tps_hit}/4',
     })
 
-    won = real_pnl_net > 0  # win = profitable AFTER fees
+    won = real_pnl_net > 0
     results['trades'].append({
         'index':            1,
         'symbol':           sym,
@@ -1917,7 +1865,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 8. PICK UP TRADE — Hedge Grid Strategy
+# PICK UP TRADE — Hedge Grid Strategy
 # ============================================
 def execute_pickup_session(amount, timeframe_minutes=None,
                             user_id=None, user_balance=None,
@@ -2093,7 +2041,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 9. ALWAYS WIN — Position Averaging Strategy
+# ALWAYS WIN — Position Averaging Strategy
 # ============================================
 def execute_always_win_session(amount, timeframe_minutes=None,
                                 user_id=None, user_balance=None,
@@ -2151,7 +2099,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
     positions.append({'price': order['price'], 'qty': order['quantity']})
     adds_done = 1
     import time as _time_module
-    aw_start_time = _time_module.time()  # VULN-002: track session start for timeout
+    aw_start_time = _time_module.time()
 
     def calc_avg_entry():
         total_cost = sum(p['price'] * p['qty'] for p in positions)
@@ -2203,8 +2151,6 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                 positions.append({'price': add_order['price'], 'qty': add_order['quantity']})
                 adds_done += 1
         elif adds_done >= MAX_ADDS:
-            # VULN-002 FIX: Emergency close if price moves >2x ATR beyond max adds
-            # Prevents zombie loop bleeding indefinitely
             emergency_threshold = (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False
             if emergency_threshold and price_vs_avg > emergency_threshold:
                 print(f'  [ALWAYS-WIN] Emergency close — price moved {price_vs_avg:.3%} beyond avg, max adds reached')
@@ -2214,7 +2160,6 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                     pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
                     real_pnl += pc * total_qty * avg_entry * LEVERAGE
                 break
-            # Also add time-based emergency exit for Always-Win (4h max)
             aw_elapsed = _time_module.time() - aw_start_time if 'aw_start_time' in dir() else 0
             if aw_elapsed > 4 * 3600:
                 print(f'  [ALWAYS-WIN] 4h timeout — emergency close')
@@ -2242,7 +2187,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 10. COMPOUNDING ENGINE
+# COMPOUNDING ENGINE
 # ============================================
 def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10, max_amount=200):
     if session_pnl <= 0:
@@ -2254,7 +2199,7 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 
 
 # ============================================
-# 11. AUTO-BEST SESSION
+# AUTO-BEST SESSION
 # ============================================
 def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
                                user_id=None, user_balance=None,
@@ -2279,8 +2224,7 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
 
 
 # ============================================
-# 12. UNIFIED SESSION ENTRY POINT
-# FIX: num_trades removed from all strategy calls — hardcoded to 1.
+# UNIFIED SESSION ENTRY POINT
 # ============================================
 def execute_session(amount, timeframe_minutes, strategy='auto', force=False, symbol=None,
                     user_leverage=None, user_api_key=None, user_api_secret=None,
@@ -2357,13 +2301,11 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                                           user_trade_mode='futures',
                                           user_exchange=user_futures if use_user_account else None)
 
-    # FIX VULN-001: No global exchange swap — user_exchange passed directly throughout
-
     return result
 
 
 # ============================================
-# 13. LIVE PRICES FOR TICKER BAR
+# LIVE PRICES FOR TICKER BAR
 # ============================================
 def get_live_prices():
     pairs = [
@@ -2396,7 +2338,7 @@ def get_live_prices():
 
 
 # ============================================
-# 14. SIGNAL HELPERS FOR FRONTEND
+# SIGNAL HELPERS FOR FRONTEND
 # ============================================
 def get_single_signal(symbol='BTC/USDT'):
     return generate_signal(symbol)
