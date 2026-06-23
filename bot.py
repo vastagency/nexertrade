@@ -115,30 +115,23 @@ else:
     print('✓ Connected to Bybit LIVE trading')
 
 CRYPTO_PAIRS = [
-    # Tier 1 — Large caps
+    # Tier 1 — Large caps (all confirmed Bybit futures, price > $0.05)
     'BTC/USDT',   'ETH/USDT',   'SOL/USDT',   'XRP/USDT',   'BNB/USDT',
     'DOGE/USDT',  'ADA/USDT',   'AVAX/USDT',  'LINK/USDT',  'DOT/USDT',
     'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
     'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
-    # Tier 2 — Mid caps with good liquidity
+    # Tier 2 — Strong mid caps
     'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'HBAR/USDT',  'WLD/USDT',
-    'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'JUP/USDT',   'STRK/USDT',
-    'ZK/USDT',    'ZRO/USDT',   'IO/USDT',    'EIGEN/USDT', 'IMX/USDT',
-    'LDO/USDT',   'CRV/USDT',   'FET/USDT',   'ONDO/USDT',  'ENA/USDT',
-    'W/USDT',     'TON/USDT',   'TAO/USDT',   'PYTH/USDT',  'RENDER/USDT',
-    'MATIC/USDT', 'MKR/USDT',   'SNX/USDT',   'COMP/USDT',  'BAL/USDT',
-    # Tier 3 — Alts with decent volume (price > $0.05 filter will skip micro-price ones)
-    'SAND/USDT',  'MANA/USDT',  'CHZ/USDT',   'ENJ/USDT',   'GALA/USDT',
-    'SUSHI/USDT', 'CAKE/USDT',  'GRT/USDT',   'API3/USDT',  'BLUR/USDT',
-    'DYM/USDT',   'ALT/USDT',   'MANTA/USDT', 'BOME/USDT',  'NOT/USDT',
-    'DOGS/USDT',  'SEI/USDT',   'PIXEL/USDT', 'MEME/USDT',  'TURBO/USDT',
-    # Tier 4 — Additional liquid pairs
-    'BONK/USDT',  'WIF/USDT',   'POPCAT/USDT','NEIRO/USDT', 'HMSTR/USDT',
-    'PNUT/USDT',  'ACT/USDT',   'MOVE/USDT',  'VIRTUAL/USDT','AI16Z/USDT',
-    'FARTCOIN/USDT','TRUMP/USDT','MELANIA/USDT','VINE/USDT',  'TST/USDT',
-    'LAYER/USDT', 'IP/USDT',    'BERA/USDT',  'SKY/USDT',   'HYPE/USDT',
-    'SPX/USDT',   'MEW/USDT',   'PEPE/USDT',  'FLOKI/USDT', 'SHIB/USDT',
-    'XLM/USDT',   'VET/USDT',   'ICP/USDT',   'DYDX/USDT',  'THETA/USDT',
+    'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'JUP/USDT',   'ZRO/USDT',
+    'IO/USDT',    'EIGEN/USDT', 'IMX/USDT',   'LDO/USDT',   'CRV/USDT',
+    'FET/USDT',   'ONDO/USDT',  'ENA/USDT',   'TAO/USDT',   'RENDER/USDT',
+    'VIRTUAL/USDT','GMX/USDT', 'FARTCOIN/USDT','LAYER/USDT','IP/USDT',
+    'BERA/USDT',  'HYPE/USDT',  'DYDX/USDT',  'SEI/USDT',   'WIF/USDT',
+    # Tier 3 — Mid-low caps with Bybit futures & price > $0.05
+    'SAND/USDT',  'MANA/USDT',  'SUSHI/USDT', 'CAKE/USDT',  'MANTA/USDT',
+    'MELANIA/USDT','SPX/USDT',  'XLM/USDT',   'VET/USDT',   'ICP/USDT',
+    'THETA/USDT', 'POPCAT/USDT','PNUT/USDT',  'SKY/USDT',   'MOVE/USDT',
+    'TRUMP/USDT', 'ZK/USDT',    'KAS/USDT',   'JASMY/USDT', 'ARKM/USDT',
 ]
 FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
@@ -438,6 +431,16 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
                     }
         except Exception as e:
             print(f'Bybit OHLCV ({category}) failed for {symbol}/{timeframe}: {e}')
+
+    # FIX 4: Skip Binance fallback for Bybit-only pairs to avoid proxy timeouts
+    bybit_only = [
+        'TURBO', 'AI16Z', 'TST', 'NEIRO', 'VINE', 'MATIC', 'MKR', 'BAL',
+        'MELANIA', 'TRUMP', 'FARTCOIN', 'LAYER', 'IP', 'BERA', 'HYPE',
+        'SPX', 'MOVE', 'VIRTUAL', 'POPCAT', 'WIF', 'PNUT', 'SKY'
+    ]
+    base_sym = symbol.replace('/USDT', '').replace(':USDT', '')
+    if base_sym in bybit_only:
+        return None  # Bybit-only pair — no Binance fallback
 
     try:
         binance_sym = symbol.replace('/', '').replace(':USDT', '')
@@ -773,6 +776,13 @@ def generate_signal(symbol, timeframe='5m'):
         rsi5  = calculate_rsi(closes5,  period=14)
         rsi15 = calculate_rsi(closes15, period=14)
         rsi1h = calculate_rsi(closes1h, period=14)
+
+        # DATA QUALITY CHECK: If RSI values are identical across timeframes,
+        # data is likely from a bad Binance fallback (all same candles).
+        # Also check if Stochastic values are suspiciously identical.
+        if abs(rsi5 - rsi15) < 0.5 and abs(rsi15 - rsi1h) < 0.5:
+            print(f'  [{symbol}] Data quality fail — RSI identical across timeframes ({rsi5:.1f}/{rsi15:.1f}/{rsi1h:.1f}), likely bad data')
+            return None
 
         _, _, ema_trend5  = calculate_ema_trend(closes5,  short=9, long=21)
         _, _, ema_trend15 = calculate_ema_trend(closes15, short=9, long=21)

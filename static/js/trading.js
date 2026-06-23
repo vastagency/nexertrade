@@ -1054,12 +1054,17 @@ setInterval(async () => {
         if (data && data.active) {
             updateLiveTradeUI(data);
         }
-        // FIX 9: Tick live chart with real price — resumes correctly after reconnect
+        // FIX 9: Chart resume on reconnect — reinit if frozen or empty
         if (data && data.current_price && data.current_price > 0) {
-            tickLiveChart(data.current_price);
-            // If chart was frozen (data length < 5), reinitialise it
-            if (liveChartData.length < 5 && isTrading) {
+            if (liveChartData.length < 3 && isTrading) {
+                // Chart was wiped by reconnect — reinitialise with real price
                 initLiveChart(data.current_price);
+                const labelEl = document.getElementById('liveChartLabel');
+                if (labelEl && data.pair) {
+                    labelEl.innerHTML = '<span class="live-dot"></span> Live &middot; ' + data.pair.replace('USDT', '/USD');
+                }
+            } else {
+                tickLiveChart(data.current_price);
             }
         }
         // Update chart pair label to real trading pair
@@ -1070,17 +1075,27 @@ setInterval(async () => {
                 labelEl.innerHTML = '<span class="live-dot"></span> Live &middot; ' + displayPair;
             }
         }
-        // FIX 5 & 6: Update live session wins/losses/PnL from backend state
-        if (data && data.active && data.tp_hits !== undefined) {
-            // If a TP was hit since last poll, count it as progress
-            if (data.pnl !== undefined && data.pnl !== 0) {
-                sessionPnl = data.pnl;
+        // FIX 5 & 6: Live wins/losses and PnL update from /api/live_status
+        if (data && data.active) {
+            // Update live PnL display
+            if (data.pnl !== undefined) {
+                const livePnl = typeof data.pnl_net === 'number' ? data.pnl_net : data.pnl;
                 const pnlEl = document.getElementById('statPnl');
-                if (pnlEl) {
-                    const sign = sessionPnl >= 0 ? '+' : '';
-                    pnlEl.textContent = sign + '$' + Math.abs(sessionPnl).toFixed(4);
-                    pnlEl.className = 'session-stat-value mono large ' + (sessionPnl >= 0 ? 'positive' : 'negative');
+                if (pnlEl && livePnl !== 0) {
+                    const sign = livePnl >= 0 ? '+' : '';
+                    pnlEl.textContent = sign + '$' + Math.abs(livePnl).toFixed(4);
+                    pnlEl.className = 'session-stat-value mono large ' + (livePnl >= 0 ? 'positive' : 'negative');
                 }
+            }
+            // Update TP hits counter as wins proxy
+            if (data.tp_hits !== undefined && data.tp_hits > 0) {
+                const winsEl = document.getElementById('statWins');
+                if (winsEl) winsEl.textContent = data.tp_hits;
+            }
+            // Update trade counter
+            if (data.status === 'monitoring' || data.status === 'closing') {
+                const tradesEl = document.getElementById('statTrades');
+                if (tradesEl) tradesEl.textContent = '1/1';
             }
         }
     } catch (err) {
