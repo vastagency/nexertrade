@@ -1054,9 +1054,13 @@ setInterval(async () => {
         if (data && data.active) {
             updateLiveTradeUI(data);
         }
-        // FIX E: tick the live chart with real current price from backend
+        // FIX 9: Tick live chart with real price — resumes correctly after reconnect
         if (data && data.current_price && data.current_price > 0) {
             tickLiveChart(data.current_price);
+            // If chart was frozen (data length < 5), reinitialise it
+            if (liveChartData.length < 5 && isTrading) {
+                initLiveChart(data.current_price);
+            }
         }
         // Update chart pair label to real trading pair
         if (data && data.pair && data.active) {
@@ -1064,6 +1068,19 @@ setInterval(async () => {
             if (labelEl) {
                 const displayPair = data.pair.replace('USDT', '/USD');
                 labelEl.innerHTML = '<span class="live-dot"></span> Live &middot; ' + displayPair;
+            }
+        }
+        // FIX 5 & 6: Update live session wins/losses/PnL from backend state
+        if (data && data.active && data.tp_hits !== undefined) {
+            // If a TP was hit since last poll, count it as progress
+            if (data.pnl !== undefined && data.pnl !== 0) {
+                sessionPnl = data.pnl;
+                const pnlEl = document.getElementById('statPnl');
+                if (pnlEl) {
+                    const sign = sessionPnl >= 0 ? '+' : '';
+                    pnlEl.textContent = sign + '$' + Math.abs(sessionPnl).toFixed(4);
+                    pnlEl.className = 'session-stat-value mono large ' + (sessionPnl >= 0 ? 'positive' : 'negative');
+                }
             }
         }
     } catch (err) {
@@ -1145,6 +1162,30 @@ async function resumeActiveSessionIfAny() {
   } catch (err) {
     console.warn('[RECOVER] Could not check active session:', err);
   }
+}
+
+// FIX 3: Socket room verification — rejoin user room on reconnect
+// Without this, socket events (tp_hit, trade_entry) go to wrong room after reconnect
+if (typeof io !== 'undefined') {
+    const liveSocket = io({ transports: ['websocket', 'polling'] });
+    liveSocket.on('connect', () => {
+        console.log('[SOCKET] Connected, joining user room');
+        liveSocket.emit('join_dashboard');
+    });
+    liveSocket.on('tp_hit', (data) => {
+        // Real-time TP notification from server
+        if (!isTrading) return;
+        winsCount = Math.max(winsCount, 1);
+        const el = document.getElementById('statWins');
+        if (el) el.textContent = winsCount;
+        const tpMsg = document.getElementById('sessionStatusTitle');
+        if (tpMsg) tpMsg.textContent = 'TP' + data.tp_num + ' hit @ $' + (data.price || 0).toFixed(4);
+    });
+    liveSocket.on('trade_entry', (data) => {
+        if (!isTrading) return;
+        const tpMsg = document.getElementById('sessionStatusTitle');
+        if (tpMsg) tpMsg.textContent = data.direction + ' ' + data.symbol + ' @ $' + (data.price || 0).toFixed(4);
+    });
 }
 
 // Run recovery check immediately on page load

@@ -1216,16 +1216,24 @@ def api_admin_top_users():
 @admin_required
 def api_admin_users():
     users = User.query.filter_by(is_admin=False).all()
-    # Return basic user data immediately -- live balance fetched separately
-    # to avoid blocking the admin page load
     user_list = []
     for u in users:
+        # FIX 7: Fetch live Bybit balance for connected users
+        live_balance = None
+        if u.bybit_api_key and u.bybit_api_secret:
+            try:
+                from bot import get_user_bybit_balance
+                live_balance = get_user_bybit_balance(u.bybit_api_key, u.bybit_api_secret)
+            except Exception:
+                pass
+        display_balance = round(live_balance, 2) if live_balance is not None else round(u.balance, 2)
+        balance_source  = 'bybit_live' if live_balance is not None else 'platform'
         user_list.append({
             'id':              u.id,
             'name':            u.name,
             'email':           u.email,
-            'balance':         round(u.balance, 2),
-            'balance_source':  'platform',
+            'balance':         display_balance,
+            'balance_source':  balance_source,
             'bybit_connected': bool(u.bybit_connected and u.bybit_api_key),
             'bybit_api_key':   (u.bybit_api_key[:8] + '...') if u.bybit_api_key else None,
             'total_profit':    round(u.total_profit, 2),

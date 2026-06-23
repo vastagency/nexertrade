@@ -2,23 +2,25 @@
 #   NEXERTRADE — PRODUCTION TRADING ENGINE
 #   Connected to Bybit — Real Orders Only
 #   Zero simulation. Zero fake balance.
-#   ========== SIGNAL RECALIBRATION v2 ==========
+#   ========== PRODUCTION v3 — ALL 11 FIXES ==========
 #
 #   FIXES IN THIS VERSION:
-#   1. num_trades hardcoded to 1 — removed from all signatures
-#   2. TP1 = 1.0x ATR (not 0.8x) — better gross profit vs fee ratio
-#   3. _get_qty_step() used in execute_real_trade — no hardcoded dict
-#   4. Trading hours DISABLED — 24/7 trading enabled
-#   5. Minimum absolute SL distance reduced to 0.2% (was 0.3%)
-#   6. Fee-aware PnL — net PnL shown after estimated fees
-#   7. positionIdx: 0 confirmed present — one-way mode fix
-#   8. user_exchange passed correctly through all momentum calls
-#   9. ATR gate lowered to 0.12% (was 0.20%) — captures more pairs
-#  10. RSI1h BUY gate raised to 65 (was 60) — allows more setups
-#  11. Secondary confluence reduced to 1 (was 2) — less strict
-#  12. R:R minimum reduced to 1.0 (was 1.2) — more valid setups
-#  13. Middle zone score threshold lowered to 5 (was 9) — more breakouts
-#  14. MIN_SCORE lean->4, normal->3 (was 5/3)
+#   1.  num_trades hardcoded to 1 — fee drag fix
+#   2.  TP1 = 1.0x ATR — clears fees comfortably
+#   3.  _get_qty_step() dynamic — no hardcoded dict
+#   4.  24/7 trading — hours gate disabled
+#   5.  Min SL distance 0.2% — no noise SL hits
+#   6.  Fee-aware PnL display
+#   7.  positionIdx: 0 — one-way mode
+#   8.  user_exchange passed directly — no global swap (VULN-001 FIX)
+#   9.  ATR gate 0.12%, RSI1h 65, confluence 1, R:R 1.0, middle zone 5
+#  10.  eventlet.sleep() — fixes monitoring loop flood bug
+#  11.  15-min time exit — no indefinite waits
+#  12.  30s log throttle — clean Railway logs
+#  13.  Min price $0.05 — skip micro-price coins (PORTAL fix)
+#  14.  100 pairs (was 55) — more opportunities
+#  15.  Always-Win zombie loop timeout (VULN-002 FIX)
+#  16.  Signal recalibration v2 — lean->4, normal->3
 # ============================================
 
 import os
@@ -113,17 +115,30 @@ else:
     print('✓ Connected to Bybit LIVE trading')
 
 CRYPTO_PAIRS = [
+    # Tier 1 — Large caps
     'BTC/USDT',   'ETH/USDT',   'SOL/USDT',   'XRP/USDT',   'BNB/USDT',
     'DOGE/USDT',  'ADA/USDT',   'AVAX/USDT',  'LINK/USDT',  'DOT/USDT',
     'LTC/USDT',   'NEAR/USDT',  'APT/USDT',   'ARB/USDT',   'OP/USDT',
     'SUI/USDT',   'INJ/USDT',   'FIL/USDT',   'ATOM/USDT',  'UNI/USDT',
-    'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'SEI/USDT',   'HBAR/USDT',
-    'WLD/USDT',   'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'BLUR/USDT',
-    'JUP/USDT',   'DYM/USDT',   'STRK/USDT',  'BOME/USDT',  'NOT/USDT',
-    'ZK/USDT',    'ZRO/USDT',   'DOGS/USDT',  'IO/USDT',    'EIGEN/USDT',
+    # Tier 2 — Mid caps with good liquidity
+    'AAVE/USDT',  'RUNE/USDT',  'TIA/USDT',   'HBAR/USDT',  'WLD/USDT',
+    'JTO/USDT',   'PENDLE/USDT','STX/USDT',   'JUP/USDT',   'STRK/USDT',
+    'ZK/USDT',    'ZRO/USDT',   'IO/USDT',    'EIGEN/USDT', 'IMX/USDT',
+    'LDO/USDT',   'CRV/USDT',   'FET/USDT',   'ONDO/USDT',  'ENA/USDT',
+    'W/USDT',     'TON/USDT',   'TAO/USDT',   'PYTH/USDT',  'RENDER/USDT',
+    'MATIC/USDT', 'MKR/USDT',   'SNX/USDT',   'COMP/USDT',  'BAL/USDT',
+    # Tier 3 — Alts with decent volume (price > $0.05 filter will skip micro-price ones)
     'SAND/USDT',  'MANA/USDT',  'CHZ/USDT',   'ENJ/USDT',   'GALA/USDT',
-    'IMX/USDT',   'LDO/USDT',   'CRV/USDT',   'SUSHI/USDT', 'CAKE/USDT',
-    'FET/USDT',   'MANTA/USDT', 'ALT/USDT',   'PORTAL/USDT','PIXEL/USDT',
+    'SUSHI/USDT', 'CAKE/USDT',  'GRT/USDT',   'API3/USDT',  'BLUR/USDT',
+    'DYM/USDT',   'ALT/USDT',   'MANTA/USDT', 'BOME/USDT',  'NOT/USDT',
+    'DOGS/USDT',  'SEI/USDT',   'PIXEL/USDT', 'MEME/USDT',  'TURBO/USDT',
+    # Tier 4 — Additional liquid pairs
+    'BONK/USDT',  'WIF/USDT',   'POPCAT/USDT','NEIRO/USDT', 'HMSTR/USDT',
+    'PNUT/USDT',  'ACT/USDT',   'MOVE/USDT',  'VIRTUAL/USDT','AI16Z/USDT',
+    'FARTCOIN/USDT','TRUMP/USDT','MELANIA/USDT','VINE/USDT',  'TST/USDT',
+    'LAYER/USDT', 'IP/USDT',    'BERA/USDT',  'SKY/USDT',   'HYPE/USDT',
+    'SPX/USDT',   'MEW/USDT',   'PEPE/USDT',  'FLOKI/USDT', 'SHIB/USDT',
+    'XLM/USDT',   'VET/USDT',   'ICP/USDT',   'DYDX/USDT',  'THETA/USDT',
 ]
 FUTURES_PAIRS = [p.replace('/USDT', '/USDT:USDT') for p in CRYPTO_PAIRS]
 
@@ -786,6 +801,12 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
             return None
 
+        # GATE: Minimum price $0.05 — skip micro-price coins where tick size kills R:R
+        # At $0.0155 (PORTAL), TP1 at same price can't clear fees despite decent ATR%
+        if current_price < 0.05:
+            print(f'  [{symbol}] Price ${current_price:.6f} too low — micro-price coin, skip')
+            return None
+
         # TP1 is 1.0x ATR — only skip if ATR is extremely tight
         tp1_distance_pct = atr_pct * 1.0
         if atr_pct < 0.15 and tp1_distance_pct < 0.08:
@@ -1281,7 +1302,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             'qty':         str(quantity),
             'timeInForce': 'IOC',
             'reduceOnly':  False,
-            'positionIdx': 0,  # FIX: one-way mode — always required
+            'positionIdx': 0,  # one-way mode — always required
         }, exchange)
 
         print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
@@ -1522,6 +1543,23 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
           f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
     print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*LEVERAGE:.4f} gross to profit')
+
+    # FIX 4: Set native Bybit SL via trading-stop endpoint (server-side backup)
+    # Our monitoring loop remains primary, but Bybit will close if server goes down
+    try:
+        sl_resp = _bybit_signed_request('POST', '/v5/position/trading-stop', {
+            'category':    'linear',
+            'symbol':      monitor_sym,
+            'stopLoss':    str(round(sl_price, 6)),
+            'slTriggerBy': 'LastPrice',
+            'positionIdx': 0,
+        }, _user_exchange or bybit_futures)
+        if sl_resp.get('retCode') == 0:
+            print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
+        else:
+            print(f'  [NATIVE SL] Could not set: {sl_resp.get("retMsg")} (monitoring loop will handle)')
+    except Exception as _sl_e:
+        print(f'  [NATIVE SL] Error: {_sl_e} (monitoring loop will handle)')
 
     _set_active({
         'active':        True,
@@ -2049,6 +2087,8 @@ def execute_always_win_session(amount, timeframe_minutes=None,
 
     positions.append({'price': order['price'], 'qty': order['quantity']})
     adds_done = 1
+    import time as _time_module
+    aw_start_time = _time_module.time()  # VULN-002: track session start for timeout
 
     def calc_avg_entry():
         total_cost = sum(p['price'] * p['qty'] for p in positions)
@@ -2100,7 +2140,21 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                 positions.append({'price': add_order['price'], 'qty': add_order['quantity']})
                 adds_done += 1
         elif adds_done >= MAX_ADDS:
-            if price_vs_avg > (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False:
+            # VULN-002 FIX: Emergency close if price moves >2x ATR beyond max adds
+            # Prevents zombie loop bleeding indefinitely
+            emergency_threshold = (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False
+            if emergency_threshold and price_vs_avg > emergency_threshold:
+                print(f'  [ALWAYS-WIN] Emergency close — price moved {price_vs_avg:.3%} beyond avg, max adds reached')
+                cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
+                if cr.get('success'):
+                    cp    = cr['close_price']
+                    pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
+                    real_pnl += pc * total_qty * avg_entry * LEVERAGE
+                break
+            # Also add time-based emergency exit for Always-Win (4h max)
+            aw_elapsed = _time_module.time() - aw_start_time if 'aw_start_time' in dir() else 0
+            if aw_elapsed > 4 * 3600:
+                print(f'  [ALWAYS-WIN] 4h timeout — emergency close')
                 cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
                 if cr.get('success'):
                     cp    = cr['close_price']
@@ -2177,15 +2231,11 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: USER ACCOUNT (trading on user\'s own Bybit)')
         print(f'{"="*50}')
-        import bot as _bot_module
         user_spot    = get_user_exchange(user_api_key, user_api_secret, mode='spot')
         user_futures = get_user_exchange(user_api_key, user_api_secret, mode='futures')
-        _original_spot    = _bot_module.bybit_spot
-        _original_futures = _bot_module.bybit_futures
-        _bot_module.bybit_spot    = user_spot
-        _bot_module.bybit_futures = user_futures
-        print(f'  [KEY] Active key after swap: {_bot_module.bybit_futures.apiKey[:8]}...')
-        print(f'  [KEY] User key:              {user_api_key[:8]}...')
+        _original_spot    = None
+        _original_futures = None
+        print(f'  [KEY] User exchange created: {user_api_key[:8]}...')
         if user_balance and user_balance > 0:
             _user_live_bal = user_balance
         else:
@@ -2244,10 +2294,7 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                                           user_trade_mode='futures',
                                           user_exchange=user_futures if use_user_account else None)
 
-    if use_user_account and _original_futures is not None:
-        import bot as _bot_module
-        _bot_module.bybit_spot    = _original_spot
-        _bot_module.bybit_futures = _original_futures
+    # FIX VULN-001: No global exchange swap — user_exchange passed directly throughout
 
     return result
 
