@@ -5,7 +5,7 @@
 #   ========== PRODUCTION v3 — ALL 11 FIXES ==========
 #
 #   FIXES IN THIS VERSION:
-#   1.  num_trades hardcoded to 1 — fee drag fix
+#   1.  num_trades now fully supported (multi‑trade sessions)
 #   2.  TP1 = 1.0x ATR — clears fees comfortably
 #   3.  _get_qty_step() dynamic — no hardcoded dict
 #   4.  24/7 trading — hours gate disabled
@@ -21,7 +21,8 @@
 #  14.  100 pairs (was 55) — more opportunities
 #  15.  Always-Win zombie loop timeout (VULN-002 FIX)
 #  16.  Signal recalibration v2 — lean->4, normal->3
-#  17.  Robust Hedge/One-Way mode detection via /v5/position/switch-mode
+#  17.  Robust Hedge/One-Way mode detection with fallback retry (VULN-003)
+#  18.  Multi‑trade support (num_trades) fully restored
 # ============================================
 
 import os
@@ -1150,7 +1151,7 @@ def select_best_pair(pairs):
 
 
 # ============================================
-# REAL ORDER EXECUTION – FIXED POSITION MODE DETECTION
+# REAL ORDER EXECUTION – with fallback retry for mode mismatch
 # ============================================
 def _bybit_signed_request(method, endpoint, params, exchange_obj):
     import hmac, hashlib, json as _json
@@ -1191,10 +1192,9 @@ _position_mode_cache = {}
 
 def _get_position_idx(direction, exchange=None):
     """
-    Detect user Bybit position mode specifically for linear (futures) contracts.
-    Uses /v5/position/switch-mode?category=linear to get the actual mode.
+    Detect user Bybit position mode for linear futures.
     Returns:
-      0 = One-Way Mode (both sides share the same position)
+      0 = One-Way Mode
       1 = Hedge Mode -> BUY/Long
       2 = Hedge Mode -> SELL/Short
     """
@@ -1202,28 +1202,25 @@ def _get_position_idx(direction, exchange=None):
     _exch = exchange or bybit_futures
     cache_key = getattr(_exch, 'apiKey', 'default')[:8]
 
-    # Check cache
     if cache_key in _position_mode_cache:
         mode_str = _position_mode_cache[cache_key]
     else:
         mode_str = None
 
     if mode_str is None:
-        # Primary: use /v5/position/switch-mode with category=linear
+        # Try to detect via switch-mode
         try:
             resp = _bybit_signed_request('GET', '/v5/position/switch-mode', {
                 'category': 'linear',
             }, _exch)
             if resp.get('retCode') == 0:
-                # mode: 0 or 1 = one-way, 3 = hedge
                 mode_val = resp.get('result', {}).get('mode', 0)
                 mode_str = 'hedge' if mode_val == 3 else 'oneway'
-                print(f'  [POSITION MODE] {cache_key}: {mode_str} (from switch-mode)')
+                print(f'  [POSITION MODE] {cache_key}: {mode_str} (switch-mode)')
             else:
-                # Fallback to /v5/account/info
                 raise Exception('switch-mode failed')
         except Exception:
-            # Fallback: try /v5/account/info
+            # Fallback to account info
             try:
                 resp2 = _bybit_signed_request('GET', '/v5/account/info', {}, _exch)
                 if resp2.get('retCode') == 0:
@@ -1231,7 +1228,7 @@ def _get_position_idx(direction, exchange=None):
                     mode_str = 'hedge' if pos_mode == 3 else 'oneway'
                     print(f'  [POSITION MODE] {cache_key}: {mode_str} (fallback account info)')
                 else:
-                    # Last resort: check positions
+                    # Last resort: check existing positions
                     pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
                         'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
                     }, _exch)
@@ -1248,7 +1245,6 @@ def _get_position_idx(direction, exchange=None):
                 print(f'  [POSITION MODE] Could not detect, defaulting to oneway: {e}')
                 mode_str = 'oneway'
 
-        # Cache the result
         _position_mode_cache[cache_key] = mode_str
 
     if mode_str == 'hedge':
@@ -1338,8 +1334,9 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             print(f'  [LEVERAGE] Could not set: {e}')
 
         side = 'Buy' if direction == 'BUY' else 'Sell'
-        # FIX: Use correct positionIdx
         pos_idx = _get_position_idx(direction, exchange)
+
+        # First attempt with detected positionIdx
         resp = _bybit_signed_request('POST', '/v5/order/create', {
             'category':    'linear',
             'symbol':      bybit_sym,
@@ -1350,6 +1347,26 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             'reduceOnly':  False,
             'positionIdx': pos_idx,
         }, exchange)
+
+        # If mismatch, retry with alternative idx (hedge mode values)
+        if resp.get('retCode') == 10001 and 'position idx not match' in resp.get('retMsg', ''):
+            alt_idx = 1 if direction == 'BUY' else 2
+            print(f'  [POSITION MODE] Detected mismatch, retrying with idx={alt_idx} (hedge)')
+            resp = _bybit_signed_request('POST', '/v5/order/create', {
+                'category':    'linear',
+                'symbol':      bybit_sym,
+                'side':        side,
+                'orderType':   'Market',
+                'qty':         str(quantity),
+                'timeInForce': 'IOC',
+                'reduceOnly':  False,
+                'positionIdx': alt_idx,
+            }, exchange)
+            if resp.get('retCode') == 0:
+                # Update cache to hedge for future trades
+                cache_key = getattr(exchange, 'apiKey', 'default')[:8]
+                _position_mode_cache[cache_key] = 'hedge'
+                print(f'  [POSITION MODE] Updated cache for {cache_key} to hedge')
 
         print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
         if resp.get('retCode') != 0:
@@ -1434,9 +1451,9 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
-# MOMENTUM SESSION
+# MOMENTUM SESSION – NOW SUPPORTS MULTIPLE TRADES
 # ============================================
-def execute_momentum_session(amount, timeframe_minutes=None,
+def execute_momentum_session(amount, timeframe_minutes=None, num_trades=1,
                               force=False, symbol=None, user_id=None,
                               user_balance=None, user_trade_mode='futures',
                               user_exchange=None):
@@ -1466,406 +1483,413 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {session_lev}x')
 
-    _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
-                 'message': 'Scanning market for best signal...'})
+    # If num_trades is less than 1, default to 1
+    if num_trades < 1:
+        num_trades = 1
 
-    best_signal = None
-    preferred_symbol = symbol
-
-    if not is_trading_hours():
-        wait_mins = minutes_until_trading()
-        print(f'  [HOURS] Market inactive. Next window opens in ~{wait_mins} minutes.')
-        _set_active({'status': 'waiting',
-                     'message': f'Outside trading hours — market opens in ~{wait_mins}min (8am UTC)'})
-        waited = 0
-        MAX_WAIT = wait_mins + 10
-        while not is_trading_hours() and not should_stop(user_id) and waited < MAX_WAIT:
-            eventlet.sleep(300)
-            waited += 5
-        if not is_trading_hours():
-            results['message'] = 'Outside trading hours. Please start a session between 8am-10pm UTC.'
-            _clear_active(user_id)
-            return results
-
-    if preferred_symbol:
-        sig = generate_signal(preferred_symbol)
-        if sig:
-            best_signal = sig
-        else:
-            print(f'  [{preferred_symbol}] No signal on preferred pair — scanning all {len(CRYPTO_PAIRS)} pairs...')
-            best_signal = select_best_pair(CRYPTO_PAIRS)
-    else:
-        best_signal = select_best_pair(CRYPTO_PAIRS)
-
-    if not best_signal:
-        print('  No signal on any pair yet -- will rescan in 30s...')
-        scan_wait = 0
-        MAX_SCAN_WAIT = 600
-        while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
-            eventlet.sleep(30)
-            scan_wait += 30
-            print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
-            _set_active({'status': 'scanning',
-                         'message': f'Scanning all pairs... ({scan_wait}s)'})
-            best_signal = select_best_pair(CRYPTO_PAIRS)
-        if not best_signal:
-            results['message'] = 'No quality signal found after 10 minutes. Market conditions unclear — try again later.'
-            _clear_active(user_id)
-            return results
-
-    sym        = best_signal['symbol']
-    trade_dir  = best_signal['direction']
-    confidence = best_signal['confidence']
-    atr        = best_signal.get('atr', 0.001)
-    atr_pct    = best_signal.get('atr_pct', 0.3)
-
-    print(f'\nTrade 1/1: {sym} {trade_dir} | '
-          f'RSI:{best_signal["rsi"]:.2f} | Conf:{confidence:.0f}% | '
-          f'FUTURES | Market:{best_signal.get("market_condition","unknown")}')
-
-    if should_stop(user_id):
-        print(f'  [STOP] Stop received before order placement — aborting trade')
-        _clear_active(user_id)
-        return results
-
-    trade_usdt = min(amount, available_usdt * 0.95)
-    order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=session_lev)
-
-    if not order['success']:
-        print(f'  Entry failed: {order.get("error")}')
-        results['trades'].append({
-            'index': 1, 'symbol': sym, 'direction': trade_dir,
-            'strategy': 'momentum', 'confidence': confidence,
-            'rsi': best_signal['rsi'], 'profit': 0, 'won': False,
-            'price': 0, 'tps_hit': 0, 'real_order': False,
-            'message': order.get('error', 'Entry failed')
-        })
-        _clear_active(user_id)
-        return results
-
-    entry_price  = order['price']
-    quantity     = order['quantity']
-    monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
-    notional     = quantity * entry_price
-
-    if atr_pct < 0.30:
-        atr_sl_mult  = ATR_SL_MULT_LOW
-        atr_tp_mults = ATR_TP_MULTS_LOW
-    elif atr_pct > 0.5:
-        atr_sl_mult  = ATR_SL_MULT_HIGH
-        atr_tp_mults = ATR_TP_MULTS_HIGH
-    else:
-        atr_sl_mult  = ATR_SL_MULT_NORM
-        atr_tp_mults = ATR_TP_MULTS_NORM
-
-    if trade_dir == 'BUY':
-        sl_price  = entry_price - (atr * atr_sl_mult)
-        tp_prices = [entry_price + (atr * m) for m in atr_tp_mults]
-    else:
-        sl_price  = entry_price + (atr * atr_sl_mult)
-        tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
-
-    sl_dist_abs = abs(sl_price - entry_price)
-    min_sl_abs  = entry_price * MIN_SL_DISTANCE_PCT
-    if sl_dist_abs < min_sl_abs:
-        sl_price = (entry_price - min_sl_abs if trade_dir == 'BUY'
-                    else entry_price + min_sl_abs)
-        print(f'  [SL FIX] SL expanded to min 0.2% distance: ${sl_price:.6f}')
-
-    sl_pct_actual = abs(sl_price - entry_price) / entry_price
-    if sl_pct_actual > MAX_SL_PCT:
-        sl_price = (entry_price * (1 - MAX_SL_PCT) if trade_dir == 'BUY'
-                    else entry_price * (1 + MAX_SL_PCT))
-
-    trailing_sl_active = False
-    breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
-                    else entry_price * (1 - BREAKEVEN_BUFFER))
-
-    print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
-    print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
-          f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
-    print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
-
-    # Set native SL
-    try:
-        sl_resp = _bybit_signed_request('POST', '/v5/position/trading-stop', {
-            'category':    'linear',
-            'symbol':      monitor_sym,
-            'stopLoss':    str(round(sl_price, 6)),
-            'slTriggerBy': 'LastPrice',
-            'positionIdx': _get_position_idx(trade_dir, _user_exchange or bybit_futures),
-        }, _user_exchange or bybit_futures)
-        if sl_resp.get('retCode') == 0:
-            print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
-        else:
-            print(f'  [NATIVE SL] Could not set: {sl_resp.get("retMsg")} (monitoring loop will handle)')
-    except Exception as _sl_e:
-        print(f'  [NATIVE SL] Error: {_sl_e} (monitoring loop will handle)')
-
-    _set_active({
-        'active':        True,
-        'user_id':       user_id,
-        'pair':          sym,
-        'side':          trade_dir,
-        'entry':         entry_price,
-        'current_price': entry_price,
-        'pnl':           0.0,
-        'pnl_net':       0.0,
-        'pnl_pct':       0.0,
-        'tp_hits':       0,
-        'tp_prices':     [round(p, 6) for p in tp_prices],
-        'sl_price':      round(sl_price, 6),
-        'position_size': quantity,
-        'leverage':      session_lev,
-        'status':        'monitoring',
-        'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
-    })
-
-    try:
-        from app import socketio
-        socketio.emit('trade_entry', {
-            'trade_num': 1, 'symbol': sym, 'direction': trade_dir,
-            'price': entry_price, 'tp1': tp_prices[0], 'sl': sl_price,
-            'confidence': confidence, 'leverage': session_lev,
-        }, room=f'user_{user_id}')
-    except Exception:
-        pass
-
-    remaining_qty      = quantity
-    tps_hit            = 0
-    real_pnl           = 0.0
-    won                = False
-    trailing_sl_active = False
-    consecutive_errors = 0
-    MAX_CONSECUTIVE_ERRORS = 10
-    import time as _time_module
-    session_start_time = _time_module.time()
-    MAX_SESSION_SECONDS = 4 * 60 * 60
-    import math as _math
-
-    while remaining_qty > 0:
-      try:
-        elapsed = _time_module.time() - session_start_time
-        if elapsed > MAX_SESSION_SECONDS:
-            print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
-            _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
-            cr = None
-            for _attempt in range(3):
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                if cr.get('success'): break
-                eventlet.sleep(2)
-            if cr and cr.get('success'):
-                cp = cr['close_price']
-                pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
-                print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
-            remaining_qty = 0
+    # Loop over trades
+    for trade_index in range(num_trades):
+        if should_stop(user_id):
+            print(f'  [STOP] User stop received during trade loop – stopping')
             break
+
+        # Update scanning message
+        _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
+                     'message': f'Scanning for trade {trade_index+1}/{num_trades}...'})
+
+        best_signal = None
+        preferred_symbol = symbol
+
+        # Find signal
+        if preferred_symbol:
+            sig = generate_signal(preferred_symbol)
+            if sig:
+                best_signal = sig
+            else:
+                print(f'  [{preferred_symbol}] No signal on preferred pair — scanning all {len(CRYPTO_PAIRS)} pairs...')
+                best_signal = select_best_pair(CRYPTO_PAIRS)
+        else:
+            best_signal = select_best_pair(CRYPTO_PAIRS)
+
+        # If no signal, wait and rescan
+        if not best_signal:
+            print(f'  No signal for trade {trade_index+1} – waiting 30s...')
+            scan_wait = 0
+            MAX_SCAN_WAIT = 600
+            while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
+                eventlet.sleep(30)
+                scan_wait += 30
+                print(f'  Rescanning for trade {trade_index+1} (waited {scan_wait}s)...')
+                _set_active({'status': 'scanning',
+                             'message': f'Scanning for trade {trade_index+1}... ({scan_wait}s)'})
+                best_signal = select_best_pair(CRYPTO_PAIRS)
+            if not best_signal:
+                print(f'  [WARN] No signal found for trade {trade_index+1} – skipping')
+                continue
+
+        sym        = best_signal['symbol']
+        trade_dir  = best_signal['direction']
+        confidence = best_signal['confidence']
+        atr        = best_signal.get('atr', 0.001)
+        atr_pct    = best_signal.get('atr_pct', 0.3)
+
+        print(f'\nTrade {trade_index+1}/{num_trades}: {sym} {trade_dir} | '
+              f'RSI:{best_signal["rsi"]:.2f} | Conf:{confidence:.0f}% | '
+              f'FUTURES | Market:{best_signal.get("market_condition","unknown")}')
 
         if should_stop(user_id):
-            print(f'  User stop: closing {remaining_qty:.4f} at market')
-            cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-            if cr.get('success'):
-                cp  = cr['close_price']
-                pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
-                print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
-            remaining_qty = 0
+            print(f'  [STOP] Stop received before order placement – aborting trade {trade_index+1}')
             break
 
-        eventlet.sleep(6)
-
-        live_price = _get_price(monitor_sym, 'futures')
-        if not live_price:
-            consecutive_errors += 1
-            print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
-            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                try:
-                    close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                except Exception as _ce:
-                    print(f'  [MONITOR] Emergency close failed: {_ce}')
-                remaining_qty = 0
-            continue
-        consecutive_errors = 0
-
-        price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
-        pct_move     = price_diff / entry_price if entry_price > 0 else 0
-        live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
-        live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
-        live_pnl_pct = round(pct_move * session_lev * 100, 4)
-
-        if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
-            sl_price = breakeven_sl
-            trailing_sl_active = True
-            print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
-            _set_active({'sl_price': round(sl_price, 6),
-                         'message': f'Trailing SL active @ ${sl_price:.4f}'})
-
-        if trailing_sl_active:
-            if trade_dir == 'BUY':
-                new_trail = live_price - (atr * 1.0)
-                if new_trail > sl_price:
-                    sl_price = new_trail
-                    _set_active({'sl_price': round(sl_price, 6)})
-            else:
-                new_trail = live_price + (atr * 1.0)
-                if new_trail < sl_price:
-                    sl_price = new_trail
-                    _set_active({'sl_price': round(sl_price, 6)})
-
-        sl_buffer = live_price * 0.0005
-        sl_hit = (live_price <= sl_price + sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price - sl_buffer)
-        if sl_hit:
-            sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
-            print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
-            _set_active({'status': 'closing', 'current_price': live_price,
-                         'message': f'{sl_label} hit @ ${live_price:.4f}'})
-            cr = None
-            for _attempt in range(3):
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                if cr.get('success'):
-                    break
-                print(f'  {sl_label} close attempt {_attempt+1}/3 failed — retrying...')
-                eventlet.sleep(2)
-
-            if cr and cr.get('success'):
-                cp  = cr['close_price']
-                pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                pnl = pc * remaining_qty * entry_price * session_lev
-                real_pnl     += pnl
-                remaining_qty = 0
-                net = real_pnl - estimate_fees(notional)
-                print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
-            else:
-                print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
-                _set_active({'status': 'error',
-                             'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
-                remaining_qty = 0
+        # Use the base amount for each trade (could be updated per trade)
+        trade_usdt = min(amount, available_usdt * 0.95)
+        if trade_usdt <= 0:
+            print(f'  [WARN] Insufficient balance for trade {trade_index+1} – stopping')
             break
 
-        tp_triggered = False
-        for tp_idx in range(tps_hit, len(tp_prices)):
-            tp_price = tp_prices[tp_idx]
-            tp_hit_flag = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
-            if tp_hit_flag:
-                tp_triggered = True
-                instr    = _get_qty_step(monitor_sym)
-                step     = instr['step']
-                min_qty  = instr['min_qty']
-                tp_frac  = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
-                raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
-                decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-                close_qty = round(_math.floor(raw_q / step) * step, decimals)
-                close_qty = min(close_qty, remaining_qty)
+        order = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=session_lev)
 
-                if close_qty < min_qty or close_qty <= 0:
-                    tps_hit += 1
-                    continue
-
-                print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
-                cr = close_trade(monitor_sym, trade_dir, close_qty, exchange=_user_exchange)
-                actual_closed = cr.get('qty_closed', close_qty)
-                if cr.get('success'):
-                    cp        = cr['close_price']
-                    pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                    pnl_chunk = pc * actual_closed * entry_price * session_lev
-                    real_pnl      += pnl_chunk
-                    remaining_qty -= actual_closed
-                    tps_hit        = tp_idx + 1
-                    won            = True
-                    chunk_net = pnl_chunk - estimate_fees(actual_closed * entry_price)
-                    print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Net: ${chunk_net:.4f} | Remaining: {remaining_qty:.4f}')
-
-                    _set_active({
-                        'tp_hits':       tps_hit,
-                        'pnl':           round(real_pnl, 4),
-                        'pnl_net':       round(real_pnl - estimate_fees(notional), 4),
-                        'current_price': cp,
-                        'position_size': remaining_qty,
-                        'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Gross: ${real_pnl:.4f} | Net: ${chunk_net:.4f}',
-                    })
-
-                    try:
-                        from app import socketio
-                        socketio.emit('tp_hit', {
-                            'tp_num': tp_idx+1, 'price': cp,
-                            'pnl': pnl_chunk, 'pnl_net': chunk_net,
-                            'remaining': remaining_qty
-                        }, room=f'user_{user_id}')
-                    except Exception:
-                        pass
-
-                    if remaining_qty <= 0 or tps_hit >= len(tp_prices):
-                        remaining_qty = 0
-                break
-
-        if not tp_triggered:
-            _set_active({
-                'current_price': live_price,
-                'pnl':           live_pnl_now,
-                'pnl_net':       live_pnl_net,
-                'pnl_pct':       live_pnl_pct,
-                'tp_hits':       tps_hit,
-                'status':        'monitoring',
-                'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
+        if not order['success']:
+            print(f'  Entry failed for trade {trade_index+1}: {order.get("error")}')
+            results['trades'].append({
+                'index': trade_index+1, 'symbol': sym, 'direction': trade_dir,
+                'strategy': 'momentum', 'confidence': confidence,
+                'rsi': best_signal['rsi'], 'profit': 0, 'won': False,
+                'price': 0, 'tps_hit': 0, 'real_order': False,
+                'message': order.get('error', 'Entry failed')
             })
-            if int(_time_module.time()) % 30 < 6:
-                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
-                      f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
+            continue
 
+        entry_price  = order['price']
+        quantity     = order['quantity']
+        monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
+        notional     = quantity * entry_price
+
+        # Calculate TP/SL using ATR (same logic as before)
+        if atr_pct < 0.30:
+            atr_sl_mult  = ATR_SL_MULT_LOW
+            atr_tp_mults = ATR_TP_MULTS_LOW
+        elif atr_pct > 0.5:
+            atr_sl_mult  = ATR_SL_MULT_HIGH
+            atr_tp_mults = ATR_TP_MULTS_HIGH
+        else:
+            atr_sl_mult  = ATR_SL_MULT_NORM
+            atr_tp_mults = ATR_TP_MULTS_NORM
+
+        if trade_dir == 'BUY':
+            sl_price  = entry_price - (atr * atr_sl_mult)
+            tp_prices = [entry_price + (atr * m) for m in atr_tp_mults]
+        else:
+            sl_price  = entry_price + (atr * atr_sl_mult)
+            tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
+
+        # Enforce minimum SL distance
+        sl_dist_abs = abs(sl_price - entry_price)
+        min_sl_abs  = entry_price * MIN_SL_DISTANCE_PCT
+        if sl_dist_abs < min_sl_abs:
+            sl_price = (entry_price - min_sl_abs if trade_dir == 'BUY'
+                        else entry_price + min_sl_abs)
+            print(f'  [SL FIX] SL expanded to min 0.2% distance: ${sl_price:.6f}')
+
+        sl_pct_actual = abs(sl_price - entry_price) / entry_price
+        if sl_pct_actual > MAX_SL_PCT:
+            sl_price = (entry_price * (1 - MAX_SL_PCT) if trade_dir == 'BUY'
+                        else entry_price * (1 + MAX_SL_PCT))
+
+        trailing_sl_active = False
+        breakeven_sl = (entry_price * (1 + BREAKEVEN_BUFFER) if trade_dir == 'BUY'
+                        else entry_price * (1 - BREAKEVEN_BUFFER))
+
+        print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
+        print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
+              f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
+        print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
+
+        # Set native SL
+        try:
+            sl_resp = _bybit_signed_request('POST', '/v5/position/trading-stop', {
+                'category':    'linear',
+                'symbol':      monitor_sym,
+                'stopLoss':    str(round(sl_price, 6)),
+                'slTriggerBy': 'LastPrice',
+                'positionIdx': _get_position_idx(trade_dir, _user_exchange or bybit_futures),
+            }, _user_exchange or bybit_futures)
+            if sl_resp.get('retCode') == 0:
+                print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
+            else:
+                print(f'  [NATIVE SL] Could not set: {sl_resp.get("retMsg")} (monitoring loop will handle)')
+        except Exception as _sl_e:
+            print(f'  [NATIVE SL] Error: {_sl_e} (monitoring loop will handle)')
+
+        _set_active({
+            'active':        True,
+            'user_id':       user_id,
+            'pair':          sym,
+            'side':          trade_dir,
+            'entry':         entry_price,
+            'current_price': entry_price,
+            'pnl':           0.0,
+            'pnl_net':       0.0,
+            'pnl_pct':       0.0,
+            'tp_hits':       0,
+            'tp_prices':     [round(p, 6) for p in tp_prices],
+            'sl_price':      round(sl_price, 6),
+            'position_size': quantity,
+            'leverage':      session_lev,
+            'status':        'monitoring',
+            'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
+        })
+
+        try:
+            from app import socketio
+            socketio.emit('trade_entry', {
+                'trade_num': trade_index+1, 'symbol': sym, 'direction': trade_dir,
+                'price': entry_price, 'tp1': tp_prices[0], 'sl': sl_price,
+                'confidence': confidence, 'leverage': session_lev,
+            }, room=f'user_{user_id}')
+        except Exception:
+            pass
+
+        # Monitoring loop – identical to previous version
+        remaining_qty      = quantity
+        tps_hit            = 0
+        real_pnl           = 0.0
+        won                = False
+        trailing_sl_active = False
         consecutive_errors = 0
+        MAX_CONSECUTIVE_ERRORS = 10
+        import time as _time_module
+        session_start_time = _time_module.time()
+        MAX_SESSION_SECONDS = 4 * 60 * 60
+        import math as _math
 
-      except Exception as _loop_err:
-        consecutive_errors += 1
-        print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
-        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-            print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
+        while remaining_qty > 0:
             try:
-                close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-            except Exception as _ce:
-                print(f'  [MONITOR] Emergency close also failed: {_ce}')
-            remaining_qty = 0
+                elapsed = _time_module.time() - session_start_time
+                if elapsed > MAX_SESSION_SECONDS:
+                    print(f'  [TIMEOUT] Trade exceeded 4h — force closing')
+                    _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
+                    cr = None
+                    for _attempt in range(3):
+                        cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                        if cr.get('success'): break
+                        eventlet.sleep(2)
+                    if cr and cr.get('success'):
+                        cp = cr['close_price']
+                        pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        real_pnl += pc * remaining_qty * entry_price * session_lev
+                        print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
+                    remaining_qty = 0
+                    break
+
+                if should_stop(user_id):
+                    print(f'  User stop: closing {remaining_qty:.4f} at market')
+                    cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    if cr.get('success'):
+                        cp  = cr['close_price']
+                        pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        real_pnl += pc * remaining_qty * entry_price * session_lev
+                        print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
+                    remaining_qty = 0
+                    break
+
+                eventlet.sleep(6)
+
+                live_price = _get_price(monitor_sym, 'futures')
+                if not live_price:
+                    consecutive_errors += 1
+                    print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        try:
+                            close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                        except Exception as _ce:
+                            print(f'  [MONITOR] Emergency close failed: {_ce}')
+                        remaining_qty = 0
+                    continue
+                consecutive_errors = 0
+
+                price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
+                pct_move     = price_diff / entry_price if entry_price > 0 else 0
+                live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
+                live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
+                live_pnl_pct = round(pct_move * session_lev * 100, 4)
+
+                if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
+                    sl_price = breakeven_sl
+                    trailing_sl_active = True
+                    print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
+                    _set_active({'sl_price': round(sl_price, 6),
+                                 'message': f'Trailing SL active @ ${sl_price:.4f}'})
+
+                if trailing_sl_active:
+                    if trade_dir == 'BUY':
+                        new_trail = live_price - (atr * 1.0)
+                        if new_trail > sl_price:
+                            sl_price = new_trail
+                            _set_active({'sl_price': round(sl_price, 6)})
+                    else:
+                        new_trail = live_price + (atr * 1.0)
+                        if new_trail < sl_price:
+                            sl_price = new_trail
+                            _set_active({'sl_price': round(sl_price, 6)})
+
+                sl_buffer = live_price * 0.0005
+                sl_hit = (live_price <= sl_price + sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price - sl_buffer)
+                if sl_hit:
+                    sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
+                    print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
+                    _set_active({'status': 'closing', 'current_price': live_price,
+                                 'message': f'{sl_label} hit @ ${live_price:.4f}'})
+                    cr = None
+                    for _attempt in range(3):
+                        cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                        if cr.get('success'):
+                            break
+                        print(f'  {sl_label} close attempt {_attempt+1}/3 failed — retrying...')
+                        eventlet.sleep(2)
+
+                    if cr and cr.get('success'):
+                        cp  = cr['close_price']
+                        pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        pnl = pc * remaining_qty * entry_price * session_lev
+                        real_pnl     += pnl
+                        remaining_qty = 0
+                        net = real_pnl - estimate_fees(notional)
+                        print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
+                    else:
+                        print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
+                        _set_active({'status': 'error',
+                                     'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
+                        remaining_qty = 0
+                    break
+
+                tp_triggered = False
+                for tp_idx in range(tps_hit, len(tp_prices)):
+                    tp_price = tp_prices[tp_idx]
+                    tp_hit_flag = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
+                    if tp_hit_flag:
+                        tp_triggered = True
+                        instr    = _get_qty_step(monitor_sym)
+                        step     = instr['step']
+                        min_qty  = instr['min_qty']
+                        tp_frac  = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
+                        raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
+                        decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+                        close_qty = round(_math.floor(raw_q / step) * step, decimals)
+                        close_qty = min(close_qty, remaining_qty)
+
+                        if close_qty < min_qty or close_qty <= 0:
+                            tps_hit += 1
+                            continue
+
+                        print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
+                        cr = close_trade(monitor_sym, trade_dir, close_qty, exchange=_user_exchange)
+                        actual_closed = cr.get('qty_closed', close_qty)
+                        if cr.get('success'):
+                            cp        = cr['close_price']
+                            pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                            pnl_chunk = pc * actual_closed * entry_price * session_lev
+                            real_pnl      += pnl_chunk
+                            remaining_qty -= actual_closed
+                            tps_hit        = tp_idx + 1
+                            won            = True
+                            chunk_net = pnl_chunk - estimate_fees(actual_closed * entry_price)
+                            print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Net: ${chunk_net:.4f} | Remaining: {remaining_qty:.4f}')
+
+                            _set_active({
+                                'tp_hits':       tps_hit,
+                                'pnl':           round(real_pnl, 4),
+                                'pnl_net':       round(real_pnl - estimate_fees(notional), 4),
+                                'current_price': cp,
+                                'position_size': remaining_qty,
+                                'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Gross: ${real_pnl:.4f} | Net: ${chunk_net:.4f}',
+                            })
+
+                            try:
+                                from app import socketio
+                                socketio.emit('tp_hit', {
+                                    'tp_num': tp_idx+1, 'price': cp,
+                                    'pnl': pnl_chunk, 'pnl_net': chunk_net,
+                                    'remaining': remaining_qty
+                                }, room=f'user_{user_id}')
+                            except Exception:
+                                pass
+
+                            if remaining_qty <= 0 or tps_hit >= len(tp_prices):
+                                remaining_qty = 0
+                        break
+
+                if not tp_triggered:
+                    _set_active({
+                        'current_price': live_price,
+                        'pnl':           live_pnl_now,
+                        'pnl_net':       live_pnl_net,
+                        'pnl_pct':       live_pnl_pct,
+                        'tp_hits':       tps_hit,
+                        'status':        'monitoring',
+                        'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
+                    })
+                    if int(_time_module.time()) % 30 < 6:
+                        print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
+                              f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
+
+                consecutive_errors = 0
+
+            except Exception as _loop_err:
+                consecutive_errors += 1
+                print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
+                    try:
+                        close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    except Exception as _ce:
+                        print(f'  [MONITOR] Emergency close also failed: {_ce}')
+                    remaining_qty = 0
+                    break
+                eventlet.sleep(6)
+
+        # After trade finishes, update results and balance
+        real_pnl = round(real_pnl, 4)
+        real_pnl_net = round(real_pnl - estimate_fees(notional), 4)
+
+        won = real_pnl_net > 0
+        results['trades'].append({
+            'index':            trade_index+1,
+            'symbol':           sym,
+            'direction':        trade_dir,
+            'strategy':         'momentum',
+            'confidence':       confidence,
+            'rsi':              best_signal['rsi'],
+            'ema_trend':        best_signal.get('ema_trend', ''),
+            'macd_trend':       best_signal.get('macd_trend', ''),
+            'volume_trend':     best_signal.get('volume_trend', 'neutral'),
+            'candle_pattern':   best_signal.get('candle_pattern', 'none'),
+            'market_condition': best_signal.get('market_condition', 'unknown'),
+            'profit':           real_pnl,
+            'profit_net':       real_pnl_net,
+            'won':              won,
+            'price':            entry_price,
+            'tps_hit':          tps_hit,
+            'real_order':       True,
+        })
+        results['net_pnl']             += real_pnl
+        results['net_pnl_after_fees']  += real_pnl_net
+        results['total_trades']        += 1
+        results['wins']                += 1 if won else 0
+        results['losses']              += 0 if won else 1
+
+        # Update available balance for next trade
+        available_usdt += real_pnl_net
+
+        # If balance is too low, stop
+        if available_usdt < 1:
+            print(f'  [WARN] Balance too low for next trade – stopping')
             break
-        eventlet.sleep(6)
 
-    real_pnl = round(real_pnl, 4)
-    real_pnl_net = round(real_pnl - estimate_fees(notional), 4)
+        # Small delay between trades
+        eventlet.sleep(1)
 
-    _set_active({
-        'active':   False,
-        'status':   'closed',
-        'pnl':      real_pnl,
-        'pnl_net':  real_pnl_net,
-        'tp_hits':  tps_hit,
-        'message':  f'Trade closed | Gross: ${real_pnl:.4f} | Net after fees: ${real_pnl_net:.4f} | TPs: {tps_hit}/4',
-    })
-
-    won = real_pnl_net > 0
-    results['trades'].append({
-        'index':            1,
-        'symbol':           sym,
-        'direction':        trade_dir,
-        'strategy':         'momentum',
-        'confidence':       confidence,
-        'rsi':              best_signal['rsi'],
-        'ema_trend':        best_signal.get('ema_trend', ''),
-        'macd_trend':       best_signal.get('macd_trend', ''),
-        'volume_trend':     best_signal.get('volume_trend', 'neutral'),
-        'candle_pattern':   best_signal.get('candle_pattern', 'none'),
-        'market_condition': best_signal.get('market_condition', 'unknown'),
-        'profit':           real_pnl,
-        'profit_net':       real_pnl_net,
-        'won':              won,
-        'price':            entry_price,
-        'tps_hit':          tps_hit,
-        'real_order':       True,
-    })
-    results['net_pnl']             += real_pnl
-    results['net_pnl_after_fees']  += real_pnl_net
-    results['total_trades']        += 1
-    results['wins']                += 1 if won else 0
-    results['losses']              += 0 if won else 1
-
+    # Clear active trade state after all trades
     _clear_active(user_id)
     results['net_pnl']  = round(results['net_pnl'], 4)
     results['net_pnl_after_fees'] = round(results['net_pnl_after_fees'], 4)
@@ -1881,6 +1905,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                             user_id=None, user_balance=None,
                             user_api_key=None, user_api_secret=None,
                             user_exchange=None):
+    # (unchanged – kept identical to your version)
     results = {
         'strategy':     'pickup',
         'trades':       [],
@@ -2057,6 +2082,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                                 user_id=None, user_balance=None,
                                 user_api_key=None, user_api_secret=None,
                                 user_exchange=None):
+    # (unchanged – kept identical to your version)
     results = {
         'strategy':     'always_win',
         'trades':       [],
@@ -2224,7 +2250,7 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
         }
     symbol = best_signal['symbol']
     print(f'  Auto-best: {symbol} | {best_signal["direction"]} {best_signal["confidence"]:.0f}% → Momentum')
-    results = execute_momentum_session(amount, timeframe_minutes,
+    results = execute_momentum_session(amount, timeframe_minutes, num_trades=1,
                                        symbol=symbol, user_id=user_id,
                                        user_balance=user_balance,
                                        user_trade_mode='futures',
@@ -2238,13 +2264,13 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
 # ============================================
 def execute_session(amount, timeframe_minutes, strategy='auto', force=False, symbol=None,
                     user_leverage=None, user_api_key=None, user_api_secret=None,
-                    user_id=None, user_balance=None):
+                    user_id=None, user_balance=None, num_trades=1):
     strategy = strategy.lower().strip()
 
     use_user_account = bool(user_api_key and user_api_secret)
     if use_user_account:
         print(f'\n{"="*50}')
-        print(f'NexerTrade session | Strategy: {strategy.upper()} | Amount: ${amount} | Trades: 1 | 4 TPs + SL'
+        print(f'NexerTrade session | Strategy: {strategy.upper()} | Amount: ${amount} | Trades: {num_trades} | 4 TPs + SL'
               f'{" | Leverage: "+str(user_leverage)+"x" if user_leverage else ""}')
         print(f'  Mode: USER ACCOUNT (trading on user\'s own Bybit)')
         print(f'{"="*50}')
@@ -2261,7 +2287,7 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                 _user_live_bal = 50.0
     else:
         print(f'\n{"="*50}')
-        print(f'NexerTrade session | Strategy: {strategy.upper()} | Amount: ${amount} | Trades: 1 | 4 TPs + SL')
+        print(f'NexerTrade session | Strategy: {strategy.upper()} | Amount: ${amount} | Trades: {num_trades} | 4 TPs + SL')
         print(f'  Mode: ADMIN ACCOUNT (legacy)')
         print(f'{"="*50}')
         _original_spot    = None
@@ -2274,8 +2300,12 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
         LEVERAGE = user_leverage
         print(f'  Leverage set to {user_leverage}x by user selection')
 
+    # Ensure num_trades is at least 1
+    if num_trades < 1:
+        num_trades = 1
+
     if strategy == 'momentum':
-        result = execute_momentum_session(amount, timeframe_minutes,
+        result = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
                                           force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
@@ -2304,7 +2334,7 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                                            user_balance=_user_live_bal,
                                            user_exchange=user_futures if use_user_account else None)
     else:
-        result = execute_momentum_session(amount, timeframe_minutes,
+        result = execute_momentum_session(amount, timeframe_minutes, num_trades=num_trades,
                                           force=force, symbol=symbol,
                                           user_id=user_id,
                                           user_balance=_user_live_bal,
