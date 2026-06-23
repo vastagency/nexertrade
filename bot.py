@@ -27,6 +27,7 @@ import time
 import math
 import random
 import requests
+import eventlet
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -175,6 +176,10 @@ ENFORCE_TRADING_HOURS = False  # DISABLED — 24/7 trading enabled
 # Fee estimation for net PnL display
 # Bybit taker fee = 0.055% per side → ~0.11% round trip
 BYBIT_FEE_RATE = 0.00055  # per side (taker)
+
+# Time-based exit: close trade if no TP/SL hit after 15 minutes
+# Prevents indefinite waiting in choppy markets
+MAX_TRADE_DURATION_MINUTES = 15
 
 
 # ============================================
@@ -1409,7 +1414,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         waited = 0
         MAX_WAIT = wait_mins + 10  # don't wait more than needed + buffer
         while not is_trading_hours() and not should_stop(user_id) and waited < MAX_WAIT:
-            time.sleep(300)  # 5 minutes
+            eventlet.sleep(300)  # 5 minutes
             waited += 5
         if not is_trading_hours():
             results['message'] = 'Outside trading hours. Please start a session between 8am-10pm UTC.'
@@ -1432,7 +1437,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         scan_wait = 0
         MAX_SCAN_WAIT = 600
         while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
-            time.sleep(30)
+            eventlet.sleep(30)
             scan_wait += 30
             print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
             _set_active({'status': 'scanning',
@@ -1562,6 +1567,23 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     while remaining_qty > 0:
       try:
         elapsed = _time_module.time() - session_start_time
+        # Time-based exit: close after MAX_TRADE_DURATION_MINUTES if no TP/SL hit
+        if elapsed > MAX_TRADE_DURATION_MINUTES * 60:
+            print(f'  [TIMEOUT] Trade duration exceeded {MAX_TRADE_DURATION_MINUTES} min — closing at market')
+            _set_active({'status': 'closing', 'message': f'Time limit ({MAX_TRADE_DURATION_MINUTES} min) reached — closing'})
+            cr = None
+            for _attempt in range(3):
+                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                if cr.get('success'): break
+                eventlet.sleep(2)
+            if cr and cr.get('success'):
+                cp = cr['close_price']
+                pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                real_pnl += pc * remaining_qty * entry_price * LEVERAGE
+                print(f'  [TIMEOUT] Closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
+            remaining_qty = 0
+            break
+
         if elapsed > MAX_SESSION_SECONDS:
             print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
             _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
@@ -1569,7 +1591,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             for _attempt in range(3):
                 cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
                 if cr.get('success'): break
-                time.sleep(2)
+                eventlet.sleep(2)
             if cr and cr.get('success'):
                 cp = cr['close_price']
                 pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
@@ -1589,7 +1611,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             remaining_qty = 0
             break
 
-        time.sleep(6)
+        eventlet.sleep(6)
 
         live_price = _get_price(monitor_sym, 'futures')
         if not live_price:
@@ -1643,7 +1665,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 if cr.get('success'):
                     break
                 print(f'  {sl_label} close attempt {_attempt+1}/3 failed — retrying...')
-                time.sleep(2)
+                eventlet.sleep(2)
 
             if cr and cr.get('success'):
                 cp  = cr['close_price']
@@ -1717,6 +1739,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 break
 
         if not tp_triggered:
+            # Always update state dict (used by /api/live_status polling)
             _set_active({
                 'current_price': live_price,
                 'pnl':           live_pnl_now,
@@ -1726,8 +1749,10 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 'status':        'monitoring',
                 'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
             })
-            print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
-                  f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
+            # Throttle log output: print only every 30 seconds to reduce log spam
+            if int(_time_module.time()) % 30 < 6:
+                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
+                      f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
 
         consecutive_errors = 0
 
@@ -1742,7 +1767,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 print(f'  [MONITOR] Emergency close also failed: {_ce}')
             remaining_qty = 0
             break
-        time.sleep(6)
+        eventlet.sleep(6)
 
     real_pnl = round(real_pnl, 4)
     real_pnl_net = round(real_pnl - estimate_fees(notional), 4)
@@ -1886,7 +1911,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                     sell_pnl += ((sell_entry - cp) / sell_entry) * sell_remaining * sell_entry * LEVERAGE
             break
 
-        time.sleep(6)
+        eventlet.sleep(6)
         live_price = _get_price(sym, 'futures')
         if not live_price:
             continue
@@ -2045,7 +2070,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                     real_pnl += pc * total_qty * avg * LEVERAGE
             break
 
-        time.sleep(6)
+        eventlet.sleep(6)
         live_price = _get_price(sym, 'futures')
         if not live_price:
             continue
@@ -2297,4 +2322,3 @@ def get_market_overview():
         overview['recommended_strategy'] = 'momentum'
 
     return overview
-    

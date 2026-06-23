@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from models import db, User, Deposit, Withdrawal, TradeSession, PlatformSetting
 from datetime import datetime, timedelta
 from functools import wraps
-import threading
+import threading  # used for _trade_jobs_lock only
 import uuid
 
 # In-memory job store for async trading sessions
@@ -877,14 +877,12 @@ def api_bot_execute():
         u_api_key    = current_user.bybit_api_key
         u_api_secret = current_user.bybit_api_secret
 
-        t = threading.Thread(
-            target=_run_trade_job,
-            args=(job_id, current_user.id, amount, timeframe, strategy, force,
-                  compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
-                  current_user.id),
-            daemon=True
+        eventlet.spawn_n(
+            _run_trade_job,
+            job_id, current_user.id, amount, timeframe, strategy, force,
+            compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
+            current_user.id
         )
-        t.start()
         return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': 1}), 202
 
     except Exception as e:
