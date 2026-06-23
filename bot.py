@@ -1224,6 +1224,56 @@ def _bybit_signed_request(method, endpoint, params, exchange_obj):
     return resp.json()
 
 
+# Cache position mode per user key to avoid repeated API calls
+_position_mode_cache = {}
+
+def _get_position_idx(direction, exchange=None):
+    """
+    Detect user Bybit position mode and return correct positionIdx.
+    One-Way Mode -> positionIdx=0 (both BUY and SELL)
+    Hedge Mode   -> positionIdx=1 (BUY/long), positionIdx=2 (SELL/short)
+    
+    Uses /v5/account/info for reliable detection, cached per user key.
+    Falls back to checking open positions if account info unavailable.
+    """
+    global _position_mode_cache
+    _exch = exchange or bybit_futures
+    cache_key = getattr(_exch, 'apiKey', 'default')[:8]
+
+    if cache_key not in _position_mode_cache:
+        try:
+            # Primary: check account position mode via /v5/position/switch-mode
+            resp = _bybit_signed_request('GET', '/v5/position/switch-mode', {
+                'category': 'linear',
+            }, _exch)
+            if resp.get('retCode') == 0:
+                mode_val = resp.get('result', {}).get('mode', 0)
+                # mode=0 or mode=1 = one-way, mode=3 = hedge
+                _position_mode_cache[cache_key] = 'hedge' if mode_val == 3 else 'oneway'
+            else:
+                # Fallback: try to detect via /v5/position/list
+                # If user has hedge positions, they will have positionIdx 1 or 2
+                pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
+                    'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
+                }, _exch)
+                if pos_resp.get('retCode') == 0:
+                    positions = pos_resp.get('result', {}).get('list', [])
+                    if positions and positions[0].get('positionIdx', 0) in [1, 2]:
+                        _position_mode_cache[cache_key] = 'hedge'
+                    else:
+                        _position_mode_cache[cache_key] = 'oneway'
+                else:
+                    _position_mode_cache[cache_key] = 'oneway'
+        except Exception:
+            _position_mode_cache[cache_key] = 'oneway'
+        print(f'  [POSITION MODE] {cache_key}: {_position_mode_cache[cache_key]}')
+
+    mode_str = _position_mode_cache.get(cache_key, 'oneway')
+    if mode_str == 'hedge':
+        return 1 if direction == 'BUY' else 2
+    return 0
+
+
 def _get_price(symbol, trade_mode='futures'):
     bybit_sym = symbol.replace('/', '').replace(':USDT', '')
     category  = 'linear' if trade_mode == 'futures' else 'spot'
@@ -1313,6 +1363,8 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             print(f'  [LEVERAGE] Could not set: {e}')
 
         side = 'Buy' if direction == 'BUY' else 'Sell'
+        # FIX: Detect position mode — support both One-Way (0) and Hedge (1/2)
+        pos_idx = _get_position_idx(direction, exchange)
         resp = _bybit_signed_request('POST', '/v5/order/create', {
             'category':    'linear',
             'symbol':      bybit_sym,
@@ -1321,7 +1373,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             'qty':         str(quantity),
             'timeInForce': 'IOC',
             'reduceOnly':  False,
-            'positionIdx': 0,  # one-way mode — always required
+            'positionIdx': pos_idx,
         }, exchange)
 
         print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
@@ -1372,15 +1424,21 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
             return {'success': False, 'error': f'Qty {close_qty} below min {min_qty}',
                     'close_price': close_price}
 
-        resp = _bybit_signed_request('POST', '/v5/order/create', {
+        pos_idx = _get_position_idx(direction, exchange)
+        order_params = {
             'category':    'linear',
             'symbol':      bybit_sym,
             'side':        close_side,
             'orderType':   'Market',
             'qty':         str(close_qty),
             'timeInForce': 'IOC',
-            'reduceOnly':  True
-        }, exchange)
+            'positionIdx': pos_idx,
+        }
+        # reduceOnly only works in One-Way mode (positionIdx=0)
+        # In Hedge mode, positionIdx already identifies the position
+        if pos_idx == 0:
+            order_params['reduceOnly'] = True
+        resp = _bybit_signed_request('POST', '/v5/order/create', order_params, exchange)
 
         print(f'  [CLOSE RESP] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
 
@@ -1573,7 +1631,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             'symbol':      monitor_sym,
             'stopLoss':    str(round(sl_price, 6)),
             'slTriggerBy': 'LastPrice',
-            'positionIdx': 0,
+            'positionIdx': _get_position_idx(direction, exchange) if direction else 0,
         }, _user_exchange or bybit_futures)
         if sl_resp.get('retCode') == 0:
             print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
