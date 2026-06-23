@@ -1115,7 +1115,21 @@ async function resumeActiveSessionIfAny() {
     const res  = await fetch('/api/active_session');
     const data = await res.json();
 
-    if (!data.active || !data.job_id) return;  // no active session
+    // FIX: If server says no active session but UI is stuck, force reset
+    if (!data.active || !data.job_id) {
+      if (isTrading) {
+        console.log('[RECOVER] No active session on server but UI is trading — resetting');
+        isTrading = false;
+        const btn = document.getElementById('mainActionBtn');
+        if (btn) {
+          btn.classList.remove('stopping');
+          document.getElementById('actionBtnIcon').innerHTML = '<polygon points="5 3 19 12 5 21 5 3"/>';
+          document.getElementById('actionBtnText').textContent = 'START TRADING';
+        }
+        document.querySelectorAll('.quick-btn, .trade-amount-input').forEach(el => el.disabled = false);
+      }
+      return;
+    }
 
     console.log('[RECOVER] Active session found:', data.job_id, data.recovering ? '(recovering from restart)' : '');
 
@@ -1149,6 +1163,15 @@ async function resumeActiveSessionIfAny() {
       if (!isTrading) break;
       try {
         const pollRes  = await fetch(`/api/bot/result/${jobId}`);
+        
+        // FIX: If job not found (Railway restart killed it), reset and unblock UI
+        if (pollRes.status === 404) {
+          console.log('[RECOVER] Job not found (Railway restart) — resetting session state');
+          try { await fetch('/api/bot/kill', {method:'POST',headers:{'Content-Type':'application/json'}}); } catch(_) {}
+          stopSession(false);
+          return;
+        }
+        
         const pollData = await pollRes.json();
 
         if (pollData.status === 'running') {
@@ -1157,9 +1180,10 @@ async function resumeActiveSessionIfAny() {
           continue;
         }
         if (pollData.status === 'not_found') {
-          const el = document.getElementById('sessionStatusTitle');
-          if (el) el.textContent = 'Trading live... monitoring position';
-          continue;
+          console.log('[RECOVER] Job not_found in memory — resetting');
+          try { await fetch('/api/bot/kill', {method:'POST',headers:{'Content-Type':'application/json'}}); } catch(_) {}
+          stopSession(false);
+          return;
         }
         if (pollData.status === 'error') {
           const el = document.getElementById('sessionStatusTitle');
@@ -1168,7 +1192,18 @@ async function resumeActiveSessionIfAny() {
           return;
         }
         if (pollData.status === 'done') { botData = pollData; break; }
-      } catch (pollErr) { console.warn('[RECOVER] Poll failed, retrying:', pollErr); }
+      } catch (pollErr) { 
+        console.warn('[RECOVER] Poll failed:', pollErr);
+        // After 3 consecutive errors, give up and reset
+        if (!window._pollErrors) window._pollErrors = 0;
+        window._pollErrors++;
+        if (window._pollErrors >= 3) {
+          console.log('[RECOVER] Too many poll errors — resetting session');
+          try { await fetch('/api/bot/kill', {method:'POST',headers:{'Content-Type':'application/json'}}); } catch(_) {}
+          stopSession(false);
+          return;
+        }
+      }
     }
 
     if (botData) stopSession(true, botData);

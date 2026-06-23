@@ -893,6 +893,8 @@ def api_bot_execute():
 @app.route('/api/active_session')
 @login_required
 def api_active_session():
+    # FIX: Auto-clear stuck sessions from Railway restarts
+    # If user has active_job_id but job doesn't exist in _trade_jobs, clear it
     """
     Returns the user's active job_id if one is persisted in DB.
     Called on page load so the frontend can resume polling after refresh/logout.
@@ -1492,10 +1494,41 @@ def api_bot_kill():
             'net_pnl': 0, 'wins': 0, 'losses': 0,
             'win_rate': 0, 'balance': live_bal
         }, room=f'user_{current_user.id}')
+        # FIX: Always clear active_job_id from DB so UI unblocks
+        try:
+            current_user.active_job_id = None
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         return jsonify({'success': True, 'killed': killed,
                         'message': 'Session force-completed.'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/api/bot/reset', methods=['POST'])
+@login_required
+def api_bot_reset():
+    """
+    Hard reset — clears all session state for this user.
+    Use when UI is stuck after Railway restart and kill did not work.
+    """
+    try:
+        from bot import _clear_active, clear_stop
+        _clear_active(current_user.id)
+        clear_stop(current_user.id)
+        current_user.active_job_id = None
+        db.session.commit()
+        live_bal = get_display_balance(current_user)
+        socketio.emit('session_complete', {
+            'net_pnl': 0, 'wins': 0, 'losses': 0,
+            'win_rate': 0, 'balance': live_bal
+        }, room=f'user_{current_user.id}')
+        return jsonify({'success': True, 'message': 'Session state reset. You can start a new trade.'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 @app.route('/api/bot/signal')
 @login_required
 def api_bot_signal():
