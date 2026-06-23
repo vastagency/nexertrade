@@ -2258,8 +2258,7 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
         user_futures      = None
 
     if user_leverage and isinstance(user_leverage, int) and user_leverage in (2, 3, 4, 5, 10):
-        # FIX: Set global LEVERAGE as default — session functions capture it locally
-        # This avoids the race condition when two users run different leverages simultaneously
+        global LEVERAGE
         LEVERAGE = user_leverage
         print(f'  Leverage set to {user_leverage}x by user selection')
 
