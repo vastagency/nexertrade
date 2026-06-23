@@ -1275,6 +1275,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
     FIX: exchange param used — trades on correct user account.
     """
     exchange  = exchange or bybit_futures
+    session_lev = leverage if leverage is not None else LEVERAGE  # FIX: use passed leverage not global
     bybit_sym = symbol.replace('/', '').replace(':USDT', '')
     if not bybit_sym.endswith('USDT'):
         bybit_sym = bybit_sym + 'USDT'
