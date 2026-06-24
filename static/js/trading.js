@@ -1,11 +1,6 @@
 /* ============================================
    NEXERTRADE — TRADING PAGE JAVASCRIPT
-   Version 3 — TP Display + Dynamic Risk UI
-   FIXES:
-   1. Individual TP prices now displayed in live trade panel
-   2. TP progress shows actual prices (TP1: $0.1234, TP2: $0.1235, etc.)
-   3. Dynamic confidence threshold display for different trade sizes
-   4. Risk warning when position > 30% of balance
+   Version 2 — Fixed timing, chart & win rate
 ============================================ */
 
 // ============================================
@@ -148,28 +143,6 @@ document.querySelectorAll('.lev-btn').forEach(btn => {
 // ============================================
 const tradeAmountInput = document.getElementById('tradeAmount');
 
-// FIX: Show risk warning when amount changes
-function updateRiskWarning() {
-    const amount = parseInt(tradeAmountInput ? tradeAmountInput.value : selectedAmount);
-    if (availableBalance > 0) {
-        const positionPct = (amount * selectedLeverage) / availableBalance;
-        const riskEl = document.getElementById('riskWarning');
-        if (riskEl) {
-            if (positionPct > 0.50) {
-                riskEl.textContent = `⚠️ HIGH RISK: ${(positionPct*100).toFixed(1)}% of balance at ${selectedLeverage}x`;
-                riskEl.style.color = '#ef4444';
-                riskEl.style.display = 'block';
-            } else if (positionPct > 0.30) {
-                riskEl.textContent = `⚠️ ${(positionPct*100).toFixed(1)}% of balance at ${selectedLeverage}x — consider reducing`;
-                riskEl.style.color = '#f59e0b';
-                riskEl.style.display = 'block';
-            } else {
-                riskEl.style.display = 'none';
-            }
-        }
-    }
-}
-
 document.querySelectorAll('.quick-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     if (isTrading) return;
@@ -177,7 +150,6 @@ document.querySelectorAll('.quick-btn').forEach(btn => {
     btn.classList.add('active');
     selectedAmount = parseInt(btn.dataset.amount);
     if (tradeAmountInput) tradeAmountInput.value = selectedAmount;
-    updateRiskWarning();
   });
 });
 
@@ -189,16 +161,8 @@ if (tradeAmountInput) {
     document.querySelectorAll('.quick-btn').forEach(b => {
       b.classList.toggle('active', parseInt(b.dataset.amount) === selectedAmount);
     });
-    updateRiskWarning();
   });
 }
-
-// Also update risk when leverage changes
-document.querySelectorAll('.lev-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        setTimeout(updateRiskWarning, 50);
-    });
-});
 
 
 // ============================================
@@ -422,10 +386,6 @@ async function startSession(force = false) {
   document.getElementById('statLosses').textContent = '0';
   document.getElementById('statPnl').textContent    = '+$0.0000';
   document.getElementById('statPnl').className      = 'session-stat-value mono large positive';
-
-  // Reset TP display
-  const tpContainer = document.getElementById('tpPricesContainer');
-  if (tpContainer) tpContainer.innerHTML = '';
 
   const list = document.getElementById('tradeStreamList');
   if (list) list.innerHTML = '<p class="trade-stream-empty">Fetching real market signals...</p>';
@@ -1040,6 +1000,16 @@ function updateLiveTradeUI(data) {
     // Show panel with REAL data from backend
     if (panel) panel.style.display = 'block';
 
+    // Ensure TP prices container exists in the panel (create dynamically if template missing it)
+    if (panel && !document.getElementById('liveTradeTpPrices')) {
+        const tpContainer = document.createElement('div');
+        tpContainer.style.cssText = 'margin-top:10px;border-top:1px solid #2a3142;padding-top:10px;';
+        tpContainer.innerHTML = '<div style="color:#6b7280;font-size:11px;margin-bottom:6px;font-weight:600;letter-spacing:0.05em;">TARGET PRICES</div><div id="liveTradeTpPrices"></div>';
+        const lastChild = panel.querySelector('.live-trade-grid') || panel.lastElementChild;
+        if (lastChild) lastChild.after(tpContainer);
+        else panel.appendChild(tpContainer);
+    }
+
     const pnlVal   = typeof data.pnl === 'number' ? data.pnl : 0;
     const pnlPct   = typeof data.pnl_pct === 'number' ? data.pnl_pct : 0;
     const pnlSign  = pnlVal >= 0 ? '+' : '';
@@ -1067,43 +1037,28 @@ function updateLiveTradeUI(data) {
         barEl.style.width = width + '%';
     }
 
-    // ============================================
-    // FIX: Display Individual TP Prices
-    // ============================================
-    const tpContainer = document.getElementById('tpPricesContainer');
-    if (tpContainer && data.tp_prices && data.tp_prices.length > 0) {
-        const tpPrices = data.tp_prices;
+    // TP PRICES DISPLAY — show exact TP levels instead of just 0/4
+    const tpListEl = document.getElementById('liveTradeTpPrices');
+    if (tpListEl && data.tp_prices && data.tp_prices.length > 0) {
         const tpHits = data.tp_hits || 0;
-        let html = '';
-        const tpLabels = ['TP1', 'TP2', 'TP3', 'TP4'];
-        const tpColors = ['#00D48B', '#F5C518', '#FF8C00', '#FF4D4D'];
-        
-        tpPrices.forEach((price, index) => {
-            if (index < 4) {
-                const isHit = index < tpHits;
-                const color = isHit ? '#00D48B' : '#4a5568';
-                const strike = isHit ? 'text-decoration: line-through;' : '';
-                html += `
-                    <span style="font-size:12px; color:${color}; ${strike} margin-right:12px;">
-                        ${tpLabels[index]}: $${typeof price === 'number' ? price.toFixed(4) : '0.0000'}
-                    </span>
-                `;
-            }
-        });
-        
-        // Add SL display
-        if (data.sl_price) {
-            html += `
-                <span style="font-size:12px; color:#ef4444; margin-left:8px;">
-                    SL: $${typeof data.sl_price === 'number' ? data.sl_price.toFixed(4) : '0.0000'}
+        const tps = data.tp_prices;
+        const isBuy = data.side === 'BUY';
+        tpListEl.innerHTML = tps.map((tp, i) => {
+            const hit     = i < tpHits;
+            const current = i === tpHits;
+            const pct     = ['30%', '25%', '25%', '20%'][i] || '';
+            const color   = hit ? '#00D48B' : (current ? '#F5C518' : '#4a5568');
+            const icon    = hit ? '✓' : (current ? '▶' : '○');
+            const dec     = tp > 100 ? 2 : tp > 1 ? 4 : 6;
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;opacity:${hit || current ? 1 : 0.5};">
+                <span style="color:${color};font-size:11px;font-weight:700;min-width:16px;">${icon}</span>
+                <span style="color:#8892a4;font-size:11px;min-width:28px;">TP${i+1}</span>
+                <span style="color:${color};font-size:12px;font-family:monospace;font-weight:${current ? 700 : 400};">
+                    $${parseFloat(tp).toFixed(dec)}
                 </span>
-            `;
-        }
-        
-        tpContainer.innerHTML = html;
-        tpContainer.style.display = 'block';
-    } else if (tpContainer) {
-        tpContainer.style.display = 'none';
+                <span style="color:#4a5568;font-size:10px;">${pct}</span>
+            </div>`;
+        }).join('');
     }
 
     // Also update the session status title if we have a real pair
