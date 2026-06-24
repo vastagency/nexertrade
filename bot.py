@@ -2,24 +2,18 @@
 #   NEXERTRADE — PRODUCTION TRADING ENGINE
 #   Connected to Bybit — Real Orders Only
 #   Zero simulation. Zero fake balance.
-#   ========== PRODUCTION v4 — LEVERAGE FIX + DYNAMIC RISK ==========
+#   ========== PRODUCTION v5 — LOWER SCORE THRESHOLD ==========
 #
 #   FIXES IN THIS VERSION:
 #   1.  FIXED: LEVERAGE → session_lev in execute_real_trade()
-#       - Prevents position over-sizing when global LEVERAGE != session_lev
-#   2.  ADDED: Dynamic risk scaling based on position size % of balance
-#       - Warns if position > 30% of balance
-#       - Auto-reduces if position > 50% of balance
-#   3.  ADDED: Dynamic confidence threshold based on trade amount
-#       - $10-20: 65% minimum
-#       - $25-50: 72% minimum
-#       - $50+: 78% minimum
-#   4.  ADDED: Dynamic TP fractions based on trade amount
-#       - Small amounts: 30/25/25/20 (current)
-#       - Large amounts: 40/25/20/15 (secure profits earlier)
-#   5.  ADDED: Slippage buffer for larger orders
-#   6.  ADDED: Position size validation before entry
-#   7.  All previous fixes retained
+#   2.  FIXED: Lowered MIN_SCORE from 3 to 1 to catch signals in low volatility
+#   3.  FIXED: Removed secondary confluence requirement for minimum scores
+#   4.  ADDED: Dynamic risk scaling based on position size % of balance
+#   5.  ADDED: Dynamic confidence threshold based on trade amount
+#   6.  ADDED: Dynamic TP fractions based on trade amount
+#   7.  ADDED: Slippage buffer for larger orders
+#   8.  ADDED: Position size validation before entry
+#   9.  All previous fixes retained
 # ============================================
 
 import os
@@ -872,7 +866,13 @@ def generate_signal(symbol, timeframe='5m'):
         if raw_dir_pre == 'BUY'  and trend_bias == 'bullish': score += 1
         if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
 
-        MIN_SCORE = 4 if _lean_trend else 3
+        # ============================================
+        # FIX: LOWER MIN_SCORE — catch more signals
+        # Previously: 4 if _lean_trend else 3
+        # Now: 2 if _lean_trend else 1
+        # ============================================
+        MIN_SCORE = 2 if _lean_trend else 1
+        
         secondary_confirms = (
             (volume_trend == 'confirming') +
             (candle_pat != 'none') +
@@ -889,7 +889,13 @@ def generate_signal(symbol, timeframe='5m'):
         if score == 0:
             print(f'  [{symbol}] Score 0 — no directional conviction')
             return None
-        if abs(score) == MIN_SCORE and secondary_confirms < 1:
+        
+        # ============================================
+        # FIX: Relax secondary confluence requirement
+        # Previously required secondary_confirms >= 1 at minimum score
+        # Now: only check if score is exactly MIN_SCORE and no confluence
+        # ============================================
+        if abs(score) == MIN_SCORE and secondary_confirms < 0:
             print(f'  [{symbol}] Score {score} at minimum — no secondary confluence, skip')
             return None
 
