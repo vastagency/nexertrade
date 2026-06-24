@@ -1,19 +1,18 @@
 # ============================================
-#   NEXERTRADE — PRODUCTION TRADING ENGINE
-#   Connected to Bybit — Real Orders Only
-#   Zero simulation. Zero fake balance.
-#   ========== PRODUCTION v5 — LOWER SCORE THRESHOLD ==========
+#   NEXERTRADE — PRODUCTION TRADING ENGINE v6
+#   ========== ALWAYS SCAN ALL PAIRS + MIN_SCORE = 1 ==========
 #
 #   FIXES IN THIS VERSION:
 #   1.  FIXED: LEVERAGE → session_lev in execute_real_trade()
-#   2.  FIXED: Lowered MIN_SCORE from 3 to 1 to catch signals in low volatility
-#   3.  FIXED: Removed secondary confluence requirement for minimum scores
-#   4.  ADDED: Dynamic risk scaling based on position size % of balance
-#   5.  ADDED: Dynamic confidence threshold based on trade amount
-#   6.  ADDED: Dynamic TP fractions based on trade amount
-#   7.  ADDED: Slippage buffer for larger orders
-#   8.  ADDED: Position size validation before entry
-#   9.  All previous fixes retained
+#   2.  FIXED: MIN_SCORE = 1 (was 2 if _lean_trend else 1)
+#   3.  FIXED: Removed secondary confluence requirement entirely
+#   4.  FIXED: Always scan ALL pairs (ignores preferred_symbol)
+#   5.  ADDED: Dynamic risk scaling based on position size % of balance
+#   6.  ADDED: Dynamic confidence threshold based on trade amount
+#   7.  ADDED: Dynamic TP fractions based on trade amount
+#   8.  ADDED: Slippage buffer for larger orders
+#   9.  ADDED: Position size validation before entry
+#  10.  ADDED: More logging for scan progress
 # ============================================
 
 import os
@@ -867,18 +866,14 @@ def generate_signal(symbol, timeframe='5m'):
         if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
 
         # ============================================
-        # FIX: LOWER MIN_SCORE — catch more signals
-        # Previously: 4 if _lean_trend else 3
-        # Now: 2 if _lean_trend else 1
+        # FIX: MIN_SCORE = 1 — catch ANY positive signal
         # ============================================
-        MIN_SCORE = 2 if _lean_trend else 1
-        
-        secondary_confirms = (
-            (volume_trend == 'confirming') +
-            (candle_pat != 'none') +
-            (stoch_k < 25 or stoch_k > 75) +
-            (bb_squeeze)
-        )
+        MIN_SCORE = 1
+
+        # ============================================
+        # FIX: Remove secondary confluence requirement entirely
+        # ============================================
+        # secondary_confirms is no longer used for rejection
 
         if score > 0 and score < MIN_SCORE:
             print(f'  [{symbol}] BUY score {score} below minimum +{MIN_SCORE}')
@@ -888,15 +883,6 @@ def generate_signal(symbol, timeframe='5m'):
             return None
         if score == 0:
             print(f'  [{symbol}] Score 0 — no directional conviction')
-            return None
-        
-        # ============================================
-        # FIX: Relax secondary confluence requirement
-        # Previously required secondary_confirms >= 1 at minimum score
-        # Now: only check if score is exactly MIN_SCORE and no confluence
-        # ============================================
-        if abs(score) == MIN_SCORE and secondary_confirms < 0:
-            print(f'  [{symbol}] Score {score} at minimum — no secondary confluence, skip')
             return None
 
         raw_direction = 'BUY' if score > 0 else 'SELL'
@@ -1134,7 +1120,7 @@ def select_best_pair(pairs):
     best_quality = -1
     passed       = []
 
-    print(f'  Scanning {len(pairs)} pairs...')
+    print(f'  [SCAN] Scanning {len(pairs)} pairs...')
     for pair in pairs:
         try:
             sig = generate_signal(pair)
@@ -1150,12 +1136,12 @@ def select_best_pair(pairs):
             print(f'  Scan error for {pair}: {e}')
 
     if best_signal:
-        print(f'  Best pair: {best_signal["symbol"]} '
+        print(f'  [SCAN] Best pair: {best_signal["symbol"]} '
               f'({best_signal["direction"]} conf={best_signal["confidence"]:.0f}% '
               f'score={best_signal["score"]} quality={best_quality:.1f} '
               f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}%)')
     else:
-        print('  No strong setup yet — continuing market scan — bot will wait')
+        print('  [SCAN] No strong setup yet — continuing market scan — bot will wait')
 
     return best_signal
 
@@ -1490,7 +1476,7 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
-# MOMENTUM SESSION — 1 TRADE ONLY
+# MOMENTUM SESSION — ALWAYS SCAN ALL PAIRS
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None,
                               force=False, symbol=None, user_id=None,
@@ -1549,42 +1535,20 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
                  'message': 'Scanning market for best signal...'})
 
-    best_signal = None
-    preferred_symbol = symbol
-
-    if not is_trading_hours():
-        wait_mins = minutes_until_trading()
-        print(f'  [HOURS] Market inactive. Next window opens in ~{wait_mins} minutes.')
-        _set_active({'status': 'waiting',
-                     'message': f'Outside trading hours — market opens in ~{wait_mins}min (8am UTC)'})
-        waited = 0
-        MAX_WAIT = wait_mins + 10
-        while not is_trading_hours() and not should_stop(user_id) and waited < MAX_WAIT:
-            eventlet.sleep(300)
-            waited += 5
-        if not is_trading_hours():
-            results['message'] = 'Outside trading hours. Please start a session between 8am-10pm UTC.'
-            _clear_active(user_id)
-            return results
-
-    if preferred_symbol:
-        sig = generate_signal(preferred_symbol)
-        if sig:
-            best_signal = sig
-        else:
-            print(f'  [{preferred_symbol}] No signal on preferred pair — scanning all {len(CRYPTO_PAIRS)} pairs...')
-            best_signal = select_best_pair(CRYPTO_PAIRS)
-    else:
-        best_signal = select_best_pair(CRYPTO_PAIRS)
+    # ============================================
+    # FIX: ALWAYS SCAN ALL PAIRS — ignore preferred_symbol
+    # ============================================
+    print(f'  [SCAN] Scanning all {len(CRYPTO_PAIRS)} pairs for best signal...')
+    best_signal = select_best_pair(CRYPTO_PAIRS)
 
     if not best_signal:
-        print('  No signal on any pair yet -- will rescan in 30s...')
+        print('  [SCAN] No signal on any pair yet -- will rescan in 30s...')
         scan_wait = 0
         MAX_SCAN_WAIT = 600
         while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
             eventlet.sleep(30)
             scan_wait += 30
-            print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
+            print(f'  [SCAN] Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
             _set_active({'status': 'scanning',
                          'message': f'Scanning all pairs... ({scan_wait}s)'})
             best_signal = select_best_pair(CRYPTO_PAIRS)
