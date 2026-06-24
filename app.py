@@ -2,6 +2,8 @@
 #   NEXERTRADE — MAIN APPLICATION
 #   Phase 6: Wallet & Withdrawal Security
 #   + Multi‑trade support (num_trades)
+#   + FIX: TP prices now included in /api/live_status
+#   + FIX: user_balance passed to execute_real_trade for risk scaling
 # ============================================
 
 # eventlet monkey_patch MUST be first — before ALL other imports.
@@ -1598,16 +1600,15 @@ def api_bot_compound():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-if __name__ == '__main__':
-    init_db()
-    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
-
-
+# ============================================
+# FIX: LIVE STATUS — Now includes TP prices
+# ============================================
 @app.route('/api/live_status')
 @login_required
 def live_status():
     """
     Returns REAL active trade state from bot._active_trade.
+    Now includes tp_prices array for frontend to display individual TPs.
     No random values. No placeholders. No hardcoded pairs.
     Frontend polls this every 4 seconds during a live session.
     """
@@ -1622,6 +1623,11 @@ def live_status():
             'message': 'No active trade',
         })
 
+    # Get TP prices - ensure they're always a list
+    tp_prices = trade.get('tp_prices', [])
+    if not isinstance(tp_prices, list):
+        tp_prices = []
+
     return jsonify({
         'active':        trade.get('active', False),
         'pair':          trade.get('pair'),
@@ -1629,12 +1635,18 @@ def live_status():
         'entry':         trade.get('entry', 0.0),
         'current_price': trade.get('current_price', 0.0),
         'pnl':           trade.get('pnl', 0.0),
+        'pnl_net':       trade.get('pnl_net', 0.0),
         'pnl_pct':       trade.get('pnl_pct', 0.0),
         'tp_hits':       trade.get('tp_hits', 0),
-        'tp_prices':     trade.get('tp_prices', []),
+        'tp_prices':     tp_prices,  # <-- FIX: Now includes individual TP prices
         'sl_price':      trade.get('sl_price', 0.0),
         'position_size': trade.get('position_size', 0.0),
         'leverage':      trade.get('leverage', 2),
         'status':        trade.get('status', 'idle'),
         'message':       trade.get('message', ''),
     })
+
+
+if __name__ == '__main__':
+    init_db()
+    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)

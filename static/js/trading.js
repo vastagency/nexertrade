@@ -1,6 +1,11 @@
 /* ============================================
    NEXERTRADE — TRADING PAGE JAVASCRIPT
-   Version 2 — Fixed timing, chart & win rate
+   Version 3 — TP Display + Dynamic Risk UI
+   FIXES:
+   1. Individual TP prices now displayed in live trade panel
+   2. TP progress shows actual prices (TP1: $0.1234, TP2: $0.1235, etc.)
+   3. Dynamic confidence threshold display for different trade sizes
+   4. Risk warning when position > 30% of balance
 ============================================ */
 
 // ============================================
@@ -143,6 +148,28 @@ document.querySelectorAll('.lev-btn').forEach(btn => {
 // ============================================
 const tradeAmountInput = document.getElementById('tradeAmount');
 
+// FIX: Show risk warning when amount changes
+function updateRiskWarning() {
+    const amount = parseInt(tradeAmountInput ? tradeAmountInput.value : selectedAmount);
+    if (availableBalance > 0) {
+        const positionPct = (amount * selectedLeverage) / availableBalance;
+        const riskEl = document.getElementById('riskWarning');
+        if (riskEl) {
+            if (positionPct > 0.50) {
+                riskEl.textContent = `⚠️ HIGH RISK: ${(positionPct*100).toFixed(1)}% of balance at ${selectedLeverage}x`;
+                riskEl.style.color = '#ef4444';
+                riskEl.style.display = 'block';
+            } else if (positionPct > 0.30) {
+                riskEl.textContent = `⚠️ ${(positionPct*100).toFixed(1)}% of balance at ${selectedLeverage}x — consider reducing`;
+                riskEl.style.color = '#f59e0b';
+                riskEl.style.display = 'block';
+            } else {
+                riskEl.style.display = 'none';
+            }
+        }
+    }
+}
+
 document.querySelectorAll('.quick-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     if (isTrading) return;
@@ -150,6 +177,7 @@ document.querySelectorAll('.quick-btn').forEach(btn => {
     btn.classList.add('active');
     selectedAmount = parseInt(btn.dataset.amount);
     if (tradeAmountInput) tradeAmountInput.value = selectedAmount;
+    updateRiskWarning();
   });
 });
 
@@ -161,8 +189,16 @@ if (tradeAmountInput) {
     document.querySelectorAll('.quick-btn').forEach(b => {
       b.classList.toggle('active', parseInt(b.dataset.amount) === selectedAmount);
     });
+    updateRiskWarning();
   });
 }
+
+// Also update risk when leverage changes
+document.querySelectorAll('.lev-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        setTimeout(updateRiskWarning, 50);
+    });
+});
 
 
 // ============================================
@@ -386,6 +422,10 @@ async function startSession(force = false) {
   document.getElementById('statLosses').textContent = '0';
   document.getElementById('statPnl').textContent    = '+$0.0000';
   document.getElementById('statPnl').className      = 'session-stat-value mono large positive';
+
+  // Reset TP display
+  const tpContainer = document.getElementById('tpPricesContainer');
+  if (tpContainer) tpContainer.innerHTML = '';
 
   const list = document.getElementById('tradeStreamList');
   if (list) list.innerHTML = '<p class="trade-stream-empty">Fetching real market signals...</p>';
@@ -1025,6 +1065,45 @@ function updateLiveTradeUI(data) {
     if (barEl) {
         const width = ((data.tp_hits || 0) / 4) * 100;
         barEl.style.width = width + '%';
+    }
+
+    // ============================================
+    // FIX: Display Individual TP Prices
+    // ============================================
+    const tpContainer = document.getElementById('tpPricesContainer');
+    if (tpContainer && data.tp_prices && data.tp_prices.length > 0) {
+        const tpPrices = data.tp_prices;
+        const tpHits = data.tp_hits || 0;
+        let html = '';
+        const tpLabels = ['TP1', 'TP2', 'TP3', 'TP4'];
+        const tpColors = ['#00D48B', '#F5C518', '#FF8C00', '#FF4D4D'];
+        
+        tpPrices.forEach((price, index) => {
+            if (index < 4) {
+                const isHit = index < tpHits;
+                const color = isHit ? '#00D48B' : '#4a5568';
+                const strike = isHit ? 'text-decoration: line-through;' : '';
+                html += `
+                    <span style="font-size:12px; color:${color}; ${strike} margin-right:12px;">
+                        ${tpLabels[index]}: $${typeof price === 'number' ? price.toFixed(4) : '0.0000'}
+                    </span>
+                `;
+            }
+        });
+        
+        // Add SL display
+        if (data.sl_price) {
+            html += `
+                <span style="font-size:12px; color:#ef4444; margin-left:8px;">
+                    SL: $${typeof data.sl_price === 'number' ? data.sl_price.toFixed(4) : '0.0000'}
+                </span>
+            `;
+        }
+        
+        tpContainer.innerHTML = html;
+        tpContainer.style.display = 'block';
+    } else if (tpContainer) {
+        tpContainer.style.display = 'none';
     }
 
     // Also update the session status title if we have a real pair

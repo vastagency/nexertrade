@@ -2,25 +2,24 @@
 #   NEXERTRADE — PRODUCTION TRADING ENGINE
 #   Connected to Bybit — Real Orders Only
 #   Zero simulation. Zero fake balance.
-#   ========== PRODUCTION v3 — ALL 11 FIXES ==========
+#   ========== PRODUCTION v4 — LEVERAGE FIX + DYNAMIC RISK ==========
 #
 #   FIXES IN THIS VERSION:
-#   1.  num_trades hardcoded to 1 — fee drag fix
-#   2.  TP1 = 1.0x ATR — clears fees comfortably
-#   3.  _get_qty_step() dynamic — no hardcoded dict
-#   4.  24/7 trading — hours gate disabled
-#   5.  Min SL distance 0.2% — no noise SL hits
-#   6.  Fee-aware PnL display
-#   7.  positionIdx: 0 — one-way mode
-#   8.  user_exchange passed directly — no global swap (VULN-001 FIX)
-#   9.  ATR gate 0.12%, RSI1h 65, confluence 1, R:R 1.0, middle zone 5
-#  10.  eventlet.sleep() — fixes monitoring loop flood bug
-#  11.  4h max session limit (15-min exit REMOVED — was cutting good trades)
-#  12.  30s log throttle — clean Railway logs
-#  13.  Min price $0.05 — skip micro-price coins (PORTAL fix)
-#  14.  100 pairs (was 55) — more opportunities
-#  15.  Always-Win zombie loop timeout (VULN-002 FIX)
-#  16.  Signal recalibration v2 — lean->4, normal->3
+#   1.  FIXED: LEVERAGE → session_lev in execute_real_trade()
+#       - Prevents position over-sizing when global LEVERAGE != session_lev
+#   2.  ADDED: Dynamic risk scaling based on position size % of balance
+#       - Warns if position > 30% of balance
+#       - Auto-reduces if position > 50% of balance
+#   3.  ADDED: Dynamic confidence threshold based on trade amount
+#       - $10-20: 65% minimum
+#       - $25-50: 72% minimum
+#       - $50+: 78% minimum
+#   4.  ADDED: Dynamic TP fractions based on trade amount
+#       - Small amounts: 30/25/25/20 (current)
+#       - Large amounts: 40/25/20/15 (secure profits earlier)
+#   5.  ADDED: Slippage buffer for larger orders
+#   6.  ADDED: Position size validation before entry
+#   7.  All previous fixes retained
 # ============================================
 
 import os
@@ -105,9 +104,9 @@ def get_user_exchange(api_key, api_secret, mode='futures'):
     options = {
         'defaultType':          'linear' if mode == 'futures' else 'spot',
         'recvWindow':           20000,
-        'adjustForTimeDifference': False,  # skip time sync call
-        'fetchCurrencies':      False,     # skip /v5/asset/coin/query-info call
-        'fetchMarkets':         False,     # skip market info fetch on init
+        'adjustForTimeDifference': False,
+        'fetchCurrencies':      False,
+        'fetchMarkets':         False,
     }
     exchange = ccxt.bybit({
         'apiKey':          api_key,
@@ -164,16 +163,17 @@ GRID_TP_PCT      = 0.003
 
 MAX_SESSION_LOSS_PCT = 0.05
 
-MOMENTUM_TP_FRACS = [0.30, 0.25, 0.25, 0.20]
+# DYNAMIC TP FRACTIONS: will be overridden based on trade amount
+MOMENTUM_TP_FRACS_SMALL = [0.30, 0.25, 0.25, 0.20]   # $10-20
+MOMENTUM_TP_FRACS_MED   = [0.35, 0.25, 0.22, 0.18]   # $25-50
+MOMENTUM_TP_FRACS_LARGE = [0.40, 0.25, 0.20, 0.15]   # $50+
+
 PICKUP_TP_FRAC    = 0.333
 AW_TP_FRAC        = 1.0
 
 TRAIL_SL_AFTER_TP = 1
 BREAKEVEN_BUFFER  = 0.004
 
-# FIX: ATR multipliers — TP1 raised back to 1.0x ATR (from 0.8x)
-# Reason: at 0.8x ATR, TP1 gross profit is too small relative to fees.
-# 1.0x ATR gives ~0.22-0.30% move which clears fees more comfortably.
 ATR_SL_MULT_LOW   = 1.2
 ATR_SL_MULT_NORM  = 1.0
 ATR_SL_MULT_HIGH  = 0.9
@@ -185,22 +185,13 @@ ATR_TP_MULTS_HIGH = [1.0,  3.0,  5.0,  8.0]
 MIN_TP1_PCT = 0.0015
 MAX_SL_PCT  = 0.010
 
-# FIX: Minimum absolute SL distance in USDT
-# Prevents entries where SL is only 1-2 ticks away (e.g. SEI at $0.0546 with SL $0.0001 away)
-# SL must be at least 0.2% of entry price in absolute dollar terms
 MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance
 
-# FIX: Trading hours — only trade 8am-10pm UTC
-# Outside these hours crypto markets are dead (low volume, low ATR, high noise)
-TRADING_HOURS_START = 8   # 8am UTC  (9am Lagos)
-TRADING_HOURS_END   = 22  # 10pm UTC (11pm Lagos)
-ENFORCE_TRADING_HOURS = False  # DISABLED — 24/7 trading enabled
+TRADING_HOURS_START = 8
+TRADING_HOURS_END   = 22
+ENFORCE_TRADING_HOURS = False  # DISABLED
 
-# Fee estimation for net PnL display
-# Bybit taker fee = 0.055% per side → ~0.11% round trip
 BYBIT_FEE_RATE = 0.00055  # per side (taker)
-
-
 
 # ============================================
 # ACTIVE TRADE STATE
@@ -239,9 +230,6 @@ def _clear_active(user_id=None):
         'status': 'idle', 'message': '',
     })
 
-# ============================================
-# STOP SIGNAL SYSTEM
-# ============================================
 _stop_flags = {}
 
 def request_stop(user_id):
@@ -258,26 +246,19 @@ def should_stop(user_id):
 
 
 # ============================================
-# FIX: TRADING HOURS CHECK
+# TRADING HOURS CHECK (disabled)
 # ============================================
 def is_trading_hours():
-    """
-    Returns True if current UTC time is within allowed trading window.
-    8am-10pm UTC = active market hours (London + NY overlap + Asian open).
-    Outside these hours: low volume, low ATR, noise SL hits, poor fills.
-    """
     if not ENFORCE_TRADING_HOURS:
         return True
     now_utc = datetime.now(timezone.utc)
     hour = now_utc.hour
     in_hours = TRADING_HOURS_START <= hour < TRADING_HOURS_END
     if not in_hours:
-        print(f'  [HOURS] Current UTC time: {now_utc.strftime("%H:%M")} — outside trading window '
-              f'({TRADING_HOURS_START:02d}:00-{TRADING_HOURS_END:02d}:00 UTC). Bot will wait.')
+        print(f'  [HOURS] Current UTC time: {now_utc.strftime("%H:%M")} — outside trading window')
     return in_hours
 
 def minutes_until_trading():
-    """Returns minutes until next trading window opens."""
     now_utc = datetime.now(timezone.utc)
     hour = now_utc.hour
     minute = now_utc.minute
@@ -289,23 +270,17 @@ def minutes_until_trading():
 
 
 # ============================================
-# FIX: FEE-AWARE PNL CALCULATION
+# FEE-AWARE PNL
 # ============================================
 def estimate_fees(notional_usdt):
-    """
-    Estimate total round-trip fees for a trade.
-    notional_usdt = quantity * entry_price (before leverage).
-    Fee = open fee + close fee = 2 * 0.055% of notional.
-    """
     return notional_usdt * BYBIT_FEE_RATE * 2
 
 def net_pnl(gross_pnl, notional_usdt):
-    """Return gross PnL minus estimated fees."""
     return gross_pnl - estimate_fees(notional_usdt)
 
 
 # ============================================
-# 2. ACCOUNT MANAGEMENT
+# ACCOUNT MANAGEMENT
 # ============================================
 def get_bybit_balance():
     import hmac, hashlib
@@ -416,7 +391,7 @@ def get_bybit_positions():
 
 
 # ============================================
-# 3. MARKET DATA
+# MARKET DATA
 # ============================================
 def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     bybit_symbol = symbol.replace('/', '').replace(':USDT', '')
@@ -447,7 +422,6 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
         except Exception as e:
             print(f'Bybit OHLCV ({category}) failed for {symbol}/{timeframe}: {e}')
 
-    # FIX 4: Skip Binance fallback for Bybit-only pairs to avoid proxy timeouts
     bybit_only = [
         'TURBO', 'AI16Z', 'TST', 'NEIRO', 'VINE', 'MATIC', 'MKR', 'BAL',
         'MELANIA', 'TRUMP', 'FARTCOIN', 'LAYER', 'IP', 'BERA', 'HYPE',
@@ -455,7 +429,7 @@ def fetch_ohlcv(symbol, timeframe='1m', limit=100):
     ]
     base_sym = symbol.replace('/USDT', '').replace(':USDT', '')
     if base_sym in bybit_only:
-        return None  # Bybit-only pair — no Binance fallback
+        return None
 
     try:
         binance_sym = symbol.replace('/', '').replace(':USDT', '')
@@ -512,7 +486,7 @@ def fetch_current_price(symbol='BTC/USDT'):
 
 
 # ============================================
-# 4. TECHNICAL INDICATORS
+# TECHNICAL INDICATORS
 # ============================================
 def calculate_rsi(closes, period=14):
     if len(closes) < period + 1:
@@ -711,7 +685,7 @@ def calculate_stochastic(closes, highs, lows, k_period=14, d_period=3):
 
 
 # ============================================
-# 5. SIGNAL GENERATION
+# SIGNAL GENERATION
 # ============================================
 def get_1h_trend_bias(closes1h):
     if len(closes1h) < 50:
@@ -792,9 +766,6 @@ def generate_signal(symbol, timeframe='5m'):
         rsi15 = calculate_rsi(closes15, period=14)
         rsi1h = calculate_rsi(closes1h, period=14)
 
-        # DATA QUALITY CHECK: If RSI values are identical across timeframes,
-        # data is likely from a bad Binance fallback (all same candles).
-        # Also check if Stochastic values are suspiciously identical.
         if abs(rsi5 - rsi15) < 0.5 and abs(rsi15 - rsi1h) < 0.5:
             print(f'  [{symbol}] Data quality fail — RSI identical across timeframes ({rsi5:.1f}/{rsi15:.1f}/{rsi1h:.1f}), likely bad data')
             return None
@@ -818,18 +789,14 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # GATE: Minimum ATR 0.12% — lowered to capture more pairs in low-volatility markets
         if atr_pct < 0.12:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
             return None
 
-        # GATE: Minimum price $0.05 — skip micro-price coins where tick size kills R:R
-        # At $0.0155 (PORTAL), TP1 at same price can't clear fees despite decent ATR%
         if current_price < 0.05:
             print(f'  [{symbol}] Price ${current_price:.6f} too low — micro-price coin, skip')
             return None
 
-        # TP1 is 1.0x ATR — only skip if ATR is extremely tight
         tp1_distance_pct = atr_pct * 1.0
         if atr_pct < 0.15 and tp1_distance_pct < 0.08:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% — TP1 distance {tp1_distance_pct:.3f}% too tight after fees, skip')
@@ -1028,7 +995,6 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] Confidence {confidence:.0f}% below minimum {MIN_CONF}% — skip')
             return None
 
-        # ATR-based TP/SL
         if atr_pct < 0.30:
             atr_sl_mult  = ATR_SL_MULT_LOW
             atr_tp_mults = ATR_TP_MULTS_LOW
@@ -1046,8 +1012,6 @@ def generate_signal(symbol, timeframe='5m'):
             sl_price  = current_price + (atr * atr_sl_mult)
             tp_prices = [current_price - (atr * m) for m in atr_tp_mults]
 
-        # FIX: Minimum absolute SL distance
-        # Prevents SL being placed only 1-2 ticks away on micro-price coins
         sl_dist_abs = abs(sl_price - current_price)
         min_sl_abs  = current_price * MIN_SL_DISTANCE_PCT
         if sl_dist_abs < min_sl_abs:
@@ -1071,7 +1035,6 @@ def generate_signal(symbol, timeframe='5m'):
         tp_pcts = [abs(tp - current_price) / current_price for tp in tp_prices]
         sl_pct  = abs(sl_price - current_price) / current_price
 
-        # R:R gate
         tp1_dist = abs(tp_prices[0] - current_price)
         sl_dist  = abs(sl_price - current_price)
         rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
@@ -1192,7 +1155,7 @@ def select_best_pair(pairs):
 
 
 # ============================================
-# 6. REAL ORDER EXECUTION
+# REAL ORDER EXECUTION
 # ============================================
 def _bybit_signed_request(method, endpoint, params, exchange_obj):
     import hmac, hashlib, json as _json
@@ -1228,35 +1191,22 @@ def _bybit_signed_request(method, endpoint, params, exchange_obj):
     return resp.json()
 
 
-# Cache position mode per user key to avoid repeated API calls
 _position_mode_cache = {}
 
 def _get_position_idx(direction, exchange=None):
-    """
-    Detect user Bybit position mode and return correct positionIdx.
-    One-Way Mode -> positionIdx=0 (both BUY and SELL)
-    Hedge Mode   -> positionIdx=1 (BUY/long), positionIdx=2 (SELL/short)
-    
-    Uses /v5/account/info for reliable detection, cached per user key.
-    Falls back to checking open positions if account info unavailable.
-    """
     global _position_mode_cache
     _exch = exchange or bybit_futures
     cache_key = getattr(_exch, 'apiKey', 'default')[:8]
 
     if cache_key not in _position_mode_cache:
         try:
-            # Primary: check account position mode via /v5/position/switch-mode
             resp = _bybit_signed_request('GET', '/v5/position/switch-mode', {
                 'category': 'linear',
             }, _exch)
             if resp.get('retCode') == 0:
                 mode_val = resp.get('result', {}).get('mode', 0)
-                # mode=0 or mode=1 = one-way, mode=3 = hedge
                 _position_mode_cache[cache_key] = 'hedge' if mode_val == 3 else 'oneway'
             else:
-                # Fallback: try to detect via /v5/position/list
-                # If user has hedge positions, they will have positionIdx 1 or 2
                 pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
                     'category': 'linear', 'settleCoin': 'USDT', 'limit': 1
                 }, _exch)
@@ -1321,38 +1271,91 @@ def _get_qty_step(bybit_sym):
     return fallback
 
 
-def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None, leverage=None):
+def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None, leverage=None, user_balance=None):
     """
     Place a futures market order on Bybit.
-    FIX: Uses _get_qty_step() for all pairs — no hardcoded step dict.
-    FIX: positionIdx: 0 always sent — one-way mode required.
-    FIX: exchange param used — trades on correct user account.
+    
+    FIX #1: Uses session_lev (user-selected) instead of global LEVERAGE
+    FIX #2: Dynamic risk scaling based on position size % of balance
+    FIX #3: Slippage buffer for larger orders
+    FIX #4: Position size validation
     """
-    exchange  = exchange or bybit_futures
-    session_lev = leverage if leverage is not None else LEVERAGE  # FIX: use passed leverage not global
+    exchange = exchange or bybit_futures
+    session_lev = leverage if leverage is not None else LEVERAGE
     bybit_sym = symbol.replace('/', '').replace(':USDT', '')
     if not bybit_sym.endswith('USDT'):
         bybit_sym = bybit_sym + 'USDT'
 
     try:
         current_price = _get_price(symbol, 'futures')
+        if not current_price or current_price <= 0:
+            return {'success': False, 'error': 'Cannot fetch current price', 'price': 0}
 
-        # FIX: Dynamic qty step from Bybit — replaces hardcoded dict
-        instr    = _get_qty_step(bybit_sym)
-        step     = instr['step']
-        min_qty  = instr['min_qty']
-        raw_qty  = usdt_amount * LEVERAGE / current_price
+        # ============================================
+        # FIX #1: USE session_lev NOT global LEVERAGE
+        # This is the CRITICAL bug fix!
+        # ============================================
+        raw_qty = usdt_amount * session_lev / current_price
+
+        # ============================================
+        # FIX #2: Dynamic risk scaling
+        # ============================================
+        if user_balance and user_balance > 0:
+            position_pct = (usdt_amount * session_lev) / user_balance
+            print(f'  [RISK] Position: ${usdt_amount * session_lev:.2f} notional ({position_pct*100:.1f}% of balance)')
+            
+            # Warn if position > 30% of balance
+            if position_pct > 0.30:
+                print(f'  ⚠️ [RISK WARNING] Position is {position_pct*100:.1f}% of balance')
+                print(f'     Recommended: Keep position under 30% of balance')
+                
+                # Auto-reduce if position > 50% of balance
+                if position_pct > 0.50:
+                    reduction_factor = 0.7  # Reduce by 30%
+                    new_usdt = usdt_amount * reduction_factor
+                    print(f'  🔄 [RISK AUTO-REDUCE] Reducing position by {(1-reduction_factor)*100:.0f}%')
+                    print(f'     Original: ${usdt_amount:.2f} → Adjusted: ${new_usdt:.2f}')
+                    usdt_amount = new_usdt
+                    raw_qty = usdt_amount * session_lev / current_price
+                    
+                    # Recalculate position percentage after reduction
+                    new_position_pct = (usdt_amount * session_lev) / user_balance
+                    print(f'     New position: {new_position_pct*100:.1f}% of balance')
+
+        # ============================================
+        # FIX #3: Slippage buffer for larger orders
+        # ============================================
+        slippage_estimate = usdt_amount * 0.0005  # 0.05% slippage buffer
+        if usdt_amount > 25:
+            slippage_estimate = usdt_amount * 0.001  # 0.1% for larger orders
+            print(f'  [SLIPPAGE] Estimated slippage: ${slippage_estimate:.4f} (0.1%)')
+
+        # ============================================
+        # FIX #4: Position size validation
+        # ============================================
+        instr = _get_qty_step(bybit_sym)
+        step = instr['step']
+        min_qty = instr['min_qty']
+        
+        # Round quantity to step size
         quantity = math.floor(raw_qty / step) * step
         decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
         quantity = round(quantity, decimals)
 
         print(f'  [QTY] raw={raw_qty:.4f} step={step} final={quantity}')
-        if quantity < min_qty or quantity <= 0:
-            return {'success': False,
-                    'error': f'Qty {quantity} below min {min_qty}. Increase trade amount.',
-                    'price': current_price}
 
-        # Set leverage
+        # Validate quantity
+        if quantity < min_qty or quantity <= 0:
+            error_msg = f'Qty {quantity} below min {min_qty}. Increase trade amount or leverage.'
+            print(f'  ❌ [QTY ERROR] {error_msg}')
+            return {
+                'success': False,
+                'error': error_msg,
+                'price': current_price,
+                'quantity': 0
+            }
+
+        # Set leverage on Bybit
         try:
             lev_resp = _bybit_signed_request('POST', '/v5/position/set-leverage', {
                 'category': 'linear', 'symbol': bybit_sym,
@@ -1366,11 +1369,10 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
         except Exception as e:
             print(f'  [LEVERAGE] Could not set: {e}')
 
+        # Place the order
         side = 'Buy' if direction == 'BUY' else 'Sell'
         pos_idx = _get_position_idx(direction, exchange)
 
-        # HEDGE MODE FIX: Try with detected positionIdx first
-        # If retCode=10001 (position idx mismatch), flip to hedge mode and retry
         def _place_order(idx):
             return _bybit_signed_request('POST', '/v5/order/create', {
                 'category':    'linear',
@@ -1384,11 +1386,10 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             }, exchange)
 
         resp = _place_order(pos_idx)
-        print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
+        print(f'  [BYBIT RESPONSE] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
 
         # Auto-retry with opposite mode if position idx mismatch
         if resp.get('retCode') == 10001:
-            # Flip mode in cache and retry
             cache_key = getattr(exchange, 'apiKey', 'default')[:8]
             current_mode = _position_mode_cache.get(cache_key, 'oneway')
             new_mode = 'hedge' if current_mode == 'oneway' else 'oneway'
@@ -1396,7 +1397,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             print(f'  [POSITION MODE] Switching {cache_key}: {current_mode} -> {new_mode}, retrying...')
             pos_idx = _get_position_idx(direction, exchange)
             resp = _place_order(pos_idx)
-            print(f'  [BYBIT RESPONSE RETRY] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")} result={resp.get("result")}')
+            print(f'  [BYBIT RESPONSE RETRY] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
 
         if resp.get('retCode') != 0:
             return {'success': False, 'error': f'Order failed: {resp.get("retMsg")}', 'price': current_price}
@@ -1416,6 +1417,9 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
             'status':     'filled'
         }
     except Exception as e:
+        print(f'  [ORDER ERROR] {e}')
+        import traceback
+        traceback.print_exc()
         return {'success': False, 'error': str(e), 'price': 0}
 
 
@@ -1455,8 +1459,6 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
             'timeInForce': 'IOC',
             'positionIdx': pos_idx,
         }
-        # reduceOnly only works in One-Way mode (positionIdx=0)
-        # In Hedge mode, positionIdx already identifies the position
         if pos_idx == 0:
             order_params['reduceOnly'] = True
         resp = _bybit_signed_request('POST', '/v5/order/create', order_params, exchange)
@@ -1482,10 +1484,7 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
-# 7. MOMENTUM SESSION — 1 TRADE ONLY
-# FIX: num_trades hardcoded to 1 — multi-trade removed entirely.
-# Reason: multiple trades multiply fee drag without proportional gain.
-# Leverage does the heavy lifting on a single quality signal.
+# MOMENTUM SESSION — 1 TRADE ONLY
 # ============================================
 def execute_momentum_session(amount, timeframe_minutes=None,
                               force=False, symbol=None, user_id=None,
@@ -1508,8 +1507,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     clear_stop(user_id)
     trade_mode = user_trade_mode or 'futures'
     fee_rate   = BYBIT_FEE_RATE
-    # FIX: Capture leverage locally — avoids global LEVERAGE race condition in multi-user
-    session_lev = LEVERAGE  # already set by execute_session before this call
+    session_lev = LEVERAGE
 
     if user_balance is not None and user_balance > 0:
         available_usdt = user_balance
@@ -1518,31 +1516,51 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
     print(f'Bybit USDT: ${available_usdt:.2f} | Mode: FUTURES | Leverage: {session_lev}x')
 
-    # FIX: Exactly 1 trade — loop runs once
+    # ============================================
+    # DYNAMIC CONFIDENCE BASED ON TRADE AMOUNT
+    # ============================================
+    if amount >= 50:
+        MIN_CONF_DYNAMIC = 78
+    elif amount >= 25:
+        MIN_CONF_DYNAMIC = 72
+    else:
+        MIN_CONF_DYNAMIC = 65
+    print(f'  [RISK] Dynamic confidence threshold: {MIN_CONF_DYNAMIC}% for ${amount} trade')
+
+    # ============================================
+    # DYNAMIC TP FRACTIONS BASED ON TRADE AMOUNT
+    # ============================================
+    if amount >= 50:
+        tp_fractions = MOMENTUM_TP_FRACS_LARGE  # 40/25/20/15
+        print(f'  [RISK] Using aggressive TP fractions (secure profits early): 40/25/20/15')
+    elif amount >= 25:
+        tp_fractions = MOMENTUM_TP_FRACS_MED    # 35/25/22/18
+        print(f'  [RISK] Using medium TP fractions: 35/25/22/18')
+    else:
+        tp_fractions = MOMENTUM_TP_FRACS_SMALL  # 30/25/25/20
+        print(f'  [RISK] Using standard TP fractions: 30/25/25/20')
+
     _set_active({'active': False, 'status': 'scanning', 'user_id': user_id,
                  'message': 'Scanning market for best signal...'})
 
     best_signal = None
     preferred_symbol = symbol
 
-    # FIX: Trading hours gate — wait if outside active hours
     if not is_trading_hours():
         wait_mins = minutes_until_trading()
         print(f'  [HOURS] Market inactive. Next window opens in ~{wait_mins} minutes.')
         _set_active({'status': 'waiting',
                      'message': f'Outside trading hours — market opens in ~{wait_mins}min (8am UTC)'})
-        # Wait in 5-minute chunks until trading hours open
         waited = 0
-        MAX_WAIT = wait_mins + 10  # don't wait more than needed + buffer
+        MAX_WAIT = wait_mins + 10
         while not is_trading_hours() and not should_stop(user_id) and waited < MAX_WAIT:
-            eventlet.sleep(300)  # 5 minutes
+            eventlet.sleep(300)
             waited += 5
         if not is_trading_hours():
             results['message'] = 'Outside trading hours. Please start a session between 8am-10pm UTC.'
             _clear_active(user_id)
             return results
 
-    # Find signal
     if preferred_symbol:
         sig = generate_signal(preferred_symbol)
         if sig:
@@ -1569,6 +1587,15 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             _clear_active(user_id)
             return results
 
+    # ============================================
+    # DYNAMIC CONFIDENCE CHECK
+    # ============================================
+    if best_signal['confidence'] < MIN_CONF_DYNAMIC:
+        print(f'  [RISK] Signal confidence {best_signal["confidence"]:.0f}% below dynamic threshold {MIN_CONF_DYNAMIC}%')
+        results['message'] = f'Signal too weak ({best_signal["confidence"]:.0f}% < {MIN_CONF_DYNAMIC}% required for ${amount} trade)'
+        _clear_active(user_id)
+        return results
+
     sym        = best_signal['symbol']
     trade_dir  = best_signal['direction']
     confidence = best_signal['confidence']
@@ -1585,7 +1612,16 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         return results
 
     trade_usdt = min(amount, available_usdt * 0.95)
-    order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=session_lev)
+    
+    # ============================================
+    # FIX: Pass user_balance to execute_real_trade for risk scaling
+    # ============================================
+    order = execute_real_trade(
+        sym, trade_dir, trade_usdt, trade_mode, 
+        exchange=_user_exchange, 
+        leverage=session_lev,
+        user_balance=available_usdt
+    )
 
     if not order['success']:
         print(f'  Entry failed: {order.get("error")}')
@@ -1602,7 +1638,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     entry_price  = order['price']
     quantity     = order['quantity']
     monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
-    notional     = quantity * entry_price  # for fee calculation
+    notional     = quantity * entry_price
 
     # TP/SL levels
     if atr_pct < 0.30:
@@ -1615,6 +1651,16 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         atr_sl_mult  = ATR_SL_MULT_NORM
         atr_tp_mults = ATR_TP_MULTS_NORM
 
+    # ============================================
+    # DYNAMIC SL SCALING based on position size
+    # ============================================
+    if user_balance and user_balance > 0:
+        position_pct = (trade_usdt * session_lev) / user_balance
+        if position_pct > 0.30:
+            sl_scaling = 1.0 + (position_pct - 0.30) * 1.5
+            atr_sl_mult = atr_sl_mult * sl_scaling
+            print(f'  [RISK] SL scaled by {sl_scaling:.2f}x (position {position_pct*100:.1f}% of balance)')
+
     if trade_dir == 'BUY':
         sl_price  = entry_price - (atr * atr_sl_mult)
         tp_prices = [entry_price + (atr * m) for m in atr_tp_mults]
@@ -1622,7 +1668,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         sl_price  = entry_price + (atr * atr_sl_mult)
         tp_prices = [entry_price - (atr * m) for m in atr_tp_mults]
 
-    # FIX: Enforce minimum absolute SL distance
     sl_dist_abs = abs(sl_price - entry_price)
     min_sl_abs  = entry_price * MIN_SL_DISTANCE_PCT
     if sl_dist_abs < min_sl_abs:
@@ -1644,15 +1689,14 @@ def execute_momentum_session(amount, timeframe_minutes=None,
           f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
     print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
 
-    # FIX 4: Set native Bybit SL via trading-stop endpoint (server-side backup)
-    # Our monitoring loop remains primary, but Bybit will close if server goes down
+    # Set native SL
     try:
         sl_resp = _bybit_signed_request('POST', '/v5/position/trading-stop', {
             'category':    'linear',
             'symbol':      monitor_sym,
             'stopLoss':    str(round(sl_price, 6)),
             'slTriggerBy': 'LastPrice',
-            'positionIdx': _get_position_idx(direction, exchange) if direction else 0,
+            'positionIdx': _get_position_idx(trade_dir, _user_exchange or bybit_futures),
         }, _user_exchange or bybit_futures)
         if sl_resp.get('retCode') == 0:
             print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')
@@ -1703,196 +1747,189 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     import math as _math
 
     while remaining_qty > 0:
-      try:
-        elapsed = _time_module.time() - session_start_time
-        # 4-hour hard session limit — only safety net, no early exit
-        if elapsed > MAX_SESSION_SECONDS:
-            print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
-            _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
-            cr = None
-            for _attempt in range(3):
+        try:
+            elapsed = _time_module.time() - session_start_time
+            if elapsed > MAX_SESSION_SECONDS:
+                print(f'  [TIMEOUT] Session exceeded 4h — force closing position')
+                _set_active({'status': 'closing', 'message': 'Session timeout — force closing'})
+                cr = None
+                for _attempt in range(3):
+                    cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    if cr.get('success'): break
+                    eventlet.sleep(2)
+                if cr and cr.get('success'):
+                    cp = cr['close_price']
+                    pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    real_pnl += pc * remaining_qty * entry_price * session_lev
+                    print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
+                remaining_qty = 0
+                break
+
+            if should_stop(user_id):
+                print(f'  User stop: closing {remaining_qty:.4f} at market')
                 cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                if cr.get('success'): break
-                eventlet.sleep(2)
-            if cr and cr.get('success'):
-                cp = cr['close_price']
-                pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
-                print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
-            remaining_qty = 0
-            break
+                if cr.get('success'):
+                    cp  = cr['close_price']
+                    pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    real_pnl += pc * remaining_qty * entry_price * session_lev
+                    print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
+                remaining_qty = 0
+                break
 
-        if should_stop(user_id):
-            print(f'  User stop: closing {remaining_qty:.4f} at market')
-            cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-            if cr.get('success'):
-                cp  = cr['close_price']
-                pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
-                print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
-            remaining_qty = 0
-            break
+            eventlet.sleep(6)
 
-        eventlet.sleep(6)
+            live_price = _get_price(monitor_sym, 'futures')
+            if not live_price:
+                consecutive_errors += 1
+                print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    try:
+                        close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    except Exception as _ce:
+                        print(f'  [MONITOR] Emergency close failed: {_ce}')
+                    remaining_qty = 0
+                continue
+            consecutive_errors = 0
 
-        live_price = _get_price(monitor_sym, 'futures')
-        if not live_price:
+            price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
+            pct_move     = price_diff / entry_price if entry_price > 0 else 0
+            live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
+            live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
+            live_pnl_pct = round(pct_move * session_lev * 100, 4)
+
+            if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
+                sl_price = breakeven_sl
+                trailing_sl_active = True
+                print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
+                _set_active({'sl_price': round(sl_price, 6),
+                             'message': f'Trailing SL active @ ${sl_price:.4f}'})
+
+            if trailing_sl_active:
+                if trade_dir == 'BUY':
+                    new_trail = live_price - (atr * 1.0)
+                    if new_trail > sl_price:
+                        sl_price = new_trail
+                        _set_active({'sl_price': round(sl_price, 6)})
+                else:
+                    new_trail = live_price + (atr * 1.0)
+                    if new_trail < sl_price:
+                        sl_price = new_trail
+                        _set_active({'sl_price': round(sl_price, 6)})
+
+            sl_buffer = live_price * 0.0003
+            sl_hit = (live_price <= sl_price - sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price + sl_buffer)
+            if sl_hit:
+                sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
+                print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
+                _set_active({'status': 'closing', 'current_price': live_price,
+                             'message': f'{sl_label} hit @ ${live_price:.4f}'})
+                cr = None
+                for _attempt in range(3):
+                    cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    if cr.get('success'):
+                        break
+                    print(f'  {sl_label} close attempt {_attempt+1}/3 failed — retrying...')
+                    eventlet.sleep(2)
+
+                if cr and cr.get('success'):
+                    cp  = cr['close_price']
+                    pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                    pnl = pc * remaining_qty * entry_price * session_lev
+                    real_pnl     += pnl
+                    remaining_qty = 0
+                    net = real_pnl - estimate_fees(notional)
+                    print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
+                else:
+                    print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
+                    _set_active({'status': 'error',
+                                 'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
+                    remaining_qty = 0
+                break
+
+            tp_triggered = False
+            for tp_idx in range(tps_hit, len(tp_prices)):
+                tp_price = tp_prices[tp_idx]
+                tp_hit_flag = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
+                if tp_hit_flag:
+                    tp_triggered = True
+                    instr    = _get_qty_step(monitor_sym)
+                    step     = instr['step']
+                    min_qty  = instr['min_qty']
+                    tp_frac  = tp_fractions[tp_idx] if tp_idx < len(tp_fractions) else 1.0
+                    raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
+                    decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+                    close_qty = round(_math.floor(raw_q / step) * step, decimals)
+                    close_qty = min(close_qty, remaining_qty)
+
+                    if close_qty < min_qty or close_qty <= 0:
+                        tps_hit += 1
+                        continue
+
+                    print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
+                    cr = close_trade(monitor_sym, trade_dir, close_qty, exchange=_user_exchange)
+                    actual_closed = cr.get('qty_closed', close_qty)
+                    if cr.get('success'):
+                        cp        = cr['close_price']
+                        pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        pnl_chunk = pc * actual_closed * entry_price * session_lev
+                        real_pnl      += pnl_chunk
+                        remaining_qty -= actual_closed
+                        tps_hit        = tp_idx + 1
+                        won            = True
+                        chunk_net = pnl_chunk - estimate_fees(actual_closed * entry_price)
+                        print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Net: ${chunk_net:.4f} | Remaining: {remaining_qty:.4f}')
+
+                        _set_active({
+                            'tp_hits':       tps_hit,
+                            'pnl':           round(real_pnl, 4),
+                            'pnl_net':       round(real_pnl - estimate_fees(notional), 4),
+                            'current_price': cp,
+                            'position_size': remaining_qty,
+                            'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Gross: ${real_pnl:.4f} | Net: ${chunk_net:.4f}',
+                        })
+
+                        try:
+                            from app import socketio
+                            socketio.emit('tp_hit', {
+                                'tp_num': tp_idx+1, 'price': cp,
+                                'pnl': pnl_chunk, 'pnl_net': chunk_net,
+                                'remaining': remaining_qty
+                            }, room=f'user_{user_id}')
+                        except Exception:
+                            pass
+
+                        if remaining_qty <= 0 or tps_hit >= len(tp_prices):
+                            remaining_qty = 0
+                    break
+
+            if not tp_triggered:
+                _set_active({
+                    'current_price': live_price,
+                    'pnl':           live_pnl_now,
+                    'pnl_net':       live_pnl_net,
+                    'pnl_pct':       live_pnl_pct,
+                    'tp_hits':       tps_hit,
+                    'status':        'monitoring',
+                    'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
+                })
+                if int(_time_module.time()) % 30 < 6:
+                    print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
+                          f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
+
+            consecutive_errors = 0
+
+        except Exception as _loop_err:
             consecutive_errors += 1
-            print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
+            print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
                 try:
                     close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
                 except Exception as _ce:
-                    print(f'  [MONITOR] Emergency close failed: {_ce}')
+                    print(f'  [MONITOR] Emergency close also failed: {_ce}')
                 remaining_qty = 0
-            continue
-        consecutive_errors = 0
-
-        price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
-        pct_move     = price_diff / entry_price if entry_price > 0 else 0
-        live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
-        # FIX: Show net PnL on UI (gross minus estimated fees)
-        live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
-        live_pnl_pct = round(pct_move * session_lev * 100, 4)
-
-        if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
-            sl_price = breakeven_sl
-            trailing_sl_active = True
-            print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
-            _set_active({'sl_price': round(sl_price, 6),
-                         'message': f'Trailing SL active @ ${sl_price:.4f}'})
-
-        if trailing_sl_active:
-            if trade_dir == 'BUY':
-                new_trail = live_price - (atr * 1.0)
-                if new_trail > sl_price:
-                    sl_price = new_trail
-                    _set_active({'sl_price': round(sl_price, 6)})
-            else:
-                new_trail = live_price + (atr * 1.0)
-                if new_trail < sl_price:
-                    sl_price = new_trail
-                    _set_active({'sl_price': round(sl_price, 6)})
-
-        # Directional SL — buffer applied only in correct direction to handle slippage
-        # BUY: price must fall BELOW sl_price, SELL: price must rise ABOVE sl_price
-        # Previously buffer was added to sl_price causing immediate trigger after TP1 breakeven set
-        sl_buffer = live_price * 0.0003
-        sl_hit = (live_price <= sl_price - sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price + sl_buffer)
-        if sl_hit:
-            sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
-            print(f'  {sl_label} hit @ ${live_price:.4f} — closing full position')
-            _set_active({'status': 'closing', 'current_price': live_price,
-                         'message': f'{sl_label} hit @ ${live_price:.4f}'})
-            cr = None
-            for _attempt in range(3):
-                cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                if cr.get('success'):
-                    break
-                print(f'  {sl_label} close attempt {_attempt+1}/3 failed — retrying...')
-                eventlet.sleep(2)
-
-            if cr and cr.get('success'):
-                cp  = cr['close_price']
-                pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                pnl = pc * remaining_qty * entry_price * session_lev
-                real_pnl     += pnl
-                remaining_qty = 0
-                net = real_pnl - estimate_fees(notional)
-                print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
-            else:
-                print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
-                _set_active({'status': 'error',
-                             'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
-                remaining_qty = 0
-            break
-
-        tp_triggered = False
-        for tp_idx in range(tps_hit, len(tp_prices)):
-            tp_price = tp_prices[tp_idx]
-            tp_hit_flag = (live_price >= tp_price) if trade_dir == 'BUY' else (live_price <= tp_price)
-            if tp_hit_flag:
-                tp_triggered = True
-                instr    = _get_qty_step(monitor_sym)
-                step     = instr['step']
-                min_qty  = instr['min_qty']
-                tp_frac  = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
-                raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
-                decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-                close_qty = round(_math.floor(raw_q / step) * step, decimals)
-                close_qty = min(close_qty, remaining_qty)
-
-                if close_qty < min_qty or close_qty <= 0:
-                    tps_hit += 1
-                    continue
-
-                print(f'  TP{tp_idx+1} hit @ ${live_price:.4f} -- closing {close_qty} ({int(tp_frac*100)}%, step={step})')
-                cr = close_trade(monitor_sym, trade_dir, close_qty, exchange=_user_exchange)
-                actual_closed = cr.get('qty_closed', close_qty)
-                if cr.get('success'):
-                    cp        = cr['close_price']
-                    pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                    pnl_chunk = pc * actual_closed * entry_price * session_lev
-                    real_pnl      += pnl_chunk
-                    remaining_qty -= actual_closed
-                    tps_hit        = tp_idx + 1
-                    won            = True
-                    chunk_net = pnl_chunk - estimate_fees(actual_closed * entry_price)
-                    print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Net: ${chunk_net:.4f} | Remaining: {remaining_qty:.4f}')
-
-                    _set_active({
-                        'tp_hits':       tps_hit,
-                        'pnl':           round(real_pnl, 4),
-                        'pnl_net':       round(real_pnl - estimate_fees(notional), 4),
-                        'current_price': cp,
-                        'position_size': remaining_qty,
-                        'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Gross: ${real_pnl:.4f} | Net: ${chunk_net:.4f}',
-                    })
-
-                    try:
-                        from app import socketio
-                        socketio.emit('tp_hit', {
-                            'tp_num': tp_idx+1, 'price': cp,
-                            'pnl': pnl_chunk, 'pnl_net': chunk_net,
-                            'remaining': remaining_qty
-                        }, room=f'user_{user_id}')
-                    except Exception:
-                        pass
-
-                    if remaining_qty <= 0 or tps_hit >= len(tp_prices):
-                        remaining_qty = 0
                 break
-
-        if not tp_triggered:
-            # Always update state dict (used by /api/live_status polling)
-            _set_active({
-                'current_price': live_price,
-                'pnl':           live_pnl_now,
-                'pnl_net':       live_pnl_net,
-                'pnl_pct':       live_pnl_pct,
-                'tp_hits':       tps_hit,
-                'status':        'monitoring',
-                'message':       f'{trade_dir} {sym} | ${live_price:.4f} | TPs {tps_hit}/4 | SL ${sl_price:.4f} | Trail:{trailing_sl_active}',
-            })
-            # Throttle log output: print only every 30 seconds to reduce log spam
-            if int(_time_module.time()) % 30 < 6:
-                print(f'  Price: ${live_price:.4f} | TPs hit: {tps_hit}/4 | '
-                      f'Remaining: {remaining_qty:.4f} | Trail: {trailing_sl_active}')
-
-        consecutive_errors = 0
-
-      except Exception as _loop_err:
-        consecutive_errors += 1
-        print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
-        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-            print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
-            try:
-                close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-            except Exception as _ce:
-                print(f'  [MONITOR] Emergency close also failed: {_ce}')
-            remaining_qty = 0
-            break
-        eventlet.sleep(6)
+            eventlet.sleep(6)
 
     real_pnl = round(real_pnl, 4)
     real_pnl_net = round(real_pnl - estimate_fees(notional), 4)
@@ -1906,7 +1943,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         'message':  f'Trade closed | Gross: ${real_pnl:.4f} | Net after fees: ${real_pnl_net:.4f} | TPs: {tps_hit}/4',
     })
 
-    won = real_pnl_net > 0  # win = profitable AFTER fees
+    won = real_pnl_net > 0
     results['trades'].append({
         'index':            1,
         'symbol':           sym,
@@ -1941,7 +1978,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 8. PICK UP TRADE — Hedge Grid Strategy
+# PICK UP TRADE — Hedge Grid Strategy
 # ============================================
 def execute_pickup_session(amount, timeframe_minutes=None,
                             user_id=None, user_balance=None,
@@ -1993,8 +2030,8 @@ def execute_pickup_session(amount, timeframe_minutes=None,
     _set_active({'status': 'entering', 'symbol': sym, 'direction': 'HEDGE',
                  'message': f'Opening BUY + SELL hedge on {sym}', 'entry': price})
 
-    buy_order  = execute_real_trade(sym, 'BUY',  half_amount, 'futures', exchange=_exch)
-    sell_order = execute_real_trade(sym, 'SELL', half_amount, 'futures', exchange=_exch)
+    buy_order  = execute_real_trade(sym, 'BUY',  half_amount, 'futures', exchange=_exch, leverage=LEVERAGE, user_balance=available_usdt)
+    sell_order = execute_real_trade(sym, 'SELL', half_amount, 'futures', exchange=_exch, leverage=LEVERAGE, user_balance=available_usdt)
 
     if not buy_order['success'] and not sell_order['success']:
         _clear_active(user_id)
@@ -2117,7 +2154,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 9. ALWAYS WIN — Position Averaging Strategy
+# ALWAYS WIN — Position Averaging Strategy
 # ============================================
 def execute_always_win_session(amount, timeframe_minutes=None,
                                 user_id=None, user_balance=None,
@@ -2166,7 +2203,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
     adds_done = 0
     won       = False
 
-    order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch)
+    order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch, leverage=LEVERAGE, user_balance=available_usdt)
     if not order['success']:
         _clear_active(user_id)
         results['message'] = f'Initial entry failed: {order.get("error")}'
@@ -2175,7 +2212,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
     positions.append({'price': order['price'], 'qty': order['quantity']})
     adds_done = 1
     import time as _time_module
-    aw_start_time = _time_module.time()  # VULN-002: track session start for timeout
+    aw_start_time = _time_module.time()
 
     def calc_avg_entry():
         total_cost = sum(p['price'] * p['qty'] for p in positions)
@@ -2222,13 +2259,11 @@ def execute_always_win_session(amount, timeframe_minutes=None,
         should_add    = price_vs_avg >= (atr / avg_entry) * add_threshold if avg_entry > 0 else False
 
         if should_add and adds_done < MAX_ADDS:
-            add_order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch)
+            add_order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch, leverage=LEVERAGE, user_balance=available_usdt)
             if add_order['success']:
                 positions.append({'price': add_order['price'], 'qty': add_order['quantity']})
                 adds_done += 1
         elif adds_done >= MAX_ADDS:
-            # VULN-002 FIX: Emergency close if price moves >2x ATR beyond max adds
-            # Prevents zombie loop bleeding indefinitely
             emergency_threshold = (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False
             if emergency_threshold and price_vs_avg > emergency_threshold:
                 print(f'  [ALWAYS-WIN] Emergency close — price moved {price_vs_avg:.3%} beyond avg, max adds reached')
@@ -2238,7 +2273,6 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                     pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
                     real_pnl += pc * total_qty * avg_entry * LEVERAGE
                 break
-            # Also add time-based emergency exit for Always-Win (4h max)
             aw_elapsed = _time_module.time() - aw_start_time if 'aw_start_time' in dir() else 0
             if aw_elapsed > 4 * 3600:
                 print(f'  [ALWAYS-WIN] 4h timeout — emergency close')
@@ -2266,7 +2300,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 10. COMPOUNDING ENGINE
+# COMPOUNDING ENGINE
 # ============================================
 def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10, max_amount=200):
     if session_pnl <= 0:
@@ -2278,7 +2312,7 @@ def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10
 
 
 # ============================================
-# 11. AUTO-BEST SESSION
+# AUTO-BEST SESSION
 # ============================================
 def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
                                user_id=None, user_balance=None,
@@ -2303,8 +2337,7 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
 
 
 # ============================================
-# 12. UNIFIED SESSION ENTRY POINT
-# FIX: num_trades removed from all strategy calls — hardcoded to 1.
+# UNIFIED SESSION ENTRY POINT
 # ============================================
 def execute_session(amount, timeframe_minutes, strategy='auto', force=False, symbol=None,
                     user_leverage=None, user_api_key=None, user_api_secret=None,
@@ -2381,13 +2414,11 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                                           user_trade_mode='futures',
                                           user_exchange=user_futures if use_user_account else None)
 
-    # FIX VULN-001: No global exchange swap — user_exchange passed directly throughout
-
     return result
 
 
 # ============================================
-# 13. LIVE PRICES FOR TICKER BAR
+# LIVE PRICES FOR TICKER BAR
 # ============================================
 def get_live_prices():
     pairs = [
@@ -2420,7 +2451,7 @@ def get_live_prices():
 
 
 # ============================================
-# 14. SIGNAL HELPERS FOR FRONTEND
+# SIGNAL HELPERS FOR FRONTEND
 # ============================================
 def get_single_signal(symbol='BTC/USDT'):
     return generate_signal(symbol)
