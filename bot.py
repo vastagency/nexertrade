@@ -1652,7 +1652,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             'symbol':      monitor_sym,
             'stopLoss':    str(round(sl_price, 6)),
             'slTriggerBy': 'LastPrice',
-            'positionIdx': _get_position_idx(direction, exchange) if direction else 0,
+            'positionIdx': _get_position_idx(trade_dir, _user_exchange) if trade_dir else 0,
         }, _user_exchange or bybit_futures)
         if sl_resp.get('retCode') == 0:
             print(f'  [NATIVE SL] Set on Bybit @ ${sl_price:.6f}')

@@ -1,9 +1,6 @@
 # ============================================
 #   NEXERTRADE — MAIN APPLICATION
 #   Phase 6: Wallet & Withdrawal Security
-#   + Multi‑trade support (num_trades)
-#   + FIX: TP prices now included in /api/live_status
-#   + FIX: user_balance passed to execute_real_trade for risk scaling
 # ============================================
 
 # eventlet monkey_patch MUST be first — before ALL other imports.
@@ -708,21 +705,19 @@ def api_trade_complete():
 # ============================================
 def _run_trade_job(job_id, user_id, amount, timeframe, strategy, force,
                    compound_rate=0.0, symbol=None, user_leverage=None,
-                   user_api_key=None, user_api_secret=None, trade_user_id=None,
-                   num_trades=1):
+                   user_api_key=None, user_api_secret=None, trade_user_id=None):
     """Background thread that runs the trading session and stores result."""
     with app.app_context():
         try:
             from bot import execute_session
-            # Pass num_trades to the session
+            # FIX: num_trades removed — always 1 trade per session
             results = execute_session(
                 amount, timeframe,
                 strategy=strategy, force=force,
                 symbol=symbol, user_leverage=user_leverage,
                 user_api_key=user_api_key,
                 user_api_secret=user_api_secret,
-                user_id=trade_user_id,
-                num_trades=num_trades
+                user_id=trade_user_id
             )
             # Apply compounding if enabled
             if compound_rate > 0 and results.get('net_pnl', 0) != 0:
@@ -745,6 +740,9 @@ def _run_trade_job(job_id, user_id, amount, timeframe, strategy, force,
                 print(f'  [SESSION] Could not clear job_id from DB: {_dbe}')
                 db.session.rollback()
         except Exception as e:
+            import traceback
+            print(f'  [JOB ERROR] Session crashed: {e}')
+            traceback.print_exc()
             with _trade_jobs_lock:
                 _trade_jobs[job_id]['status'] = 'error'
                 _trade_jobs[job_id]['error']  = str(e)
@@ -772,11 +770,6 @@ def api_bot_execute():
         # User-selected pair and leverage
         selected_symbol   = data.get('symbol', None)       # e.g. 'XRP/USDT' or None
         user_leverage     = data.get('leverage', None)     # e.g. 2, 5, 10 or None
-        # NEW: extract num_trades from frontend, default to 1
-        num_trades        = int(data.get('num_trades', 1))
-        if num_trades < 1:
-            num_trades = 1
-
         if user_leverage:
             try:
                 user_leverage = int(user_leverage)
@@ -787,6 +780,9 @@ def api_bot_execute():
 
         if strategy not in ('auto', 'momentum', 'pickup', 'always_win'):
             strategy = 'momentum'
+
+        # FIX: Always 1 trade per session — fee drag makes multi-trade unprofitable
+        # Leverage does the heavy lifting, not trade quantity
 
         min_dep = float(get_setting('min_deposit', '9'))
         max_dep = float(get_setting('max_deposit', '200'))
@@ -808,12 +804,17 @@ def api_bot_execute():
         if amount > live_balance:
             return jsonify({'success': False, 'message': f'Insufficient Bybit balance. Your live balance is ${live_balance:.2f}'}), 400
 
-        # Weak signal pre-check (unchanged)
+        # Weak signal pre-check:
+        # Only warn if a signal EXISTS but has low confidence.
+        # If generate_signal returns None (neutral 1h trend = no setup on that pair),
+        # that is NOT a weak signal — the session will scan all 25 pairs instead.
+        # Never block session start just because the pre-check pair has no setup.
         if not force and strategy in ('momentum', 'auto', 'pickup', 'always_win'):
             try:
                 from bot import generate_signal
                 check_symbol = selected_symbol if selected_symbol else 'XRP/USDT'
                 preview_signal = generate_signal(check_symbol)
+                # Only warn if signal exists AND confidence is low — None means scan elsewhere
                 if preview_signal is not None and preview_signal['confidence'] < 60:
                     rsi_val     = preview_signal.get('rsi', 50)
                     direction   = preview_signal.get('direction', 'BUY')
@@ -843,8 +844,7 @@ def api_bot_execute():
 
         socketio.emit('session_started', {
             'user': current_user.name, 'amount': amount,
-            'timeframe': timeframe, 'strategy': strategy,
-            'num_trades': num_trades
+            'timeframe': timeframe, 'strategy': strategy
         }, room='admin_room')
 
         # Kill any existing running session for this user before starting new one
@@ -865,8 +865,7 @@ def api_bot_execute():
             _trade_jobs[job_id] = {
                 'status':  'running',
                 'user_id': current_user.id,
-                'amount':  amount,
-                'num_trades': num_trades   # store for reference
+                'amount':  amount
             }
         # Persist job_id to DB so the frontend can recover on refresh/new device
         try:
@@ -885,10 +884,9 @@ def api_bot_execute():
             _run_trade_job,
             job_id, current_user.id, amount, timeframe, strategy, force,
             compound_rate, selected_symbol, user_leverage, u_api_key, u_api_secret,
-            current_user.id,
-            num_trades
+            current_user.id
         )
-        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': num_trades}), 202
+        return jsonify({'success': True, 'job_id': job_id, 'async': True, 'trades': 1}), 202
 
     except Exception as e:
         print(f'Execute error: {e}')
@@ -982,7 +980,7 @@ def api_bot_result(job_id):
     # Save session to DB and update user balance
     session = TradeSession(
         user_id=current_user.id,
-        timeframe=job['amount'],   # using amount as timeframe for backward compatibility
+        timeframe=job['amount'],
         amount=job['amount'],
         total_trades=results['total_trades'],
         wins=results['wins'],
@@ -1600,15 +1598,16 @@ def api_bot_compound():
         return jsonify({'success': False, 'message': str(e)}), 500
 
 
-# ============================================
-# FIX: LIVE STATUS — Now includes TP prices
-# ============================================
+if __name__ == '__main__':
+    init_db()
+    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
+
+
 @app.route('/api/live_status')
 @login_required
 def live_status():
     """
     Returns REAL active trade state from bot._active_trade.
-    Now includes tp_prices array for frontend to display individual TPs.
     No random values. No placeholders. No hardcoded pairs.
     Frontend polls this every 4 seconds during a live session.
     """
@@ -1623,11 +1622,6 @@ def live_status():
             'message': 'No active trade',
         })
 
-    # Get TP prices - ensure they're always a list
-    tp_prices = trade.get('tp_prices', [])
-    if not isinstance(tp_prices, list):
-        tp_prices = []
-
     return jsonify({
         'active':        trade.get('active', False),
         'pair':          trade.get('pair'),
@@ -1635,18 +1629,12 @@ def live_status():
         'entry':         trade.get('entry', 0.0),
         'current_price': trade.get('current_price', 0.0),
         'pnl':           trade.get('pnl', 0.0),
-        'pnl_net':       trade.get('pnl_net', 0.0),
         'pnl_pct':       trade.get('pnl_pct', 0.0),
         'tp_hits':       trade.get('tp_hits', 0),
-        'tp_prices':     tp_prices,  # <-- FIX: Now includes individual TP prices
+        'tp_prices':     trade.get('tp_prices', []),
         'sl_price':      trade.get('sl_price', 0.0),
         'position_size': trade.get('position_size', 0.0),
         'leverage':      trade.get('leverage', 2),
         'status':        trade.get('status', 'idle'),
         'message':       trade.get('message', ''),
     })
-
-
-if __name__ == '__main__':
-    init_db()
-    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)
