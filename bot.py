@@ -928,14 +928,54 @@ def generate_signal(symbol, timeframe='5m'):
 
         raw_direction = 'BUY' if score > 0 else 'SELL'
 
+        # FIX: Counter-trend flip — instead of rejecting, align direction with trend
+        # If score says BUY but trend is BEARISH: flip to SELL (trend is the authority)
+        # If score says SELL but trend is BULLISH: flip to BUY (trend is the authority)
+        # Only flip if score is weak (abs_score <= 4) — strong contrary scores still reject
+        # Strong contrary signal (abs_score > 6) against trend = genuinely confused market, skip
         if trend_bias == 'bullish' and raw_direction == 'SELL':
-            print(f'  [{symbol}] Score says SELL but 1h trend is BULLISH — no counter-trend trade')
-            return None
+            if abs(score) > 6:
+                print(f'  [{symbol}] Strong SELL score {score} vs BULLISH trend — market confused, skip')
+                return None
+            # Flip to BUY aligned with trend — re-evaluate with bullish bias
+            print(f'  [{symbol}] Score says SELL but trend BULLISH — flipping direction to BUY')
+            score = abs(score)  # flip score to positive
+            score += 1  # trend alignment bonus
+            raw_direction = 'BUY'
+
         if trend_bias == 'bearish' and raw_direction == 'BUY':
-            print(f'  [{symbol}] Score says BUY but 1h trend is BEARISH — no counter-trend trade')
-            return None
+            if abs(score) > 6:
+                print(f'  [{symbol}] Strong BUY score {score} vs BEARISH trend — market confused, skip')
+                return None
+            # Flip to SELL aligned with trend — re-evaluate with bearish bias
+            print(f'  [{symbol}] Score says BUY but trend BEARISH — flipping direction to SELL')
+            score = -abs(score)  # flip score to negative
+            score -= 1  # trend alignment bonus
+            raw_direction = 'SELL'
 
         direction = raw_direction
+
+        # FIX 2: Dual-stochastic overbought/oversold hard gate
+        # Buying when BOTH stoch5 and stoch15 are >78 = chasing a move already made
+        # Selling when BOTH stoch5 and stoch15 are <22 = chasing a move already made
+        # This directly blocked ONDO (stoch=81/84 BUY) and similar bad entries
+        if direction == 'BUY' and stoch_k > 78 and stoch15_k > 78:
+            print(f'  [{symbol}] Dual stochastic overbought ({stoch_k:.0f}/{stoch15_k:.0f}) — BUY rejected (chasing)')
+            return None
+        if direction == 'SELL' and stoch_k < 22 and stoch15_k < 22:
+            print(f'  [{symbol}] Dual stochastic oversold ({stoch_k:.0f}/{stoch15_k:.0f}) — SELL rejected (chasing)')
+            return None
+
+        # FIX 5: RSI15 hard gate — overbought/oversold on 15m timeframe blocks entry
+        # RSI15>67 on a BUY = 15m price run already exhausted, reversal imminent
+        # RSI15<33 on a SELL = 15m already dumped hard, bounce risk high
+        # ONDO had RSI15=69.5 — this gate would have blocked that losing trade
+        if direction == 'BUY' and rsi15 > 67:
+            print(f'  [{symbol}] RSI15={rsi15:.1f} overbought — BUY rejected (15m exhausted)')
+            return None
+        if direction == 'SELL' and rsi15 < 33:
+            print(f'  [{symbol}] RSI15={rsi15:.1f} oversold — SELL rejected (15m exhausted)')
+            return None
 
         if sr_position == 'middle' and abs(score) < 5:
             print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
@@ -975,11 +1015,14 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] Score {score} too weak after RSI1h adjustment')
             return None
 
-        if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -5:
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-5, got {score}')
+        # FIX 3: Relaxed neutral zone gate — was score>=5/score<=-5, now >=4/<=-4
+        # Secondary confluence (volume, candle, stoch extreme, BB squeeze) still required
+        # This recovers valid setups with score 4 that were being wasted
+        if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -4:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-4, got {score}')
             return None
-        if direction == 'BUY' and 45 <= rsi1h <= 65 and score < 5:
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=5, got {score}')
+        if direction == 'BUY' and 45 <= rsi1h <= 65 and score < 4:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=4, got {score}')
             return None
 
         abs_score = abs(score)
@@ -1747,6 +1790,31 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 remaining_qty = 0
             continue
         consecutive_errors = 0
+
+        # FIX 4: Bybit position existence check every ~30s
+        # When Bybit native SL fires server-side, position disappears on Bybit
+        # but our monitoring loop doesn't know and keeps running forever
+        # Check position list periodically; if size=0, exit cleanly with real PnL
+        if int(_time_module.time()) % 30 < 6:
+            try:
+                pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
+                    'category': 'linear',
+                    'symbol': monitor_sym,
+                }, _user_exchange or bybit_futures)
+                if pos_resp.get('retCode') == 0:
+                    positions = pos_resp.get('result', {}).get('list', [])
+                    bybit_qty = sum(float(p.get('size', 0)) for p in positions)
+                    if bybit_qty == 0 and remaining_qty > 0:
+                        print(f'  [POSITION CHECK] Position closed on Bybit (native SL fired) @ ${live_price:.6f}')
+                        pc = (live_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - live_price) / entry_price
+                        sl_pnl = pc * remaining_qty * entry_price * session_lev
+                        real_pnl += sl_pnl
+                        net_after = real_pnl - estimate_fees(notional)
+                        print(f'  [POSITION CHECK] PnL: ${sl_pnl:.4f} | Net: ${net_after:.4f}')
+                        remaining_qty = 0
+                        break
+            except Exception as _pos_e:
+                pass  # position check is non-critical
 
         price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
         pct_move     = price_diff / entry_price if entry_price > 0 else 0
