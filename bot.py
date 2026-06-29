@@ -21,6 +21,8 @@
 #  14.  100 pairs (was 55) — more opportunities
 #  15.  Always-Win zombie loop timeout (VULN-002 FIX)
 #  16.  Signal recalibration v2 — lean->4, normal->3
+#  17.  Ranging market hard gate — only trade trending_up / trending_down
+#  18.  Ghost session lock — kill existing session before starting new one
 # ============================================
 
 import os
@@ -769,6 +771,14 @@ def generate_signal(symbol, timeframe='5m'):
         highs15  = df15.get('high', closes15)
         lows15   = df15.get('low',  closes15)
 
+        # FIX 17: Ranging market hard gate — check market condition FIRST before any scoring.
+        # Live data proof: trending markets = 3/3 wins (+$1.61), ranging = 1/4 wins (-$0.35).
+        # Every single loss had market_condition='ranging'. Only trade when market is moving.
+        market_condition = detect_market_condition(df1h)
+        if market_condition == 'ranging':
+            print(f'  [{symbol}] Market=ranging — skip (only trade trending markets)')
+            return None
+
         trend_bias = get_1h_trend_bias(closes1h)
         price_now  = closes1h[-1]
         ema9_now   = ema_series(closes1h, 9)[-1]
@@ -1126,14 +1136,12 @@ def generate_signal(symbol, timeframe='5m'):
         if real_price:
             current_price = real_price
 
-        market_condition = detect_market_condition(df1h)
-
         print(f'  [{symbol}] PASS | score={score} conf={confidence:.0f}% | '
               f'RSI5={rsi5:.1f} RSI15={rsi15:.1f} RSI1h={rsi1h:.1f} | '
               f'EMA={ema_trend5}/{ema_trend15}/{ema_trend1h} | '
               f'MACD={mt5}/{mt15} | Stoch={stoch_k:.0f}/{stoch15_k:.0f} | '
               f'Vol={volume_trend} | Pat={candle_pat} | SR={sr_position} | '
-              f'ATR={atr_pct:.3f}% | 1hBias={trend_bias} | {direction}')
+              f'ATR={atr_pct:.3f}% | 1hBias={trend_bias} | Market={market_condition} | {direction}')
 
         return {
             'symbol':           symbol,
@@ -1227,7 +1235,8 @@ def select_best_pair(pairs):
         print(f'  Best pair: {best_signal["symbol"]} '
               f'({best_signal["direction"]} conf={best_signal["confidence"]:.0f}% '
               f'score={best_signal["score"]} quality={best_quality:.1f} '
-              f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}%)')
+              f'| bias={best_signal["trend_bias"]} | ATR={best_signal["atr_pct"]:.3f}% '
+              f'| market={best_signal["market_condition"]})')
     else:
         print('  No strong setup yet — continuing market scan — bot will wait')
 
@@ -2373,11 +2382,22 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
 # ============================================
 # 12. UNIFIED SESSION ENTRY POINT
 # FIX: num_trades removed from all strategy calls — hardcoded to 1.
+# FIX 18: Ghost session lock — if a session is already active for this user,
+#          stop it cleanly before starting a new one. Prevents double positions.
 # ============================================
 def execute_session(amount, timeframe_minutes, strategy='auto', force=False, symbol=None,
                     user_leverage=None, user_api_key=None, user_api_secret=None,
                     user_id=None, user_balance=None):
     strategy = strategy.lower().strip()
+
+    # FIX 18: Ghost session lock — kill any existing active session for this user
+    # before starting a new one. This prevents the double-position race condition
+    # that caused the duplicate FARTCOIN trade on June 28.
+    if _active_trade.get('active') and _active_trade.get('user_id') == user_id:
+        print(f'  [GHOST LOCK] Active session detected for user {user_id} — stopping before new session')
+        request_stop(user_id)
+        eventlet.sleep(2)
+        _clear_active(user_id)
 
     use_user_account = bool(user_api_key and user_api_secret)
     if use_user_account:
