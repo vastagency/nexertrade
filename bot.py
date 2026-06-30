@@ -176,13 +176,13 @@ BREAKEVEN_BUFFER  = 0.004
 # FIX: ATR multipliers — TP1 raised back to 1.0x ATR (from 0.8x)
 # Reason: at 0.8x ATR, TP1 gross profit is too small relative to fees.
 # 1.0x ATR gives ~0.22-0.30% move which clears fees more comfortably.
-ATR_SL_MULT_LOW   = 1.2
-ATR_SL_MULT_NORM  = 1.0
-ATR_SL_MULT_HIGH  = 0.9
+ATR_SL_MULT_LOW   = 1.8
+ATR_SL_MULT_NORM  = 1.6
+ATR_SL_MULT_HIGH  = 1.4
 
-ATR_TP_MULTS_LOW  = [1.0,  2.0,  3.5,  6.0]
-ATR_TP_MULTS_NORM = [1.0,  2.5,  4.5,  7.0]
-ATR_TP_MULTS_HIGH = [1.0,  3.0,  5.0,  8.0]
+ATR_TP_MULTS_LOW  = [1.4,  2.5,  4.0,  6.5]
+ATR_TP_MULTS_NORM = [1.4,  3.0,  5.0,  7.5]
+ATR_TP_MULTS_HIGH = [1.4,  3.5,  5.5,  8.5]
 
 MIN_TP1_PCT = 0.0015
 MAX_SL_PCT  = 0.010
@@ -1226,13 +1226,22 @@ def _signal_quality_score(sig):
             atr_weight + vol_weight + candle_weight + sr_weight)
 
 
-def select_best_pair(pairs):
+def select_best_pair(pairs, user_id=None):
     best_signal  = None
     best_quality = -1
     passed       = []
 
     print(f'  Scanning {len(pairs)} pairs...')
     for pair in pairs:
+        # FIX 20: Check stop flag mid-scan, not just between scans.
+        # Previously a 70-pair scan (60-90+ seconds) could not be interrupted
+        # once started, so clicking Stop mid-scan had no effect until the
+        # scan finished — and the bot could still enter a real trade after
+        # the user believed the session was stopped (e.g. WLD fired ~20min
+        # after a stop click on June 30).
+        if user_id and should_stop(user_id):
+            print(f'  [STOP] Stop flag detected mid-scan — aborting scan immediately')
+            return None
         try:
             sig = generate_signal(pair)
             if sig:
@@ -1616,9 +1625,9 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             best_signal = sig
         else:
             print(f'  [{preferred_symbol}] No signal on preferred pair — scanning all {len(CRYPTO_PAIRS)} pairs...')
-            best_signal = select_best_pair(CRYPTO_PAIRS)
+            best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
     else:
-        best_signal = select_best_pair(CRYPTO_PAIRS)
+        best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
 
     if not best_signal:
         print('  No signal on any pair yet -- will rescan in 30s...')
@@ -1630,7 +1639,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
             _set_active({'status': 'scanning',
                          'message': f'Scanning all pairs... ({scan_wait}s)'})
-            best_signal = select_best_pair(CRYPTO_PAIRS)
+            best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
         if not best_signal:
             results['message'] = 'No quality signal found after 10 minutes. Market conditions unclear — try again later.'
             _clear_active(user_id)
@@ -1670,6 +1679,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     quantity     = order['quantity']
     monitor_sym  = order.get('symbol', sym.replace('/', '').replace(':USDT', '') + 'USDT')
     notional     = quantity * entry_price  # for fee calculation
+    entry_fee    = notional * BYBIT_FEE_RATE  # one-sided fee, paid on entry fill
 
     # TP/SL levels
     if atr_pct < 0.30:
@@ -1760,6 +1770,12 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     remaining_qty      = quantity
     tps_hit            = 0
     real_pnl           = 0.0
+    total_fees_paid    = entry_fee  # FIX 21: track fees actually incurred per chunk, not recomputed
+                               # from the full original notional on every update. Previously
+                               # estimate_fees(notional) was called repeatedly against the
+                               # ORIGINAL position size even after partial TP closes shrank it,
+                               # producing impossible results like Net > Gross PnL (seen on the
+                               # June 29 DYDX trade: Gross $0.58 | Net $0.82).
     won                = False
     trailing_sl_active = False
     consecutive_errors = 0
@@ -1785,6 +1801,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 cp = cr['close_price']
                 pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
                 real_pnl += pc * remaining_qty * entry_price * session_lev
+                total_fees_paid += (remaining_qty * cp) * BYBIT_FEE_RATE
                 print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
             break
@@ -1796,6 +1813,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
                 real_pnl += pc * remaining_qty * entry_price * session_lev
+                total_fees_paid += (remaining_qty * cp) * BYBIT_FEE_RATE
                 print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
             break
@@ -1833,7 +1851,8 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                         pc = (live_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - live_price) / entry_price
                         sl_pnl = pc * remaining_qty * entry_price * session_lev
                         real_pnl += sl_pnl
-                        net_after = real_pnl - estimate_fees(notional)
+                        total_fees_paid += (remaining_qty * live_price) * BYBIT_FEE_RATE  # exit fee on this chunk
+                        net_after = real_pnl - total_fees_paid
                         print(f'  [POSITION CHECK] PnL: ${sl_pnl:.4f} | Net: ${net_after:.4f}')
                         remaining_qty = 0
                         break
@@ -1842,9 +1861,14 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
         price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
         pct_move     = price_diff / entry_price if entry_price > 0 else 0
-        live_pnl_now = round(pct_move * remaining_qty * entry_price * session_lev, 4)
-        # FIX: Show net PnL on UI (gross minus estimated fees)
-        live_pnl_net = round(live_pnl_now - estimate_fees(notional), 4)
+        unrealized_pnl = round(pct_move * remaining_qty * entry_price * session_lev, 4)
+        # FIX 21: live_pnl_now/live_pnl_net now show TOTAL trade PnL (realized so far
+        # from any TP closes + current unrealized on what's still open), not just the
+        # unrealized leg in isolation. Fees are the actual cumulative fees paid plus an
+        # estimate for closing the remaining open quantity at the current price.
+        live_pnl_now = round(real_pnl + unrealized_pnl, 4)
+        est_exit_fee_remaining = (remaining_qty * live_price) * BYBIT_FEE_RATE
+        live_pnl_net = round(live_pnl_now - (total_fees_paid + est_exit_fee_remaining), 4)
         live_pnl_pct = round(pct_move * session_lev * 100, 4)
 
         if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
@@ -1888,9 +1912,11 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
                 pnl = pc * remaining_qty * entry_price * session_lev
+                closed_qty = remaining_qty
                 real_pnl     += pnl
+                total_fees_paid += (closed_qty * cp) * BYBIT_FEE_RATE
                 remaining_qty = 0
-                net = real_pnl - estimate_fees(notional)
+                net = real_pnl - total_fees_paid
                 print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
             else:
                 print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
@@ -1926,16 +1952,18 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                     pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
                     pnl_chunk = pc * actual_closed * entry_price * session_lev
                     real_pnl      += pnl_chunk
+                    chunk_exit_fee = (actual_closed * cp) * BYBIT_FEE_RATE
+                    total_fees_paid += chunk_exit_fee
                     remaining_qty -= actual_closed
                     tps_hit        = tp_idx + 1
                     won            = True
-                    chunk_net = pnl_chunk - estimate_fees(actual_closed * entry_price)
+                    chunk_net = pnl_chunk - chunk_exit_fee
                     print(f'  TP{tp_idx+1} closed @ ${cp:.4f} | chunk PnL: ${pnl_chunk:.4f} | Net: ${chunk_net:.4f} | Remaining: {remaining_qty:.4f}')
 
                     _set_active({
                         'tp_hits':       tps_hit,
                         'pnl':           round(real_pnl, 4),
-                        'pnl_net':       round(real_pnl - estimate_fees(notional), 4),
+                        'pnl_net':       round(real_pnl - total_fees_paid, 4),
                         'current_price': cp,
                         'position_size': remaining_qty,
                         'message':       f'TP{tps_hit} hit @ ${cp:.4f} | Gross: ${real_pnl:.4f} | Net: ${chunk_net:.4f}',
@@ -1987,7 +2015,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         eventlet.sleep(6)
 
     real_pnl = round(real_pnl, 4)
-    real_pnl_net = round(real_pnl - estimate_fees(notional), 4)
+    real_pnl_net = round(real_pnl - total_fees_paid, 4)
 
     _set_active({
         'active':   False,
@@ -2066,7 +2094,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
     _set_active({'running': True, 'user_id': user_id, 'status': 'scanning',
                  'message': 'Pick Up Trade: scanning for best pair...'})
 
-    best_signal = select_best_pair(CRYPTO_PAIRS)
+    best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
     if best_signal is None:
         _clear_active(user_id)
         results['message'] = 'No quality setup found. Try again shortly.'
@@ -2240,7 +2268,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
     fee_rate    = BYBIT_FEE_RATE
     slice_amt   = amount / MAX_ADDS
 
-    best_signal = select_best_pair(CRYPTO_PAIRS)
+    best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
     if best_signal is None:
         _clear_active(user_id)
         results['message'] = 'No quality setup found. Try again shortly.'
@@ -2376,7 +2404,7 @@ def execute_auto_best_session(amount, timeframe_minutes, symbol=None,
                                user_id=None, user_balance=None,
                                user_exchange=None):
     print('Auto-best: scanning market conditions...')
-    best_signal = select_best_pair(CRYPTO_PAIRS)
+    best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
     if best_signal is None:
         return {
             'strategy': 'auto_best', 'total_trades': 0,
