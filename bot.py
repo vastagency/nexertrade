@@ -170,7 +170,7 @@ MOMENTUM_TP_FRACS = [0.30, 0.25, 0.25, 0.20]
 PICKUP_TP_FRAC    = 0.333
 AW_TP_FRAC        = 1.0
 
-TRAIL_SL_AFTER_TP = 1
+TRAIL_SL_AFTER_TP = 2
 BREAKEVEN_BUFFER  = 0.004
 
 # FIX: ATR multipliers — TP1 raised back to 1.0x ATR (from 0.8x)
