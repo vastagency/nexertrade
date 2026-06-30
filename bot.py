@@ -965,6 +965,21 @@ def generate_signal(symbol, timeframe='5m'):
 
         direction = raw_direction
 
+        # FIX 19: Direction must agree with market_condition (not just 1h EMA trend_bias).
+        # trend_bias is EMA9/21/50-based and can lag; market_condition is based on the
+        # actual net move over the last 20 candles and reflects what price is doing right now.
+        # The counter-trend flip logic above only checks trend_bias, so it can flip a trade
+        # into the opposite direction of the real, current price action (e.g. FARTCOIN
+        # June 30: 1hBias=bullish flipped a SELL into a BUY while Market=trending_down,
+        # and the trade went straight to SL with zero TPs hit). This gate catches that
+        # disagreement and rejects the trade instead of trusting the laggier indicator.
+        if market_condition == 'trending_down' and direction == 'BUY':
+            print(f'  [{symbol}] Direction BUY conflicts with Market=trending_down — skip (trend_bias lagging)')
+            return None
+        if market_condition == 'trending_up' and direction == 'SELL':
+            print(f'  [{symbol}] Direction SELL conflicts with Market=trending_up — skip (trend_bias lagging)')
+            return None
+
         # FIX 2: Dual-stochastic overbought/oversold hard gate
         # Buying when BOTH stoch5 and stoch15 are >78 = chasing a move already made
         # Selling when BOTH stoch5 and stoch15 are <22 = chasing a move already made
