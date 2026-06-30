@@ -180,9 +180,16 @@ ATR_SL_MULT_LOW   = 1.8
 ATR_SL_MULT_NORM  = 1.6
 ATR_SL_MULT_HIGH  = 1.4
 
-ATR_TP_MULTS_LOW  = [1.4,  2.5,  4.0,  6.5]
-ATR_TP_MULTS_NORM = [1.4,  3.0,  5.0,  7.5]
-ATR_TP_MULTS_HIGH = [1.4,  3.5,  5.5,  8.5]
+# FIX 22: TP1 was a flat 1.4x ATR across all three bands while SL varied
+# (1.8 / 1.6 / 1.4), so R:R landed at 0.78:1 and 0.87:1 in two of three
+# bands — structurally under the 1.0 minimum required by the R:R gate.
+# This caused near-total trade starvation on June 30 (HBAR, WIF, MELANIA,
+# STX all rejected at R:R 0.87-0.88:1 despite passing every other gate).
+# TP1 now scales with the same band as SL, kept at roughly 1.3x the SL
+# distance so a real trade has room to clear fees and the R:R floor.
+ATR_TP_MULTS_LOW  = [2.4,  3.5,  5.0,  7.5]
+ATR_TP_MULTS_NORM = [2.1,  3.5,  5.5,  8.0]
+ATR_TP_MULTS_HIGH = [1.8,  3.5,  5.5,  8.5]
 
 MIN_TP1_PCT = 0.0015
 MAX_SL_PCT  = 0.010
