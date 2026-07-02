@@ -23,6 +23,15 @@
 #  16.  Signal recalibration v2 — lean->4, normal->3
 #  17.  Ranging market hard gate — only trade trending_up / trending_down
 #  18.  Ghost session lock — kill existing session before starting new one
+#  19.  FLOAT ROUNDING FIX — qty-step division no longer strands fractional
+#       leftover positions on Bybit (see _round_qty_to_step below). This
+#       was caused by e.g. 15.7/0.1 evaluating to 156.99999999999997 in
+#       Python float math, which math.floor() truncated to 156 instead
+#       of 157 — silently leaving 0.1 units open on the exchange after
+#       "full" closes. Confirmed on the July 1 AVAX trade: bot logged
+#       remaining_qty=15.7 but the 4h-timeout close sent qty=15.6, and
+#       the leftover 0.1 AVAX only closed six hours later as a separate
+#       order visible on Bybit but invisible to the bot's own tracking.
 # ============================================
 
 import os
@@ -1404,12 +1413,48 @@ def _get_qty_step(bybit_sym):
     return fallback
 
 
+# ============================================
+# FIX 19: SAFE QTY-STEP ROUNDING
+# ============================================
+def _round_qty_to_step(value, step, decimals=None):
+    """
+    Round `value` down to the nearest multiple of `step`, correcting for
+    floating-point division error.
+
+    Problem this fixes: Python float division like 15.7 / 0.1 does not
+    equal 157.0 exactly — it evaluates to 156.99999999999997 because of
+    how binary floats represent decimal fractions. The old code did:
+
+        close_qty = math.floor(quantity / step) * step
+
+    which truncated 156.999... down to 156, not 157 — silently shaving
+    one full step off the intended quantity. On a partial or full close,
+    this leaves a tiny fragment of the position open on Bybit that the
+    bot's own tracking never accounts for (confirmed on the July 1 AVAX
+    trade: bot logged remaining_qty=15.7, sent a close for qty=15.6, and
+    the leftover 0.1 AVAX only got closed six hours later as a separate,
+    bot-invisible order).
+
+    Fix: add a tiny epsilon before flooring so true multiples of step
+    (which float math nudges just under the integer) round correctly,
+    while genuinely partial steps still floor down as intended.
+    """
+    if step <= 0:
+        return value
+    if decimals is None:
+        decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
+    steps = math.floor((value / step) + 1e-9)
+    return round(steps * step, decimals)
+
+
 def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exchange=None, leverage=None):
     """
     Place a futures market order on Bybit.
     FIX: Uses _get_qty_step() for all pairs — no hardcoded step dict.
     FIX: positionIdx: 0 always sent — one-way mode required.
     FIX: exchange param used — trades on correct user account.
+    FIX 19: quantity rounding uses _round_qty_to_step() to avoid stranding
+    fractional leftover positions due to float division imprecision.
     """
     exchange  = exchange or bybit_futures
     session_lev = leverage if leverage is not None else LEVERAGE  # FIX: use passed leverage not global
@@ -1425,9 +1470,7 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
         step     = instr['step']
         min_qty  = instr['min_qty']
         raw_qty  = usdt_amount * session_lev / current_price  # FIX: use session_lev not global LEVERAGE
-        quantity = math.floor(raw_qty / step) * step
-        decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-        quantity = round(quantity, decimals)
+        quantity = _round_qty_to_step(raw_qty, step)
 
         print(f'  [QTY] raw={raw_qty:.4f} step={step} final={quantity}')
         if quantity < min_qty or quantity <= 0:
@@ -1518,9 +1561,9 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
         instr    = _get_qty_step(bybit_sym)
         step     = instr['step']
         min_qty  = instr['min_qty']
-        decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-        close_qty = math.floor(quantity / step) * step
-        close_qty = round(close_qty, decimals)
+        # FIX 19: use _round_qty_to_step() instead of raw math.floor(qty/step)*step
+        # to avoid stranding fractional leftover positions due to float imprecision.
+        close_qty = _round_qty_to_step(quantity, step)
         print(f'  [CLOSE QTY] raw={quantity} step={step} rounded={close_qty}')
 
         if close_qty < min_qty:
@@ -1943,8 +1986,8 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 min_qty  = instr['min_qty']
                 tp_frac  = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
                 raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
-                decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-                close_qty = round(_math.floor(raw_q / step) * step, decimals)
+                # FIX 19: use _round_qty_to_step() instead of raw math.floor(raw_q/step)*step
+                close_qty = _round_qty_to_step(raw_q, step)
                 close_qty = min(close_qty, remaining_qty)
 
                 if close_qty < min_qty or close_qty <= 0:
@@ -2178,8 +2221,8 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                     instr  = _get_qty_step(buy_sym)
                     step   = instr['step']
                     raw_q  = buy_remaining * tp_frac
-                    decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-                    close_q = round(math.floor(raw_q / step) * step, decimals)
+                    # FIX 19: use _round_qty_to_step() instead of raw math.floor(raw_q/step)*step
+                    close_q = _round_qty_to_step(raw_q, step)
                     close_q = min(close_q, buy_remaining)
                     if close_q >= instr['min_qty']:
                         cr = close_trade(buy_sym, 'BUY', close_q, exchange=_exch)
@@ -2206,8 +2249,8 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                     instr  = _get_qty_step(sell_sym)
                     step   = instr['step']
                     raw_q  = sell_remaining * tp_frac
-                    decimals = max(0, len(str(step).rstrip('0').split('.')[-1])) if '.' in str(step) else 0
-                    close_q = round(math.floor(raw_q / step) * step, decimals)
+                    # FIX 19: use _round_qty_to_step() instead of raw math.floor(raw_q/step)*step
+                    close_q = _round_qty_to_step(raw_q, step)
                     close_q = min(close_q, sell_remaining)
                     if close_q >= instr['min_qty']:
                         cr = close_trade(sell_sym, 'SELL', close_q, exchange=_exch)
