@@ -182,12 +182,16 @@ AW_TP_FRAC        = 1.0
 TRAIL_SL_AFTER_TP = 2
 BREAKEVEN_BUFFER  = 0.004
 
-# FIX: ATR multipliers — TP1 raised back to 1.0x ATR (from 0.8x)
-# Reason: at 0.8x ATR, TP1 gross profit is too small relative to fees.
-# 1.0x ATR gives ~0.22-0.30% move which clears fees more comfortably.
-ATR_SL_MULT_LOW   = 1.8
-ATR_SL_MULT_NORM  = 1.6
-ATR_SL_MULT_HIGH  = 1.4
+# FIX 20: SL multipliers widened — was 1.8/1.6/1.4, now 2.6/2.2/1.9.
+# Root cause found: on low-ATR coins (ATR<0.30%), a 1.8x SL multiplier
+# produced stop distances around 0.4% from entry. That's inside normal
+# price noise, not a real reversal signal — confirmed on back-to-back
+# CRV/USDT trades that stopped out in 10-15 minutes on ordinary drift,
+# never approaching TP1. Wider stops mean fewer trades get shaken out
+# by noise; TP distances below are widened to match so R:R stays sane.
+ATR_SL_MULT_LOW   = 2.6
+ATR_SL_MULT_NORM  = 2.2
+ATR_SL_MULT_HIGH  = 1.9
 
 # FIX 22: TP1 was a flat 1.4x ATR across all three bands while SL varied
 # (1.8 / 1.6 / 1.4), so R:R landed at 0.78:1 and 0.87:1 in two of three
@@ -196,17 +200,22 @@ ATR_SL_MULT_HIGH  = 1.4
 # STX all rejected at R:R 0.87-0.88:1 despite passing every other gate).
 # TP1 now scales with the same band as SL, kept at roughly 1.3x the SL
 # distance so a real trade has room to clear fees and the R:R floor.
-ATR_TP_MULTS_LOW  = [2.4,  3.5,  5.0,  7.5]
-ATR_TP_MULTS_NORM = [2.1,  3.5,  5.5,  8.0]
-ATR_TP_MULTS_HIGH = [1.8,  3.5,  5.5,  8.5]
+# FIX 20: TP multipliers widened alongside SL (see FIX 20 note above the
+# SL constants) so R:R and TP1's fee-clearing margin are preserved now
+# that SL sits farther from entry.
+ATR_TP_MULTS_LOW  = [3.2,  4.5,  6.2,  9.0]
+ATR_TP_MULTS_NORM = [2.8,  4.5,  6.8,  9.5]
+ATR_TP_MULTS_HIGH = [2.4,  4.5,  6.8,  10.0]
 
 MIN_TP1_PCT = 0.0015
 MAX_SL_PCT  = 0.010
 
-# FIX: Minimum absolute SL distance in USDT
-# Prevents entries where SL is only 1-2 ticks away (e.g. SEI at $0.0546 with SL $0.0001 away)
-# SL must be at least 0.2% of entry price in absolute dollar terms
-MIN_SL_DISTANCE_PCT = 0.002  # 0.2% minimum SL distance
+# FIX 20: Minimum absolute SL distance raised from 0.2% to 0.6%.
+# 0.2% was too thin a floor — it let low-ATR trades (e.g. CRV/USDT) get
+# stopped out inside normal price noise within 10-15 minutes, never
+# reaching TP1. 0.6% gives every trade real room before the SL can fire,
+# on top of the wider ATR-based multipliers above.
+MIN_SL_DISTANCE_PCT = 0.006  # 0.6% minimum SL distance
 
 # FIX: Trading hours — only trade 8am-10pm UTC
 # Outside these hours crypto markets are dead (low volume, low ATR, high noise)
