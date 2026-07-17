@@ -1554,6 +1554,45 @@ def execute_real_trade(symbol, direction, usdt_amount, trade_mode='futures', exc
         return {'success': False, 'error': str(e), 'price': 0}
 
 
+# ============================================
+# FIX 22: REAL EXIT PRICE ON NATIVE SL DETECTION
+# ============================================
+def _get_real_exit_price(bybit_sym, exchange, fallback_price):
+    """
+    Fetch Bybit's actual recorded exit price for a position that was
+    closed by a native (server-side) SL trigger, instead of using
+    whatever price our own polling loop last happened to fetch.
+
+    Problem this fixes: when Bybit's native SL fires, our monitoring loop
+    only discovers the position is gone on its next ~30s position-list
+    check. At that point it was using `live_price` -- a price fetched
+    moments earlier in the loop, not necessarily the price the SL order
+    actually filled at. Confirmed on the July 14 ZRO/USDT trade: SL was
+    set at $0.8194, but the polled price used at detection time was
+    $0.8171 -- a ~$0.25 discrepancy on that trade alone, which understated
+    the real loss. This queries Bybit's own closed-PnL record, which
+    reflects the exchange's actual fill price, not our approximation.
+
+    Falls back to the polled price if the API call fails or returns
+    nothing usable, so this never blocks the close from being recorded.
+    """
+    try:
+        resp = _bybit_signed_request('GET', '/v5/position/closed-pnl', {
+            'category': 'linear',
+            'symbol':   bybit_sym,
+            'limit':    1,
+        }, exchange)
+        if resp.get('retCode') == 0:
+            records = resp.get('result', {}).get('list', [])
+            if records:
+                exit_price = float(records[0].get('avgExitPrice', 0) or 0)
+                if exit_price > 0:
+                    return exit_price
+    except Exception as e:
+        print(f'  [EXIT PRICE] Could not fetch real exit price, using polled price: {e}')
+    return fallback_price
+
+
 def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None):
     if exchange is None:
         exchange = bybit_futures
@@ -1906,13 +1945,23 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                     positions = pos_resp.get('result', {}).get('list', [])
                     bybit_qty = sum(float(p.get('size', 0)) for p in positions)
                     if bybit_qty == 0 and remaining_qty > 0:
-                        print(f'  [POSITION CHECK] Position closed on Bybit (native SL fired) @ ${live_price:.6f}')
-                        pc = (live_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - live_price) / entry_price
+                        # FIX 22: use Bybit's actual recorded exit price, not the
+                        # stale `live_price` from our own last poll — see
+                        # _get_real_exit_price() docstring for why this matters.
+                        real_exit_price = _get_real_exit_price(
+                            monitor_sym, _user_exchange or bybit_futures, live_price)
+                        print(f'  [POSITION CHECK] Position closed on Bybit (native SL fired) '
+                              f'@ ${real_exit_price:.6f} (Bybit-confirmed exit price)')
+                        pc = (real_exit_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - real_exit_price) / entry_price
                         sl_pnl = pc * remaining_qty * entry_price * session_lev
                         real_pnl += sl_pnl
-                        total_fees_paid += (remaining_qty * live_price) * BYBIT_FEE_RATE  # exit fee on this chunk
+                        total_fees_paid += (remaining_qty * real_exit_price) * BYBIT_FEE_RATE  # exit fee on this chunk
                         net_after = real_pnl - total_fees_paid
-                        print(f'  [POSITION CHECK] PnL: ${sl_pnl:.4f} | Net: ${net_after:.4f}')
+                        # FIX 23: label clarified — these are cumulative totals for
+                        # the whole trade (including any earlier TP closes), not
+                        # just this chunk. See FIX 23 note further below.
+                        print(f'  [POSITION CHECK] This close PnL: ${sl_pnl:.4f} | '
+                              f'Total trade — Gross: ${real_pnl:.4f} | Net: ${net_after:.4f}')
                         remaining_qty = 0
                         break
             except Exception as _pos_e:
@@ -1976,7 +2025,17 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 total_fees_paid += (closed_qty * cp) * BYBIT_FEE_RATE
                 remaining_qty = 0
                 net = real_pnl - total_fees_paid
-                print(f'  {sl_label} closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
+                # FIX 23: previously printed THIS CLOSE's gross (`pnl`) next to the
+                # CUMULATIVE net (`real_pnl - total_fees_paid`, which also includes
+                # any earlier TP closes on this trade). On trades with prior TP hits
+                # this made Net look bigger than Gross and inflated the displayed
+                # result -- confirmed on the July 14 SUSHI/USDT trade: this leg's
+                # gross was $20.61, but cumulative net (TP1 + TP2 + this close, minus
+                # fees) was $37.65, printed side-by-side as if directly comparable.
+                # Now both figures shown are cumulative and match Bybit's own
+                # closed-orders totals for the whole trade.
+                print(f'  {sl_label} closed @ ${cp:.4f} | This close gross: ${pnl:.4f} | '
+                      f'Total trade — Gross: ${real_pnl:.4f} | Net after fees: ${net:.4f}')
             else:
                 print(f'  [CRITICAL] {sl_label} close FAILED — manually close {monitor_sym} on Bybit!')
                 _set_active({'status': 'error',
