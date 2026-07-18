@@ -1638,8 +1638,17 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
         print(f'  [CLOSE RESP] retCode={resp.get("retCode")} retMsg={resp.get("retMsg")}')
 
         if resp.get('retCode') == 110017:
-            print(f'  [CLOSE] Position already zero on Bybit — treating as closed successfully')
-            return {'success': True, 'order_id': 'already_closed', 'close_price': close_price,
+            # FIX 24: this is the same "native SL already fired" situation FIX 22
+            # solved for the periodic position-check loop -- but this path was
+            # missed. `close_price` above was polled BEFORE we knew the position
+            # was already gone, so it's not the real fill price. Confirmed on the
+            # July 17 OP/USDT trade: this path fired, used the stale poll price,
+            # and the logged loss didn't reconcile with the actual account
+            # balance change. Now uses the same Bybit-confirmed exit price lookup.
+            real_price = _get_real_exit_price(bybit_sym, exchange, close_price)
+            print(f'  [CLOSE] Position already zero on Bybit — using Bybit-confirmed '
+                  f'exit price ${real_price:.6f} (was polling ${close_price:.6f})')
+            return {'success': True, 'order_id': 'already_closed', 'close_price': real_price,
                     'qty_closed': quantity}
 
         if resp.get('retCode') != 0:
