@@ -189,9 +189,9 @@ BREAKEVEN_BUFFER  = 0.004
 # CRV/USDT trades that stopped out in 10-15 minutes on ordinary drift,
 # never approaching TP1. Wider stops mean fewer trades get shaken out
 # by noise; TP distances below are widened to match so R:R stays sane.
-ATR_SL_MULT_LOW   = 2.8
-ATR_SL_MULT_NORM  = 2.4
-ATR_SL_MULT_HIGH  = 2.1
+ATR_SL_MULT_LOW   = 2.6
+ATR_SL_MULT_NORM  = 2.2
+ATR_SL_MULT_HIGH  = 1.9
 
 # FIX 22: TP1 was a flat 1.4x ATR across all three bands while SL varied
 # (1.8 / 1.6 / 1.4), so R:R landed at 0.78:1 and 0.87:1 in two of three
@@ -215,7 +215,7 @@ MAX_SL_PCT  = 0.010
 # stopped out inside normal price noise within 10-15 minutes, never
 # reaching TP1. 0.6% gives every trade real room before the SL can fire,
 # on top of the wider ATR-based multipliers above.
-MIN_SL_DISTANCE_PCT = 0.008  # 0.8% minimum SL distance
+MIN_SL_DISTANCE_PCT = 0.006  # 0.6% minimum SL distance
 
 # FIX: Trading hours — only trade 8am-10pm UTC
 # Outside these hours crypto markets are dead (low volume, low ATR, high noise)
@@ -796,7 +796,9 @@ def generate_signal(symbol, timeframe='5m'):
         highs15  = df15.get('high', closes15)
         lows15   = df15.get('low',  closes15)
 
-        # ENHANCED: Stricter market condition filter - only trade trending markets
+        # FIX 17: Ranging market hard gate — check market condition FIRST before any scoring.
+        # Live data proof: trending markets = 3/3 wins (+$1.61), ranging = 1/4 wins (-$0.35).
+        # Every single loss had market_condition='ranging'. Only trade when market is moving.
         market_condition = detect_market_condition(df1h)
         if market_condition == 'ranging':
             print(f'  [{symbol}] Market=ranging — skip (only trade trending markets)')
@@ -825,7 +827,9 @@ def generate_signal(symbol, timeframe='5m'):
         rsi15 = calculate_rsi(closes15, period=14)
         rsi1h = calculate_rsi(closes1h, period=14)
 
-        # ENHANCED: Better data quality check
+        # DATA QUALITY CHECK: If RSI values are identical across timeframes,
+        # data is likely from a bad Binance fallback (all same candles).
+        # Also check if Stochastic values are suspiciously identical.
         if abs(rsi5 - rsi15) < 0.5 and abs(rsi15 - rsi1h) < 0.5:
             print(f'  [{symbol}] Data quality fail — RSI identical across timeframes ({rsi5:.1f}/{rsi15:.1f}/{rsi1h:.1f}), likely bad data')
             return None
@@ -849,24 +853,26 @@ def generate_signal(symbol, timeframe='5m'):
         stoch15_k, _     = calculate_stochastic(closes15, highs15, lows15)
         bb_width, bb_squeeze = calculate_bb_squeeze(closes5)
 
-        # ENHANCED: Stricter ATR filter - only trade pairs with sufficient volatility
-        if atr_pct < 0.15:  # Increased from 0.12
+        # GATE: Minimum ATR 0.12% — lowered to capture more pairs in low-volatility markets
+        if atr_pct < 0.12:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% too low — dead market, skip')
             return None
 
+        # GATE: Minimum price $0.05 — skip micro-price coins where tick size kills R:R
+        # At $0.0155 (PORTAL), TP1 at same price can't clear fees despite decent ATR%
         if current_price < 0.05:
             print(f'  [{symbol}] Price ${current_price:.6f} too low — micro-price coin, skip')
             return None
 
+        # TP1 is 1.0x ATR — only skip if ATR is extremely tight
         tp1_distance_pct = atr_pct * 1.0
         if atr_pct < 0.15 and tp1_distance_pct < 0.08:
             print(f'  [{symbol}] ATR {atr_pct:.3f}% — TP1 distance {tp1_distance_pct:.3f}% too tight after fees, skip')
             return None
 
-        # ENHANCED: More balanced scoring system
+        # SCORING
         score = 0
 
-        # RSI scoring with more nuanced ranges
         if   rsi5 < 20:  score += 5
         elif rsi5 < 28:  score += 4
         elif rsi5 < 35:  score += 3
@@ -878,7 +884,6 @@ def generate_signal(symbol, timeframe='5m'):
         elif rsi5 > 58:  score -= 2
         elif rsi5 > 52:  score -= 1
 
-        # Multi-timeframe RSI confirmation
         if   rsi15 < 35: score += 3
         elif rsi15 < 45: score += 2
         elif rsi15 < 50: score += 1
@@ -891,7 +896,6 @@ def generate_signal(symbol, timeframe='5m'):
         elif rsi1h > 60: score -= 2
         elif rsi1h > 52: score -= 1
 
-        # EMA trend alignment across timeframes
         ema_bull = sum([ema_trend5 == 'bullish', ema_trend15 == 'bullish', ema_trend1h == 'bullish'])
         ema_bear = 3 - ema_bull
         if ema_bull == 3: score += 4
@@ -899,7 +903,6 @@ def generate_signal(symbol, timeframe='5m'):
         if ema_bear == 3: score -= 4
         elif ema_bear == 2: score -= 2
 
-        # MACD confirmation
         if mt5  == 'bullish': score += 2
         elif mt5  == 'bearish': score -= 2
         if mt15 == 'bullish': score += 1
@@ -907,11 +910,9 @@ def generate_signal(symbol, timeframe='5m'):
         if mt1h == 'bullish': score += 1
         elif mt1h == 'bearish': score -= 1
 
-        # Enhanced MACD histogram confirmation
         if hist5 > 0 and macd5_line > 0:   score += 1
         elif hist5 < 0 and macd5_line < 0: score -= 1
 
-        # Stochastic confirmation with extreme levels
         if   stoch_k < 20 and stoch_k > stoch_d: score += 2
         elif stoch_k < 25:                         score += 1
         elif stoch_k > 80 and stoch_k < stoch_d: score -= 2
@@ -919,34 +920,27 @@ def generate_signal(symbol, timeframe='5m'):
         if   stoch15_k < 25: score += 1
         elif stoch15_k > 75: score -= 1
 
-        # Volume confirmation
         if volume_trend == 'confirming': score += 2
 
-        # Candlestick pattern confirmation
         if   candle_pat == 'bullish_reversal': score += 3
         elif candle_pat == 'bearish_reversal': score -= 3
 
-        # Support/Resistance positioning
         if   sr_position == 'near_support':    score += 2
         elif sr_position == 'near_resistance': score -= 2
 
-        # Bollinger Band squeeze confirmation
         if bb_squeeze: score += 1
 
-        # Recent price momentum
         recent = closes5[-4:]
         ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i-1])
         downs  = len(recent) - 1 - ups
         if ups > downs:   score += 1
         elif downs > ups: score -= 1
 
-        # Direction alignment with trend
         raw_dir_pre = 'BUY' if score > 0 else ('SELL' if score < 0 else None)
         if raw_dir_pre == 'BUY'  and trend_bias == 'bullish': score += 1
-        if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score += 1
+        if raw_dir_pre == 'SELL' and trend_bias == 'bearish': score -= 1
 
-        # ENHANCED: Stricter minimum score requirements
-        MIN_SCORE = 5 if _lean_trend else 4  # Increased from 4/3
+        MIN_SCORE = 4 if _lean_trend else 3
         secondary_confirms = (
             (volume_trend == 'confirming') +
             (candle_pat != 'none') +
@@ -969,103 +963,118 @@ def generate_signal(symbol, timeframe='5m'):
 
         raw_direction = 'BUY' if score > 0 else 'SELL'
 
-        # Enhanced counter-trend flip logic
+        # FIX: Counter-trend flip — instead of rejecting, align direction with trend
+        # If score says BUY but trend is BEARISH: flip to SELL (trend is the authority)
+        # If score says SELL but trend is BULLISH: flip to BUY (trend is the authority)
+        # Only flip if score is weak (abs_score <= 4) — strong contrary scores still reject
+        # Strong contrary signal (abs_score > 6) against trend = genuinely confused market, skip
         if trend_bias == 'bullish' and raw_direction == 'SELL':
             if abs(score) > 6:
                 print(f'  [{symbol}] Strong SELL score {score} vs BULLISH trend — market confused, skip')
                 return None
+            # Flip to BUY aligned with trend — re-evaluate with bullish bias
             print(f'  [{symbol}] Score says SELL but trend BULLISH — flipping direction to BUY')
-            score = abs(score)
-            score += 1
+            score = abs(score)  # flip score to positive
+            score += 1  # trend alignment bonus
             raw_direction = 'BUY'
 
         if trend_bias == 'bearish' and raw_direction == 'BUY':
             if abs(score) > 6:
                 print(f'  [{symbol}] Strong BUY score {score} vs BEARISH trend — market confused, skip')
                 return None
+            # Flip to SELL aligned with trend — re-evaluate with bearish bias
             print(f'  [{symbol}] Score says BUY but trend BEARISH — flipping direction to SELL')
-            score = -abs(score)
-            score -= 1
+            score = -abs(score)  # flip score to negative
+            score -= 1  # trend alignment bonus
             raw_direction = 'SELL'
 
         direction = raw_direction
 
-        # ENHANCED: Stricter market condition alignment check
+        # FIX 19: Direction must agree with market_condition (not just 1h EMA trend_bias).
+        # trend_bias is EMA9/21/50-based and can lag; market_condition is based on the
+        # actual net move over the last 20 candles and reflects what price is doing right now.
+        # The counter-trend flip logic above only checks trend_bias, so it can flip a trade
+        # into the opposite direction of the real, current price action (e.g. FARTCOIN
+        # June 30: 1hBias=bullish flipped a SELL into a BUY while Market=trending_down,
+        # and the trade went straight to SL with zero TPs hit). This gate catches that
+        # disagreement and rejects the trade instead of trusting the laggier indicator.
         if market_condition == 'trending_down' and direction == 'BUY':
-            print(f'  [{symbol}] Direction BUY conflicts with Market=trending_down — skip')
+            print(f'  [{symbol}] Direction BUY conflicts with Market=trending_down — skip (trend_bias lagging)')
             return None
         if market_condition == 'trending_up' and direction == 'SELL':
-            print(f'  [{symbol}] Direction SELL conflicts with Market=trending_up — skip')
+            print(f'  [{symbol}] Direction SELL conflicts with Market=trending_up — skip (trend_bias lagging)')
             return None
 
-        # ENHANCED: Stricter dual-stochastic overbought/oversold filter
-        if direction == 'BUY' and stoch_k > 75 and stoch15_k > 75:  # Reduced from 78
-            print(f'  [{symbol}] Dual stochastic overbought ({stoch_k:.0f}/{stoch15_k:.0f}) — BUY rejected')
+        # FIX 2: Dual-stochastic overbought/oversold hard gate
+        # Buying when BOTH stoch5 and stoch15 are >78 = chasing a move already made
+        # Selling when BOTH stoch5 and stoch15 are <22 = chasing a move already made
+        # This directly blocked ONDO (stoch=81/84 BUY) and similar bad entries
+        if direction == 'BUY' and stoch_k > 78 and stoch15_k > 78:
+            print(f'  [{symbol}] Dual stochastic overbought ({stoch_k:.0f}/{stoch15_k:.0f}) — BUY rejected (chasing)')
             return None
-        if direction == 'SELL' and stoch_k < 25 and stoch15_k < 25:  # Increased from 22
-            print(f'  [{symbol}] Dual stochastic oversold ({stoch_k:.0f}/{stoch15_k:.0f}) — SELL rejected')
-            return None
-
-        # ENHANCED: Stricter RSI15 filter
-        if direction == 'BUY' and rsi15 > 65:  # Reduced from 67
-            print(f'  [{symbol}] RSI15={rsi15:.1f} overbought — BUY rejected')
-            return None
-        if direction == 'SELL' and rsi15 < 35:  # Increased from 33
-            print(f'  [{symbol}] RSI15={rsi15:.1f} oversold — SELL rejected')
+        if direction == 'SELL' and stoch_k < 22 and stoch15_k < 22:
+            print(f'  [{symbol}] Dual stochastic oversold ({stoch_k:.0f}/{stoch15_k:.0f}) — SELL rejected (chasing)')
             return None
 
-        # ENHANCED: Stricter middle zone filter
-        if sr_position == 'middle' and abs(score) < 6:  # Increased from 5
-            print(f'  [{symbol}] Price in middle zone — no structural backing, skip')
+        # FIX 5: RSI15 hard gate — overbought/oversold on 15m timeframe blocks entry
+        # RSI15>67 on a BUY = 15m price run already exhausted, reversal imminent
+        # RSI15<33 on a SELL = 15m already dumped hard, bounce risk high
+        # ONDO had RSI15=69.5 — this gate would have blocked that losing trade
+        if direction == 'BUY' and rsi15 > 67:
+            print(f'  [{symbol}] RSI15={rsi15:.1f} overbought — BUY rejected (15m exhausted)')
+            return None
+        if direction == 'SELL' and rsi15 < 33:
+            print(f'  [{symbol}] RSI15={rsi15:.1f} oversold — SELL rejected (15m exhausted)')
+            return None
+
+        if sr_position == 'middle' and abs(score) < 5:
+            print(f'  [{symbol}] Price in middle zone — no structural backing, skip (score={score})')
             return None
         if sr_position == 'middle' and volume_trend != 'confirming':
-            print(f'  [{symbol}] Middle zone trade requires confirming volume — skip')
+            print(f'  [{symbol}] Middle zone trade requires confirming volume — skip (vol={volume_trend})')
             return None
 
-        # ENHANCED: Stricter RSI5 overbought/oversold check
-        if direction == 'BUY' and rsi5 > 70:  # Reduced from 72
+        if direction == 'BUY' and rsi5 > 72:
             if rsi1h > 65:
                 print(f'  [{symbol}] RSI5={rsi5:.1f} overbought + RSI1h={rsi1h:.1f} — no BUY chase')
                 return None
             score -= 2
 
-        if direction == 'SELL' and rsi5 < 30:  # Increased from 28
+        if direction == 'SELL' and rsi5 < 28:
             if rsi1h < 40:
                 print(f'  [{symbol}] RSI5={rsi5:.1f} oversold + RSI1h={rsi1h:.1f} — no SELL chase')
                 return None
             score += 2
 
-        # ENHANCED: Stricter 1h RSI filter
-        if direction == 'SELL' and rsi1h < 42:  # Increased from 40
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} oversold on 1h — SELL rejected')
+        if direction == 'SELL' and rsi1h < 40:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} oversold on 1h — SELL rejected (bounce risk)')
             return None
-        if direction == 'BUY' and rsi1h > 58:  # Reduced from 65
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} overbought on 1h — BUY rejected')
+        if direction == 'BUY' and rsi1h > 65:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} overbought on 1h — BUY rejected (pullback risk)')
             return None
 
-        # Enhanced trend bias scoring
         if direction == 'SELL' and rsi1h > 55:
             score += 1
         if direction == 'BUY' and rsi1h < 45:
             score -= 1
 
-        # Enhanced minimum score after adjustments
-        if direction == 'BUY'  and score < 4:  # Increased from 3
+        if direction == 'BUY'  and score < 3:
             print(f'  [{symbol}] Score {score} too weak after RSI1h adjustment')
             return None
-        if direction == 'SELL' and score > -4:  # Decreased from -3
+        if direction == 'SELL' and score > -3:
             print(f'  [{symbol}] Score {score} too weak after RSI1h adjustment')
             return None
 
-        # Enhanced neutral zone filter
-        if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -5:  # Changed from -4
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-5, got {score}')
+        # FIX 3: Relaxed neutral zone gate — was score>=5/score<=-5, now >=4/<=-4
+        # Secondary confluence (volume, candle, stoch extreme, BB squeeze) still required
+        # This recovers valid setups with score 4 that were being wasted
+        if direction == 'SELL' and 40 <= rsi1h <= 55 and score > -4:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — SELL needs score<=-4, got {score}')
             return None
-        if direction == 'BUY' and 45 <= rsi1h <= 65 and score < 5:  # Changed from 4
-            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=5, got {score}')
+        if direction == 'BUY' and 45 <= rsi1h <= 65 and score < 4:
+            print(f'  [{symbol}] RSI1h={rsi1h:.1f} in neutral zone — BUY needs score>=4, got {score}')
             return None
 
-        # Enhanced confidence calculation
         abs_score = abs(score)
         if   abs_score >= 14: confidence = 92
         elif abs_score >= 12: confidence = 88
@@ -1077,7 +1086,6 @@ def generate_signal(symbol, timeframe='5m'):
         elif abs_score >= 3:  confidence = 65
         else:                 confidence = 60
 
-        # Enhanced confidence modifiers
         if volume_trend == 'confirming':   confidence = min(95, confidence + 3)
         if candle_pat != 'none':           confidence = min(95, confidence + 2)
         if ema_bull == 3 or ema_bear == 3: confidence = min(95, confidence + 3)
@@ -1095,7 +1103,6 @@ def generate_signal(symbol, timeframe='5m'):
         elif direction == 'BUY'  and stoch_k > 80: confidence = max(50, confidence - 3)
         elif direction == 'SELL' and stoch_k < 20: confidence = max(50, confidence - 3)
 
-        # Enhanced indicator extremes check
         indicator_extremes = (
             (direction == 'BUY'  and rsi5 < 40 and stoch_k < 30) or
             (direction == 'SELL' and rsi5 > 60 and stoch_k > 70)
@@ -1110,12 +1117,11 @@ def generate_signal(symbol, timeframe='5m'):
             print(f'  [{symbol}] Indicator extremes in middle zone with no momentum — skip')
             return None
 
-        # ENHANCED: Use global MIN_CONF constant instead of local variable
         if confidence < MIN_CONF:
             print(f'  [{symbol}] Confidence {confidence:.0f}% below minimum {MIN_CONF}% — skip')
             return None
 
-        # ENHANCED: Use global ATR_TP_MULTS constants instead of hardcoded values
+        # ATR-based TP/SL
         if atr_pct < 0.30:
             atr_sl_mult  = ATR_SL_MULT_LOW
             atr_tp_mults = ATR_TP_MULTS_LOW
@@ -1133,17 +1139,16 @@ def generate_signal(symbol, timeframe='5m'):
             sl_price  = current_price + (atr * atr_sl_mult)
             tp_prices = [current_price - (atr * m) for m in atr_tp_mults]
 
-        # Enhanced minimum SL distance
+        # FIX: Minimum absolute SL distance
+        # Prevents SL being placed only 1-2 ticks away on micro-price coins
         sl_dist_abs = abs(sl_price - current_price)
         min_sl_abs  = current_price * MIN_SL_DISTANCE_PCT
         if sl_dist_abs < min_sl_abs:
             sl_price = (current_price - min_sl_abs if direction == 'BUY'
                         else current_price + min_sl_abs)
-            print(f'  [{symbol}] SL too tight ({sl_dist_abs:.6f}) — expanded to min {MIN_SL_DISTANCE_PCT*100:.1f}% (${min_sl_abs:.6f})')
+            print(f'  [{symbol}] SL too tight ({sl_dist_abs:.6f}) — expanded to min 0.2% (${min_sl_abs:.6f})')
 
-        # Enhanced minimum TP1 distance
         tp1_dist_pct = abs(tp_prices[0] - current_price) / current_price if current_price > 0 else 0
-        MIN_TP1_PCT = 0.002  # Increased from 0.0015
         if tp1_dist_pct < MIN_TP1_PCT and tp1_dist_pct > 0:
             scale = MIN_TP1_PCT / tp1_dist_pct
             if direction == 'BUY':
@@ -1151,26 +1156,22 @@ def generate_signal(symbol, timeframe='5m'):
             else:
                 tp_prices = [current_price - (current_price - tp) * scale for tp in tp_prices]
 
-        # Enhanced maximum SL distance
-        MAX_SL_PCT = 0.012  # Increased from 0.010
-        sl_pct = abs(sl_price - current_price) / current_price if current_price > 0 else 0
-        if sl_pct > MAX_SL_PCT:
+        sl_dist_pct = abs(sl_price - current_price) / current_price if current_price > 0 else 0
+        if sl_dist_pct > MAX_SL_PCT:
             sl_price = (current_price * (1 - MAX_SL_PCT) if direction == 'BUY'
                         else current_price * (1 + MAX_SL_PCT))
 
-        # Enhanced R:R calculation
         tp_pcts = [abs(tp - current_price) / current_price for tp in tp_prices]
         sl_pct  = abs(sl_price - current_price) / current_price
 
-        # Enhanced R:R gate
+        # R:R gate
         tp1_dist = abs(tp_prices[0] - current_price)
         sl_dist  = abs(sl_price - current_price)
         rr_ratio = tp1_dist / sl_dist if sl_dist > 0 else 0
-        if rr_ratio < 1.2:  # Increased from 1.0
+        if rr_ratio < 1.0:
             print(f'  [{symbol}] R:R too poor: {rr_ratio:.2f}:1 — skip')
             return None
 
-        # Enhanced price update
         real_price = fetch_current_price(symbol)
         if real_price:
             current_price = real_price
@@ -1987,11 +1988,10 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         live_pnl_net = round(live_pnl_now - (total_fees_paid + est_exit_fee_remaining), 4)
         live_pnl_pct = round(pct_move * session_lev * 100, 4)
 
-        # ENHANCED: More intelligent trailing stop activation
-        if tps_hit >= 2 and not trailing_sl_active:  # Changed from TRAIL_SL_AFTER_TP (2)
+        if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
             sl_price = breakeven_sl
             trailing_sl_active = True
-            print(f'  [TRAIL SL] Activated after TP2 — SL moved to breakeven ${sl_price:.6f}')
+            print(f'  [TRAIL SL] Activated — SL moved to breakeven ${sl_price:.6f}')
             _set_active({'sl_price': round(sl_price, 6),
                          'message': f'Trailing SL active @ ${sl_price:.4f}'})
 
@@ -2052,7 +2052,6 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 remaining_qty = 0
             break
 
-        # ENHANCED: More aggressive partial profit taking
         tp_triggered = False
         for tp_idx in range(tps_hit, len(tp_prices)):
             tp_price = tp_prices[tp_idx]
@@ -2062,8 +2061,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 instr    = _get_qty_step(monitor_sym)
                 step     = instr['step']
                 min_qty  = instr['min_qty']
-                # ENHANCED: More aggressive partial closing
-                tp_frac  = [0.4, 0.3, 0.2, 0.1][tp_idx] if tp_idx < 4 else 1.0  # Changed from MOMENTUM_TP_FRACS
+                tp_frac  = MOMENTUM_TP_FRACS[tp_idx] if tp_idx < len(MOMENTUM_TP_FRACS) else 1.0
                 raw_q    = remaining_qty if tp_idx == len(tp_prices) - 1 else remaining_qty * tp_frac
                 # FIX 19: use _round_qty_to_step() instead of raw math.floor(raw_q/step)*step
                 close_qty = _round_qty_to_step(raw_q, step)
