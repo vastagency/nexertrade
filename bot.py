@@ -32,6 +32,29 @@
 #       remaining_qty=15.7 but the 4h-timeout close sent qty=15.6, and
 #       the leftover 0.1 AVAX only closed six hours later as a separate
 #       order visible on Bybit but invisible to the bot's own tracking.
+#  20.  Real Bybit-confirmed exit price used instead of a stale polled
+#       price when a native SL is detected as already having fired
+#       (both the periodic position-check path and the "already closed"
+#       / retCode 110017 path in close_trade now use this).
+#  21.  Fixed a misleading Gross/Net print that showed one chunk's gross
+#       next to the whole trade's cumulative net, making Net look bigger
+#       than Gross on trades with prior TP hits.
+#  22.  DOUBLE-LEVERAGE PNL BUG — every dollar PnL calculation was
+#       multiplying by leverage a second time. `quantity` is already
+#       sized as (usdt_amount * leverage / price), so quantity * price
+#       already equals the full leveraged notional. Multiplying by
+#       leverage again inflated every logged/displayed Gross and Net PnL
+#       figure by a factor of roughly the leverage used (3x trades
+#       showed ~3x the real PnL, 10x trades showed ~10x). This was the
+#       root cause of every "balance doesn't match the log" discrepancy
+#       found throughout testing (CRV, OP, SPX, SUSHI, MANA). Confirmed
+#       against the July 31 MANA/USDT trade: real balance moved -$0.29,
+#       log showed -$0.80 — exactly matching the 3x leverage on that
+#       trade. Fixed by removing the extra leverage multiplier from
+#       every dollar PnL calculation (momentum, pickup, and always-win
+#       sessions). The separate `live_pnl_pct` (return-on-margin %)
+#       calculation is a different, correct concept and still uses
+#       leverage intentionally — that one was left untouched.
 # ============================================
 
 import os
@@ -1907,7 +1930,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr and cr.get('success'):
                 cp = cr['close_price']
                 pc = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
+                real_pnl += pc * remaining_qty * entry_price  # FIX 25: leverage removed — qty already leveraged
                 total_fees_paid += (remaining_qty * cp) * BYBIT_FEE_RATE
                 print(f'  [TIMEOUT] Force closed @ ${cp:.6f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
@@ -1919,7 +1942,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr.get('success'):
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                real_pnl += pc * remaining_qty * entry_price * session_lev
+                real_pnl += pc * remaining_qty * entry_price  # FIX 25: leverage removed — qty already leveraged
                 total_fees_paid += (remaining_qty * cp) * BYBIT_FEE_RATE
                 print(f'  Stopped @ ${cp:.4f} | Gross PnL: ${real_pnl:.4f}')
             remaining_qty = 0
@@ -1962,7 +1985,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                         print(f'  [POSITION CHECK] Position closed on Bybit (native SL fired) '
                               f'@ ${real_exit_price:.6f} (Bybit-confirmed exit price)')
                         pc = (real_exit_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - real_exit_price) / entry_price
-                        sl_pnl = pc * remaining_qty * entry_price * session_lev
+                        sl_pnl = pc * remaining_qty * entry_price  # FIX 25: leverage removed — qty already leveraged
                         real_pnl += sl_pnl
                         total_fees_paid += (remaining_qty * real_exit_price) * BYBIT_FEE_RATE  # exit fee on this chunk
                         net_after = real_pnl - total_fees_paid
@@ -1978,7 +2001,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
         price_diff   = (live_price - entry_price) if trade_dir == 'BUY' else (entry_price - live_price)
         pct_move     = price_diff / entry_price if entry_price > 0 else 0
-        unrealized_pnl = round(pct_move * remaining_qty * entry_price * session_lev, 4)
+        unrealized_pnl = round(pct_move * remaining_qty * entry_price, 4)  # FIX 25: leverage removed
         # FIX 21: live_pnl_now/live_pnl_net now show TOTAL trade PnL (realized so far
         # from any TP closes + current unrealized on what's still open), not just the
         # unrealized leg in isolation. Fees are the actual cumulative fees paid plus an
@@ -2028,7 +2051,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             if cr and cr.get('success'):
                 cp  = cr['close_price']
                 pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                pnl = pc * remaining_qty * entry_price * session_lev
+                pnl = pc * remaining_qty * entry_price  # FIX 25: leverage removed — qty already leveraged
                 closed_qty = remaining_qty
                 real_pnl     += pnl
                 total_fees_paid += (closed_qty * cp) * BYBIT_FEE_RATE
@@ -2077,7 +2100,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
                 if cr.get('success'):
                     cp        = cr['close_price']
                     pc        = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
-                    pnl_chunk = pc * actual_closed * entry_price * session_lev
+                    pnl_chunk = pc * actual_closed * entry_price  # FIX 25: leverage removed — qty already leveraged
                     real_pnl      += pnl_chunk
                     chunk_exit_fee = (actual_closed * cp) * BYBIT_FEE_RATE
                     total_fees_paid += chunk_exit_fee
@@ -2275,12 +2298,12 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                 cr = close_trade(buy_sym, 'BUY', buy_remaining, exchange=_exch)
                 if cr.get('success'):
                     cp = cr['close_price']
-                    buy_pnl += ((cp - buy_entry) / buy_entry) * buy_remaining * buy_entry * LEVERAGE
+                    buy_pnl += ((cp - buy_entry) / buy_entry) * buy_remaining * buy_entry  # FIX 25: leverage removed — qty already leveraged
             if not sell_done and sell_remaining > 0:
                 cr = close_trade(sell_sym, 'SELL', sell_remaining, exchange=_exch)
                 if cr.get('success'):
                     cp = cr['close_price']
-                    sell_pnl += ((sell_entry - cp) / sell_entry) * sell_remaining * sell_entry * LEVERAGE
+                    sell_pnl += ((sell_entry - cp) / sell_entry) * sell_remaining * sell_entry  # FIX 25: leverage removed — qty already leveraged
             break
 
         eventlet.sleep(6)
@@ -2305,7 +2328,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                         cr = close_trade(buy_sym, 'BUY', close_q, exchange=_exch)
                         if cr.get('success'):
                             cp = cr['close_price']
-                            chunk = ((cp - buy_entry) / buy_entry) * close_q * buy_entry * LEVERAGE
+                            chunk = ((cp - buy_entry) / buy_entry) * close_q * buy_entry  # FIX 25: leverage removed — qty already leveraged
                             buy_pnl       += chunk
                             buy_remaining -= close_q
                             buy_tps_hit    = tp_idx + 1
@@ -2316,7 +2339,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                 cr = close_trade(buy_sym, 'BUY', buy_remaining, exchange=_exch)
                 if cr.get('success'):
                     cp = cr['close_price']
-                    buy_pnl += ((cp - buy_entry) / buy_entry) * buy_remaining * buy_entry * LEVERAGE
+                    buy_pnl += ((cp - buy_entry) / buy_entry) * buy_remaining * buy_entry  # FIX 25: leverage removed — qty already leveraged
                 buy_remaining = 0
                 buy_done = True
 
@@ -2333,7 +2356,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                         cr = close_trade(sell_sym, 'SELL', close_q, exchange=_exch)
                         if cr.get('success'):
                             cp = cr['close_price']
-                            chunk = ((sell_entry - cp) / sell_entry) * close_q * sell_entry * LEVERAGE
+                            chunk = ((sell_entry - cp) / sell_entry) * close_q * sell_entry  # FIX 25: leverage removed — qty already leveraged
                             sell_pnl       += chunk
                             sell_remaining -= close_q
                             sell_tps_hit    = tp_idx + 1
@@ -2344,7 +2367,7 @@ def execute_pickup_session(amount, timeframe_minutes=None,
                 cr = close_trade(sell_sym, 'SELL', sell_remaining, exchange=_exch)
                 if cr.get('success'):
                     cp = cr['close_price']
-                    sell_pnl += ((sell_entry - cp) / sell_entry) * sell_remaining * sell_entry * LEVERAGE
+                    sell_pnl += ((sell_entry - cp) / sell_entry) * sell_remaining * sell_entry  # FIX 25: leverage removed — qty already leveraged
                 sell_remaining = 0
                 sell_done = True
 
@@ -2441,7 +2464,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                     avg  = calc_avg_entry()
                     cp   = cr['close_price']
                     pc   = (cp - avg) / avg if direction == 'BUY' else (avg - cp) / avg
-                    real_pnl += pc * total_qty * avg * LEVERAGE
+                    real_pnl += pc * total_qty * avg  # FIX 25: leverage removed — qty already leveraged
             break
 
         eventlet.sleep(6)
@@ -2459,7 +2482,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
             if cr.get('success'):
                 cp    = cr['close_price']
                 pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                chunk = pc * total_qty * avg_entry * LEVERAGE
+                chunk = pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
                 real_pnl += chunk
                 won = chunk > 0
             break
@@ -2483,7 +2506,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                 if cr.get('success'):
                     cp    = cr['close_price']
                     pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                    real_pnl += pc * total_qty * avg_entry * LEVERAGE
+                    real_pnl += pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
                 break
             # Also add time-based emergency exit for Always-Win (4h max)
             aw_elapsed = _time_module.time() - aw_start_time if 'aw_start_time' in dir() else 0
@@ -2493,7 +2516,7 @@ def execute_always_win_session(amount, timeframe_minutes=None,
                 if cr.get('success'):
                     cp    = cr['close_price']
                     pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                    real_pnl += pc * total_qty * avg_entry * LEVERAGE
+                    real_pnl += pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
                 break
 
     real_pnl = round(real_pnl, 4)
