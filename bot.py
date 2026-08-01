@@ -1688,6 +1688,96 @@ def close_trade(symbol, direction, quantity, trade_mode='futures', exchange=None
 
 
 # ============================================
+# FIX 26: RISK-BASED POSITION SIZING + MAX-LOSS CAP +
+#          CONFIDENCE-SCALED LEVERAGE
+# ============================================
+RISK_PCT_PER_TRADE    = 0.015   # target: risk ~1.5% of balance if SL is hit
+MAX_RISK_PCT_HARD_CAP = 0.025   # absolute ceiling — never risk more than 2.5%,
+                                  # no matter what the sizing math above computes
+MIN_TRADE_USDT        = 5.0     # sane floor so a trade isn't rejected as too small
+EARLY_EXIT_SL_FRACTION = 0.7    # cut a failing trade at 70% of its SL distance
+EARLY_EXIT_MIN_MINUTES = 15     # only apply after giving the trade at least 15 min
+
+def _estimate_sl_distance_pct(atr_pct):
+    """
+    Estimate the SL distance (as a fraction, e.g. 0.006 = 0.6%) a trade with
+    this atr_pct will actually get, using the same band logic, floor, and
+    cap as the real post-entry SL calculation elsewhere in this file. Used
+    here to size the position BEFORE the trade is placed, so risk in
+    dollar terms is known in advance instead of being a side effect of a
+    flat, unrelated dollar amount.
+    """
+    if atr_pct < 0.30:
+        mult = ATR_SL_MULT_LOW
+    elif atr_pct > 0.5:
+        mult = ATR_SL_MULT_HIGH
+    else:
+        mult = ATR_SL_MULT_NORM
+    sl_pct = (atr_pct / 100.0) * mult
+    sl_pct = max(sl_pct, MIN_SL_DISTANCE_PCT)
+    sl_pct = min(sl_pct, MAX_SL_PCT)
+    return sl_pct
+
+
+def _size_trade_by_risk(available_usdt, user_amount, session_lev, confidence, atr_pct):
+    """
+    Replaces flat `min(amount, balance*0.95)` sizing with sizing that
+    targets a fixed dollar risk per trade, and scales leverage down for
+    weaker signals.
+
+    Why this exists: previously every trade risked whatever dollar amount
+    the SL distance happened to produce, with no relationship to account
+    size or signal quality. A trade with a wide SL on a small account
+    could risk a much larger % of balance than a trade with a tight SL —
+    pure accident of which pair got picked, not a deliberate risk choice.
+    This made losses inconsistent in size and let a single bad trade
+    disproportionately erase multiple good ones.
+
+    What changes:
+    - Leverage is scaled down (never up) for lower-confidence signals —
+      a 65-74% confidence trade gets less leverage than a 90% one.
+    - Margin (USDT sent to execute_real_trade) is sized backward from the
+      trade's expected SL distance, so the DOLLAR loss if SL is hit is
+      approximately RISK_PCT_PER_TRADE of current balance, every time.
+    - MAX_RISK_PCT_HARD_CAP is a second, independent ceiling — even if the
+      math above drifts (e.g. unusually tight or wide SL), the trade can
+      never be sized to risk more than this fraction of balance.
+    - Still respects the user's chosen `amount` as an upper bound — this
+      only ever sizes DOWN from what the user asked for, never up.
+
+    Returns (trade_usdt, effective_leverage).
+    """
+    if confidence >= 85:
+        lev_factor = 1.0
+    elif confidence >= 75:
+        lev_factor = 0.8
+    else:
+        lev_factor = 0.6
+    effective_lev = max(1, round(session_lev * lev_factor))
+
+    sl_distance_pct = _estimate_sl_distance_pct(atr_pct)
+
+    risk_amount      = available_usdt * RISK_PCT_PER_TRADE
+    notional_needed  = (risk_amount / sl_distance_pct) if sl_distance_pct > 0 else 0
+    risk_based_usdt  = (notional_needed / effective_lev) if effective_lev > 0 else user_amount
+
+    max_risk_amount  = available_usdt * MAX_RISK_PCT_HARD_CAP
+    max_notional     = (max_risk_amount / sl_distance_pct) if sl_distance_pct > 0 else 0
+    max_usdt_by_risk = (max_notional / effective_lev) if effective_lev > 0 else user_amount
+
+    trade_usdt = min(user_amount, risk_based_usdt, max_usdt_by_risk, available_usdt * 0.95)
+    trade_usdt = max(trade_usdt, min(MIN_TRADE_USDT, user_amount))
+    trade_usdt = round(trade_usdt, 2)
+
+    print(f'  [SIZING] Conf={confidence:.0f}% -> leverage {session_lev}x scaled to {effective_lev}x | '
+          f'Est. SL~{sl_distance_pct*100:.2f}% | Risk target ${risk_amount:.2f} '
+          f'({RISK_PCT_PER_TRADE*100:.1f}% of ${available_usdt:.2f}) | '
+          f'Sized: ${trade_usdt:.2f} (user cap ${user_amount:.2f})')
+
+    return trade_usdt, effective_lev
+
+
+# ============================================
 # 7. MOMENTUM SESSION — 1 TRADE ONLY
 # FIX: num_trades hardcoded to 1 — multi-trade removed entirely.
 # Reason: multiple trades multiply fee drag without proportional gain.
@@ -1790,8 +1880,9 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         _clear_active(user_id)
         return results
 
-    trade_usdt = min(amount, available_usdt * 0.95)
-    order      = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=session_lev)
+    trade_usdt, effective_lev = _size_trade_by_risk(
+        available_usdt, amount, session_lev, confidence, atr_pct)
+    order = execute_real_trade(sym, trade_dir, trade_usdt, trade_mode, exchange=_user_exchange, leverage=effective_lev)
 
     if not order['success']:
         print(f'  Entry failed: {order.get("error")}')
@@ -1849,7 +1940,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     print(f'  Entry: {quantity:.4f} {sym.split("/")[0]} @ ${entry_price:.4f}')
     print(f'  TP1=${tp_prices[0]:.4f}  TP2=${tp_prices[1]:.4f}  '
           f'TP3=${tp_prices[2]:.4f}  TP4=${tp_prices[3]:.4f}  SL=${sl_price:.4f}')
-    print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity*session_lev:.4f} gross to profit')
+    print(f'  Est. fees: ${estimate_fees(notional):.4f} | TP1 needs ${abs(tp_prices[0]-entry_price)*quantity:.4f} gross to profit')
 
     # FIX 4: Set native Bybit SL via trading-stop endpoint (server-side backup)
     # Our monitoring loop remains primary, but Bybit will close if server goes down
@@ -1882,7 +1973,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         'tp_prices':     [round(p, 6) for p in tp_prices],
         'sl_price':      round(sl_price, 6),
         'position_size': quantity,
-        'leverage':      session_lev,
+        'leverage':      effective_lev,  # FIX 26: actual leverage used, not user-selected raw value
         'status':        'monitoring',
         'message':       f'Monitoring {trade_dir} {sym} @ ${entry_price:.4f}',
     })
@@ -1892,7 +1983,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         socketio.emit('trade_entry', {
             'trade_num': 1, 'symbol': sym, 'direction': trade_dir,
             'price': entry_price, 'tp1': tp_prices[0], 'sl': sl_price,
-            'confidence': confidence, 'leverage': session_lev,
+            'confidence': confidence, 'leverage': effective_lev,  # FIX 26
         }, room=f'user_{user_id}')
     except Exception:
         pass
@@ -2009,7 +2100,7 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         live_pnl_now = round(real_pnl + unrealized_pnl, 4)
         est_exit_fee_remaining = (remaining_qty * live_price) * BYBIT_FEE_RATE
         live_pnl_net = round(live_pnl_now - (total_fees_paid + est_exit_fee_remaining), 4)
-        live_pnl_pct = round(pct_move * session_lev * 100, 4)
+        live_pnl_pct = round(pct_move * effective_lev * 100, 4)  # FIX 26: real leverage on this position
 
         if tps_hit >= TRAIL_SL_AFTER_TP and not trailing_sl_active:
             sl_price = breakeven_sl
@@ -2034,6 +2125,52 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         # BUY: price must fall BELOW sl_price, SELL: price must rise ABOVE sl_price
         # Previously buffer was added to sl_price causing immediate trigger after TP1 breakeven set
         sl_buffer = live_price * 0.0003
+        # FIX 26: EARLY EXIT ON FAILING TRADES
+        # If a trade has had real time to work (not just noise) and has
+        # travelled most of the way to its SL without ever hitting TP1,
+        # cut it here instead of waiting for the full SL distance. This
+        # directly targets the pattern of one bad trade erasing multiple
+        # good ones -- a trade that's clearly not working gets a smaller,
+        # earlier loss instead of the full SL-sized one. Only applies
+        # before TP1 and before trailing SL activates, since after that
+        # the trade has already proven itself and sl_price has moved.
+        if tps_hit == 0 and not trailing_sl_active:
+            elapsed_minutes = (_time_module.time() - session_start_time) / 60.0
+            if elapsed_minutes >= EARLY_EXIT_MIN_MINUTES:
+                full_sl_distance = abs(entry_price - sl_price)
+                early_trigger = (entry_price - full_sl_distance * EARLY_EXIT_SL_FRACTION) if trade_dir == 'BUY' \
+                                 else (entry_price + full_sl_distance * EARLY_EXIT_SL_FRACTION)
+                early_exit_hit = (live_price <= early_trigger) if trade_dir == 'BUY' else (live_price >= early_trigger)
+                if early_exit_hit:
+                    print(f'  [EARLY EXIT] {elapsed_minutes:.0f}min elapsed, 0 TPs hit, price at '
+                          f'{EARLY_EXIT_SL_FRACTION*100:.0f}% of SL distance @ ${live_price:.4f} — cutting early')
+                    _set_active({'status': 'closing', 'current_price': live_price,
+                                 'message': f'Early exit @ ${live_price:.4f} (failing trade, cut before full SL)'})
+                    cr = None
+                    for _attempt in range(3):
+                        cr = close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                        if cr.get('success'):
+                            break
+                        print(f'  Early exit close attempt {_attempt+1}/3 failed — retrying...')
+                        eventlet.sleep(2)
+
+                    if cr and cr.get('success'):
+                        cp  = cr['close_price']
+                        pc  = (cp - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - cp) / entry_price
+                        pnl = pc * remaining_qty * entry_price  # FIX 25: no double leverage
+                        closed_qty = remaining_qty
+                        real_pnl     += pnl
+                        total_fees_paid += (closed_qty * cp) * BYBIT_FEE_RATE
+                        remaining_qty = 0
+                        net = real_pnl - total_fees_paid
+                        print(f'  Early exit closed @ ${cp:.4f} | Gross: ${pnl:.4f} | Net after fees: ${net:.4f}')
+                    else:
+                        print(f'  [CRITICAL] Early exit close FAILED — manually close {monitor_sym} on Bybit!')
+                        _set_active({'status': 'error',
+                                     'message': f'CLOSE FAILED — manually close {monitor_sym} on Bybit!'})
+                        remaining_qty = 0
+                    break
+
         sl_hit = (live_price <= sl_price - sl_buffer) if trade_dir == 'BUY' else (live_price >= sl_price + sl_buffer)
         if sl_hit:
             sl_label = 'Trailing SL' if trailing_sl_active else 'SL'
