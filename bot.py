@@ -1839,16 +1839,22 @@ def execute_momentum_session(amount, timeframe_minutes=None,
 
     if not best_signal:
         print('  No signal on any pair yet -- will rescan in 30s...')
-        scan_wait = 0
-        MAX_SCAN_WAIT = 600
-        while not best_signal and not should_stop(user_id) and scan_wait < MAX_SCAN_WAIT:
+        import time as _time_module
+        scan_start_time = _time_module.time()
+        MAX_SCAN_WAIT = 600  # real seconds, measured against wall-clock time below
+        while not best_signal and not should_stop(user_id):
+            elapsed = _time_module.time() - scan_start_time
+            if elapsed >= MAX_SCAN_WAIT:
+                break
             eventlet.sleep(30)
-            scan_wait += 30
-            print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {scan_wait}s)...')
+            elapsed = _time_module.time() - scan_start_time
+            print(f'  Rescanning all {len(CRYPTO_PAIRS)} pairs (waited {elapsed:.0f}s of {MAX_SCAN_WAIT}s)...')
             _set_active({'status': 'scanning',
-                         'message': f'Scanning all pairs... ({scan_wait}s)'})
+                         'message': f'Scanning all pairs... ({elapsed:.0f}s)'})
             best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
         if not best_signal:
+            actual_wait = _time_module.time() - scan_start_time
+            print(f'  [SCAN TIMEOUT] Gave up after {actual_wait:.0f}s real time (target was {MAX_SCAN_WAIT}s)')
             results['message'] = 'No quality signal found after 10 minutes. Market conditions unclear — try again later.'
             _clear_active(user_id)
             return results
