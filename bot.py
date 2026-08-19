@@ -986,30 +986,18 @@ def generate_signal(symbol, timeframe='5m'):
 
         raw_direction = 'BUY' if score > 0 else 'SELL'
 
-        # FIX: Counter-trend flip — instead of rejecting, align direction with trend
-        # If score says BUY but trend is BEARISH: flip to SELL (trend is the authority)
-        # If score says SELL but trend is BULLISH: flip to BUY (trend is the authority)
-        # Only flip if score is weak (abs_score <= 4) — strong contrary scores still reject
-        # Strong contrary signal (abs_score > 6) against trend = genuinely confused market, skip
+        # A computed direction that disagrees with the broader 1h trend is a
+        # sign of a genuinely mixed/unclear market for that pair right now —
+        # skip it rather than overriding the score into the opposite
+        # direction. Forcing an override discards the only actual evidence
+        # this function produced and replaces it with a guess.
         if trend_bias == 'bullish' and raw_direction == 'SELL':
-            if abs(score) > 6:
-                print(f'  [{symbol}] Strong SELL score {score} vs BULLISH trend — market confused, skip')
-                return None
-            # Flip to BUY aligned with trend — re-evaluate with bullish bias
-            print(f'  [{symbol}] Score says SELL but trend BULLISH — flipping direction to BUY')
-            score = abs(score)  # flip score to positive
-            score += 1  # trend alignment bonus
-            raw_direction = 'BUY'
+            print(f'  [{symbol}] SELL score {score} vs BULLISH trend — disagreement, skip')
+            return None
 
         if trend_bias == 'bearish' and raw_direction == 'BUY':
-            if abs(score) > 6:
-                print(f'  [{symbol}] Strong BUY score {score} vs BEARISH trend — market confused, skip')
-                return None
-            # Flip to SELL aligned with trend — re-evaluate with bearish bias
-            print(f'  [{symbol}] Score says BUY but trend BEARISH — flipping direction to SELL')
-            score = -abs(score)  # flip score to negative
-            score -= 1  # trend alignment bonus
-            raw_direction = 'SELL'
+            print(f'  [{symbol}] BUY score {score} vs BEARISH trend — disagreement, skip')
+            return None
 
         direction = raw_direction
 
@@ -2524,155 +2512,6 @@ def execute_pickup_session(amount, timeframe_minutes=None,
 
 
 # ============================================
-# 9. ALWAYS WIN — Position Averaging Strategy
-# ============================================
-def execute_always_win_session(amount, timeframe_minutes=None,
-                                user_id=None, user_balance=None,
-                                user_api_key=None, user_api_secret=None,
-                                user_exchange=None):
-    results = {
-        'strategy':     'always_win',
-        'trades':       [],
-        'total_trades': 0,
-        'wins':         0,
-        'losses':       0,
-        'net_pnl':      0.0,
-        'win_rate':     0.0,
-        'real_trading': True,
-        'trade_mode':   'futures'
-    }
-
-    clear_stop(user_id)
-    _exch = user_exchange
-
-    if user_balance is not None and user_balance > 0:
-        available_usdt = user_balance
-    else:
-        return {**results, 'real_trading': False, 'error': 'Could not fetch balance.'}
-
-    MAX_ADDS    = 5
-    ADD_SPACING = 1.5
-    fee_rate    = BYBIT_FEE_RATE
-    slice_amt   = amount / MAX_ADDS
-
-    best_signal = select_best_pair(CRYPTO_PAIRS, user_id=user_id)
-    if best_signal is None:
-        _clear_active(user_id)
-        results['message'] = 'No quality setup found. Try again shortly.'
-        return results
-
-    sym       = best_signal['symbol']
-    direction = best_signal['direction']
-    atr       = best_signal.get('atr', 0.001)
-    bybit_sym = sym.replace('/', '').replace(':USDT', '')
-    if not bybit_sym.endswith('USDT'):
-        bybit_sym += 'USDT'
-
-    positions = []
-    real_pnl  = 0.0
-    adds_done = 0
-    won       = False
-
-    order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch)
-    if not order['success']:
-        _clear_active(user_id)
-        results['message'] = f'Initial entry failed: {order.get("error")}'
-        return results
-
-    positions.append({'price': order['price'], 'qty': order['quantity']})
-    adds_done = 1
-    import time as _time_module
-    aw_start_time = _time_module.time()  # VULN-002: track session start for timeout
-
-    def calc_avg_entry():
-        total_cost = sum(p['price'] * p['qty'] for p in positions)
-        total_qty  = sum(p['qty'] for p in positions)
-        return total_cost / total_qty if total_qty > 0 else 0
-
-    def calc_total_qty():
-        return sum(p['qty'] for p in positions)
-
-    while True:
-        if should_stop(user_id):
-            total_qty = calc_total_qty()
-            if total_qty > 0:
-                cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
-                if cr.get('success'):
-                    avg  = calc_avg_entry()
-                    cp   = cr['close_price']
-                    pc   = (cp - avg) / avg if direction == 'BUY' else (avg - cp) / avg
-                    real_pnl += pc * total_qty * avg  # FIX 25: leverage removed — qty already leveraged
-            break
-
-        eventlet.sleep(6)
-        live_price = _get_price(sym, 'futures')
-        if not live_price:
-            continue
-
-        avg_entry = calc_avg_entry()
-        total_qty = calc_total_qty()
-        tp_price  = avg_entry + atr * 1.5 if direction == 'BUY' else avg_entry - atr * 1.5
-
-        tp_hit = live_price >= tp_price if direction == 'BUY' else live_price <= tp_price
-        if tp_hit:
-            cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
-            if cr.get('success'):
-                cp    = cr['close_price']
-                pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                chunk = pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
-                real_pnl += chunk
-                won = chunk > 0
-            break
-
-        price_vs_avg  = (avg_entry - live_price) / avg_entry if direction == 'BUY' else (live_price - avg_entry) / avg_entry
-        add_threshold = ADD_SPACING * (adds_done * 0.5)
-        should_add    = price_vs_avg >= (atr / avg_entry) * add_threshold if avg_entry > 0 else False
-
-        if should_add and adds_done < MAX_ADDS:
-            add_order = execute_real_trade(sym, direction, slice_amt, 'futures', exchange=_exch)
-            if add_order['success']:
-                positions.append({'price': add_order['price'], 'qty': add_order['quantity']})
-                adds_done += 1
-        elif adds_done >= MAX_ADDS:
-            # VULN-002 FIX: Emergency close if price moves >2x ATR beyond max adds
-            # Prevents zombie loop bleeding indefinitely
-            emergency_threshold = (atr / avg_entry) * MAX_ADDS * 1.5 if avg_entry > 0 else False
-            if emergency_threshold and price_vs_avg > emergency_threshold:
-                print(f'  [ALWAYS-WIN] Emergency close — price moved {price_vs_avg:.3%} beyond avg, max adds reached')
-                cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
-                if cr.get('success'):
-                    cp    = cr['close_price']
-                    pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                    real_pnl += pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
-                break
-            # Also add time-based emergency exit for Always-Win (4h max)
-            aw_elapsed = _time_module.time() - aw_start_time if 'aw_start_time' in dir() else 0
-            if aw_elapsed > 4 * 3600:
-                print(f'  [ALWAYS-WIN] 4h timeout — emergency close')
-                cr = close_trade(bybit_sym, direction, total_qty, exchange=_exch)
-                if cr.get('success'):
-                    cp    = cr['close_price']
-                    pc    = (cp - avg_entry) / avg_entry if direction == 'BUY' else (avg_entry - cp) / avg_entry
-                    real_pnl += pc * total_qty * avg_entry  # FIX 25: leverage removed — qty already leveraged
-                break
-
-    real_pnl = round(real_pnl, 4)
-    won      = real_pnl > 0
-    _clear_active(user_id)
-    results['trades'].append({'index': 1, 'symbol': sym, 'direction': direction,
-                               'strategy': 'always_win', 'confidence': best_signal['confidence'],
-                               'rsi': best_signal['rsi'], 'profit': real_pnl,
-                               'won': won, 'price': positions[0]['price'] if positions else 0,
-                               'real_order': True})
-    results['total_trades'] = 1
-    results['net_pnl']      = real_pnl
-    results['wins']         = 1 if won else 0
-    results['losses']       = 0 if won else 1
-    results['win_rate']     = 100.0 if won else 0.0
-    return results
-
-
-# ============================================
 # 10. COMPOUNDING ENGINE
 # ============================================
 def apply_compounding(base_amount, session_pnl, compound_rate=0.5, min_amount=10, max_amount=200):
@@ -2777,14 +2616,6 @@ def execute_session(amount, timeframe_minutes, strategy='auto', force=False, sym
                                         user_api_key=user_api_key,
                                         user_api_secret=user_api_secret,
                                         user_exchange=user_futures if use_user_account else None)
-
-    elif strategy in ('always_win', 'aw'):
-        result = execute_always_win_session(amount, timeframe_minutes,
-                                             user_id=user_id,
-                                             user_balance=_user_live_bal,
-                                             user_api_key=user_api_key,
-                                             user_api_secret=user_api_secret,
-                                             user_exchange=user_futures if use_user_account else None)
 
     elif strategy in ('auto', 'auto_best'):
         result = execute_auto_best_session(amount, timeframe_minutes,

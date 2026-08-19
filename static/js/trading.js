@@ -75,8 +75,7 @@ document.querySelectorAll('.tf-btn').forEach(btn => {
 const strategyHints = {
   auto:       'Bot scans all 25 pairs and picks the best opportunity automatically.',
   momentum:   'Multi-timeframe RSI + EMA + MACD signals. Trend-aware direction. Best in trending markets.',
-  pickup:     'Pick Up Trade: opens BUY + SELL simultaneously. Whichever direction price moves, one side profits.',
-  always_win: 'Always Win: averages into position if price moves against you (max 5 adds). Recovers when price reverses.'
+  pickup:     'Pick Up Trade: opens BUY + SELL simultaneously. Whichever direction price moves, one side profits.'
 };
 
 document.querySelectorAll('.strategy-btn').forEach(btn => {

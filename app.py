@@ -778,7 +778,7 @@ def api_bot_execute():
             except (ValueError, TypeError):
                 user_leverage = None
 
-        if strategy not in ('auto', 'momentum', 'pickup', 'always_win'):
+        if strategy not in ('auto', 'momentum', 'pickup'):
             strategy = 'momentum'
 
         # FIX: Always 1 trade per session — fee drag makes multi-trade unprofitable
@@ -809,7 +809,7 @@ def api_bot_execute():
         # If generate_signal returns None (neutral 1h trend = no setup on that pair),
         # that is NOT a weak signal — the session will scan all 25 pairs instead.
         # Never block session start just because the pre-check pair has no setup.
-        if not force and strategy in ('momentum', 'auto', 'pickup', 'always_win'):
+        if not force and strategy in ('momentum', 'auto', 'pickup'):
             try:
                 from bot import generate_signal
                 check_symbol = selected_symbol if selected_symbol else 'XRP/USDT'
