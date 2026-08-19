@@ -717,7 +717,11 @@ def detect_market_condition(df):
     net_move     = abs(recent[-1] - recent[0])
     total_range  = max(recent) - min(recent)
     trend_ratio  = net_move / total_range if total_range > 0 else 0
-    if trend_ratio > 0.6:
+    # Standard efficiency-ratio cutoff. 0.6 (previous value) requires price to
+    # move almost in a straight line with virtually no pullback over 20 candles
+    # — a condition real trends rarely satisfy, which caused nearly every pair
+    # to be misclassified as 'ranging' even during genuine directional moves.
+    if trend_ratio > 0.35:
         return 'trending_up' if recent[-1] > recent[0] else 'trending_down'
     return 'ranging'
 
