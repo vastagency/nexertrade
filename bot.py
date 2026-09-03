@@ -1998,7 +1998,8 @@ def execute_momentum_session(amount, timeframe_minutes=None,
     won                = False
     trailing_sl_active = False
     consecutive_errors = 0
-    MAX_CONSECUTIVE_ERRORS = 10
+    MAX_CONSECUTIVE_ERRORS = 4  # FIX 27: was 10 — that let a leveraged position sit
+                                # unmonitored for 60+ seconds before any emergency action
     import time as _time_module
     session_start_time = _time_module.time()
     MAX_SESSION_SECONDS = 4 * 60 * 60
@@ -2044,11 +2045,43 @@ def execute_momentum_session(amount, timeframe_minutes=None,
             consecutive_errors += 1
             print(f'  Price fetch returned None ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})')
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                try:
-                    close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-                except Exception as _ce:
-                    print(f'  [MONITOR] Emergency close failed: {_ce}')
-                remaining_qty = 0
+                print(f'  [MONITOR] Price fetch failing repeatedly — emergency close')
+                _set_active({'status': 'closing',
+                             'message': 'Price fetch failing repeatedly — attempting emergency close'})
+                emergency_closed = False
+                for _emg_attempt in range(5):
+                    try:
+                        close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                    except Exception as _ce:
+                        print(f'  [MONITOR] Emergency close attempt {_emg_attempt+1}/5 failed: {_ce}')
+                    try:
+                        pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
+                            'category': 'linear', 'symbol': monitor_sym,
+                        }, _user_exchange or bybit_futures)
+                        if pos_resp.get('retCode') == 0:
+                            positions = pos_resp.get('result', {}).get('list', [])
+                            if sum(float(p.get('size', 0)) for p in positions) == 0:
+                                emergency_closed = True
+                                break
+                    except Exception:
+                        pass
+                    eventlet.sleep(3)
+
+                if emergency_closed:
+                    real_exit_price = _get_real_exit_price(
+                        monitor_sym, _user_exchange or bybit_futures, entry_price)
+                    pc = (real_exit_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - real_exit_price) / entry_price
+                    real_pnl += pc * remaining_qty * entry_price
+                    total_fees_paid += (remaining_qty * real_exit_price) * BYBIT_FEE_RATE
+                    print(f'  [MONITOR] Emergency close confirmed by Bybit @ ${real_exit_price:.6f}')
+                    remaining_qty = 0
+                else:
+                    print(f'  [CRITICAL] Could not confirm {monitor_sym} closed — position may STILL BE OPEN on Bybit.')
+                    _set_active({'status': 'error',
+                                 'message': f'CRITICAL: price fetch failing and emergency close '
+                                            f'could not be confirmed — check {monitor_sym} on Bybit NOW '
+                                            f'and close manually if still open.'})
+                    remaining_qty = 0
             continue
         consecutive_errors = 0
 
@@ -2291,12 +2324,62 @@ def execute_momentum_session(amount, timeframe_minutes=None,
         print(f'  [MONITOR ERROR #{consecutive_errors}] {_loop_err}')
         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
             print(f'  [MONITOR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — emergency close')
-            try:
-                close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
-            except Exception as _ce:
-                print(f'  [MONITOR] Emergency close also failed: {_ce}')
-            remaining_qty = 0
+            _set_active({'status': 'closing',
+                         'message': 'Repeated monitoring errors — attempting emergency close'})
+
+            # FIX 27: don't trust a single close_trade() call to mean the
+            # position is actually gone. Retry the close itself, and after
+            # each attempt (successful or not) ask Bybit directly whether
+            # the position still exists. Previously this block set
+            # remaining_qty=0 and broke out unconditionally, even if
+            # close_trade() raised — so a genuinely stuck position (the
+            # thing that caused the repeated errors in the first place)
+            # would be silently treated as closed while it stayed open
+            # and fully unmonitored on Bybit.
+            emergency_closed = False
+            for _emg_attempt in range(5):
+                try:
+                    close_trade(monitor_sym, trade_dir, remaining_qty, exchange=_user_exchange)
+                except Exception as _ce:
+                    print(f'  [MONITOR] Emergency close attempt {_emg_attempt+1}/5 failed: {_ce}')
+
+                try:
+                    pos_resp = _bybit_signed_request('GET', '/v5/position/list', {
+                        'category': 'linear', 'symbol': monitor_sym,
+                    }, _user_exchange or bybit_futures)
+                    if pos_resp.get('retCode') == 0:
+                        positions = pos_resp.get('result', {}).get('list', [])
+                        bybit_qty = sum(float(p.get('size', 0)) for p in positions)
+                        if bybit_qty == 0:
+                            emergency_closed = True
+                            break
+                except Exception as _pe:
+                    print(f'  [MONITOR] Position check during emergency close failed: {_pe}')
+
+                eventlet.sleep(3)
+
+            if emergency_closed:
+                real_exit_price = _get_real_exit_price(
+                    monitor_sym, _user_exchange or bybit_futures, live_price if 'live_price' in dir() else entry_price)
+                pc = (real_exit_price - entry_price) / entry_price if trade_dir == 'BUY' else (entry_price - real_exit_price) / entry_price
+                emg_pnl = pc * remaining_qty * entry_price
+                real_pnl += emg_pnl
+                total_fees_paid += (remaining_qty * real_exit_price) * BYBIT_FEE_RATE
+                print(f'  [MONITOR] Emergency close confirmed by Bybit @ ${real_exit_price:.6f} | '
+                      f'Gross: ${real_pnl:.4f}')
+                remaining_qty = 0
+            else:
+                # Position may still be open on Bybit and we cannot confirm
+                # otherwise. Do NOT report this as closed — surface it loudly
+                # instead so the user can intervene manually.
+                print(f'  [CRITICAL] Could not confirm {monitor_sym} closed after repeated errors '
+                      f'and 5 emergency close attempts — position may STILL BE OPEN on Bybit.')
+                _set_active({'status': 'error',
+                             'message': f'CRITICAL: monitoring failed repeatedly and emergency close '
+                                        f'could not be confirmed — check {monitor_sym} on Bybit NOW '
+                                        f'and close manually if still open.'})
             break
+
         eventlet.sleep(6)
 
     real_pnl = round(real_pnl, 4)
