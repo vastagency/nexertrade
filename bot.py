@@ -202,7 +202,13 @@ MOMENTUM_TP_FRACS = [0.30, 0.25, 0.25, 0.20]
 PICKUP_TP_FRAC    = 0.333
 AW_TP_FRAC        = 1.0
 
-TRAIL_SL_AFTER_TP = 2
+TRAIL_SL_AFTER_TP = 1  # FIX 28: was 2 — a TP1-only win could still lose net
+                       # overall because the remaining 70% of the position
+                       # stayed exposed to the original (non-breakeven) stop
+                       # all the way until TP2. Moving this to 1 means any
+                       # locked-in profit protects the rest of the trade
+                       # immediately: worst case becomes "small win, then
+                       # flat," not "small win, then net loss."
 BREAKEVEN_BUFFER  = 0.004
 
 # FIX 20: SL multipliers widened — was 1.8/1.6/1.4, now 2.6/2.2/1.9.
